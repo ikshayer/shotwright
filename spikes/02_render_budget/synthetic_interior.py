@@ -25,6 +25,9 @@ from mathutils import Vector
 argv = sys.argv[sys.argv.index("--") + 1:]
 OUT_DIR = os.path.abspath(argv[0]).replace("\\", "/")
 MASTER_FRAMES = int(argv[1]) if len(argv) > 1 else 0
+# greybox: same geometry and camera, no materials, flat shading - the FR-29
+# blocking preset, and the conditioning input for 9's geometry-conditioned path
+GREYBOX = "greybox" in argv
 
 MASTER_W, MASTER_H = 1280, 960
 MASTER_FPS = 60
@@ -165,6 +168,21 @@ log("mesh_objects", len(mesh_objs))
 log("triangles", sum(sum(max(len(p.vertices) - 2, 0) for p in o.data.polygons) for o in mesh_objs))
 log("materials", len(bpy.data.materials))
 
+if GREYBOX:
+    # One flat, unshaded-ish grey on everything. Geometry, camera and lights
+    # are untouched, so the result differs from the dressed render only in
+    # surfacing - which is what makes it a fair conditioning input.
+    flat = bpy.data.materials.new("GreyBox")
+    flat.use_nodes = True
+    bsdf = flat.node_tree.nodes["Principled BSDF"]
+    bsdf.inputs["Base Color"].default_value = (0.55, 0.55, 0.55, 1.0)
+    bsdf.inputs["Roughness"].default_value = 0.9
+    bsdf.inputs["Specular IOR Level"].default_value = 0.1
+    for o in [x for x in scene.objects if x.type == "MESH"]:
+        o.data.materials.clear()
+        o.data.materials.append(flat)
+    log("greybox", True)
+
 # --- engine ---
 engine = None
 for candidate in ("BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"):
@@ -225,6 +243,19 @@ try:
     log("gpu_renderer", gpu.platform.renderer_get())
 except Exception as exc:
     log("gpu_renderer", "unavailable (%s)" % exc)
+
+if GREYBOX:
+    scene.render.resolution_x, scene.render.resolution_y = MASTER_W, MASTER_H
+    scene.eevee.taa_render_samples = 16
+    set_feature("use_raytracing", False)
+    scene.render.filepath = OUT_DIR + "/greybox_1280x960.png"
+    t = time.time()
+    bpy.ops.render.render(write_still=True)
+    log("greybox_seconds", round(time.time() - t, 2))
+    with open(OUT_DIR + "/synthetic_report.json", "w") as fh:
+        json.dump(report, fh, indent=2, sort_keys=True)
+    print("PROBE DONE")
+    raise SystemExit(0)
 
 # A: flat - no raytracing, no volumetrics
 log("applied_raytracing_off", set_feature("use_raytracing", False))

@@ -1,0 +1,40 @@
+{
+  "prompt": "grainy black and white security camera still of a cluttered room, overhead corner view, cheap CCTV optics, flat practical ceiling lighting, crushed blacks, low detail, mundane",
+  "resolution": [
+    1280,
+    960
+  ],
+  "runs": [
+    {
+      "completed": true,
+      "files": [
+        "spike04_00006_.png"
+      ],
+      "name": "img2img-greybox-d6of8",
+      "peak_gb": 11.58,
+      "release": {
+        "floor_gb": 1.86,
+        "released": true,
+        "seconds": 0.5,
+        "used_gb": 1.61
+      },
+      "seconds": 60.6
+    },
+    {
+      "completed": true,
+      "files": [
+        "spike04_00007_.png"
+      ],
+      "name": "img2img-greybox-d7of8",
+      "peak_gb": 11.67,
+      "release": {
+        "floor_gb": 1.86,
+        "released": true,
+        "seconds": 0.5,
+        "used_gb": 1.61
+      },
+      "seconds": 64.3
+    }
+  ],
+  "seed": 20051114
+}
