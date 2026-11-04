@@ -125,15 +125,18 @@ def _invalid(message: str, *, cause: BaseException | None = None) -> JobError:
     return JobError(JobErrorKind.INVALID_MANIFEST, message, cause=cause)
 
 
-def _find_absolute_paths(value: Any, where: str = "$") -> list[str]:
-    """Locations of string values that look like absolute paths (they would break AT-09)."""
-    if isinstance(value, str):
-        return [where] if _ABSOLUTE_PATH.match(value) else []
-    if isinstance(value, dict):
-        return [p for k, v in value.items() for p in _find_absolute_paths(v, f"{where}.{k}")]
-    if isinstance(value, list):
-        return [p for i, v in enumerate(value) for p in _find_absolute_paths(v, f"{where}[{i}]")]
-    return []
+def _declared_paths(data: dict[str, Any], entity_type: type[Entity]) -> list[tuple[str, str]]:
+    """(field, value) for every declared path field holding a string."""
+    found: list[tuple[str, str]] = []
+    for name in _PATH_FIELDS.get(entity_type, ()):
+        value = data.get(name)
+        if isinstance(value, str) and value:
+            found.append((name, value))
+        elif isinstance(value, list):
+            found.extend(
+                (f"{name}[{i}]", v) for i, v in enumerate(value) if isinstance(v, str) and v
+            )
+    return found
 
 
 def _approval_is_binding(record: VersionedEntity) -> bool:
@@ -393,6 +396,9 @@ class ProjectStore:
         except json.JSONDecodeError as exc:
             raise _invalid(f"{relative} is not valid JSON: {exc}", cause=exc) from exc
         self._require_readable_schema(relative, data)
+        # Also on load: a project folder can be hand-edited or arrive from an
+        # export, so a stored path is untrusted input until containment says so.
+        self._check_path_fields(data, cls)
         store_version = 1
         if not _layout_for(cls).versioned:
             store_version = data.pop("_store_version", 1)
@@ -426,16 +432,29 @@ class ProjectStore:
         data = entity.model_dump(mode="json")
         if store_version is not None:
             data["_store_version"] = store_version
-        absolute = _find_absolute_paths({
-            name: data[name] for name in _PATH_FIELDS.get(type(entity), ())
-        })
-        if absolute:
-            raise _invalid(
-                f"{type(entity).__name__} holds absolute paths at {', '.join(absolute)}; "
-                "store project-relative paths so the project reopens standalone"
-            )
+        self._check_path_fields(data, type(entity))
         text = json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
         self._atomic_write(relative, text)
+
+    def _check_path_fields(self, data: dict[str, Any], entity_type: type[Entity]) -> None:
+        r"""Validate declared path fields through containment, not a local regex.
+
+        FR-25 and CLAUDE.md invariant 4: one helper decides what a safe path is.
+        A second, weaker check here was a validator differential - it matched
+        only a leading drive letter, UNC prefix or "/", so it passed
+        "..\..\outside.blend", drive-relative "C:foo" and reserved device
+        names, all of which ProjectRoot rejects. These values are opened later,
+        so the store must apply the same rule, on write and on load.
+        """
+        for field_name, value in _declared_paths(data, entity_type):
+            try:
+                self._root.resolve(value)
+            except ContainmentError as error:
+                raise _invalid(
+                    f"{entity_type.__name__}.{field_name} is not a safe project-relative "
+                    f"path ({error.problem}); the project must reopen standalone (AT-09)",
+                    cause=error,
+                ) from error
 
     def _atomic_write(self, relative: str, text: str) -> None:
         """Write a sibling temp file, fsync it, then rename over the target.

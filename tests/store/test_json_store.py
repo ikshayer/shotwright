@@ -652,3 +652,46 @@ def test_stores_for_same_resolved_root_serialize_writes(store, root, operation):
         )
         assert conflict.actual == (2 if operation == "revise" else 1)
     assert not list(root.path.rglob("*.tmp"))
+
+
+class TestPathFieldContainment:
+    r"""Declared path fields go through containment, not a local regex.
+
+    The store previously used its own `^(?:[A-Za-z]:[\/]|\\|/)` check, which
+    caught absolute paths but passed traversal, drive-relative and reserved
+    device names. Those values are opened later, so the weaker check was a
+    validator differential (FR-25, CLAUDE.md invariant 4).
+    """
+
+    @pytest.mark.parametrize(
+        "bad_path",
+        [
+            "../../../outside.blend",
+            r"..\..\outside.blend",
+            "C:evil.blend",
+            r"C:\absolute.blend",
+            r"\\server\share\x.blend",
+            "/etc/passwd",
+            "CON",
+            "locations/../../escape.blend",
+        ],
+    )
+    def test_unsafe_path_field_is_rejected_on_write(self, store, bad_path):
+        with pytest.raises(JobError) as caught:
+            store.create(Location(location_id="L-bad", blend_path=bad_path))
+        assert caught.value.kind is JobErrorKind.INVALID_MANIFEST
+
+    def test_safe_relative_path_is_accepted(self, store):
+        store.create(Location(location_id="L-ok", blend_path="locations/hall.blend"))
+        assert store.load(Location, "L-ok").blend_path == "locations/hall.blend"
+
+    def test_unsafe_path_is_rejected_on_load(self, store, tmp_path):
+        """A hand-edited or imported project folder is untrusted input."""
+        store.create(Location(location_id="L-edit", blend_path="locations/hall.blend"))
+        target = next(tmp_path.rglob("locations/L-edit/v0001.json"))
+        payload = json.loads(target.read_text(encoding="utf-8"))
+        payload["blend_path"] = "../../../outside.blend"
+        target.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(JobError) as caught:
+            store.load(Location, "L-edit")
+        assert caught.value.kind is JobErrorKind.INVALID_MANIFEST
