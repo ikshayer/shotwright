@@ -1,101 +1,57 @@
-# CCTV Analog Horror Production Pipeline
+# CCTV Analog Horror Production Pipeline — Claude
 
-A local, agent-operated pipeline that produces short analog-horror episodes shot as if
-through cheap security cameras. Blender renders a neutral master; a versioned FFmpeg
-profile degrades it; a creator approves shot by shot.
+**Read `AGENTS.md` first.** It is the shared contract for every agent in this repository:
+the non-negotiable invariants, this machine's measured facts, the working rules and the
+layout. It is deliberately the only copy — do not restate its rules here, and if this
+file and `AGENTS.md` ever disagree, `AGENTS.md` wins.
 
-**Authoritative spec:** `CCTV_Analog_Horror_Production_Pipeline_PRD_v1.2.md`. Section and
-FR numbers below refer to it. Where this file and the PRD disagree, the PRD wins — tell
-the human rather than resolving it yourself.
+What follows is Claude-specific, and additional to it.
 
-**Measured facts live in §8.4 and `spikes/*/FINDINGS.md`.** Five Phase 0 spikes measured
-this machine. Do not re-derive those numbers from documentation, and do not invent one:
-if a value is needed and not recorded, say so.
+## Orchestration
 
-## Non-negotiable invariants
+Work is delegated across models. The main session adjudicates; it does not accept a
+subagent's report as fact.
 
-These are load-bearing. Violating one silently produces a system that looks correct.
+- **Opus (main session)** — architectural design, entity invariants, concurrency
+  semantics, and all adjudication of review findings.
+- **Sonnet** — implementation, tests, moderate refactors.
+- **Haiku** — repo facts, mechanical edits, formatting, running tests and reporting.
+- **GPT via `codex exec`** — independent review, and implementation where it already
+  holds the context. A different model family has different blind spots, which is the
+  point; it has repeatedly found defects Claude agents read past.
 
-1. **Project-local JSON is the source of truth. SQLite is a rebuildable index and job
-   queue** (§10.0). Never make SQLite authoritative; an exported package must reopen
-   standalone (AT-09).
-2. **Concurrency lives at the API layer**, not the storage engine: `expected_version` on
-   every mutation, 409 on conflict.
-3. **Versioning is append-only.** New versions carry `supersedes`; artifacts are retained.
-   Approval binds to `(shot_id, version)`; upstream change moves downstream to `stale`,
-   it does not delete.
-4. **Every filesystem write passes through the single path-containment helper** (FR-25).
-   No exceptions, including temp files and logs.
-5. **Determinism is a product feature** (FR-21, AT-05). Stochastic stages take a seed
-   derived from `(shot_id, degrade_seed)`, **clamped to each filter's accepted range** —
-   FFmpeg's `noise` caps `all_seed` at `INT32_MAX` and fails hard above it.
-6. **`CameraProfile` fields are individually tagged post-only or rebuild-triggering**
-   (§4.4). Post-only changes must never trigger a re-render; rebuild-triggering changes
-   must invalidate through the dependency graph.
-7. **Job failures are a closed enumeration** (`JobError`, FR-27), each classified
-   retryable or terminal with a remediation hint. Startup and request validation
-   failures are a *separate* family (containment, settings, version conflict) with their
-   own types, mapped at the API boundary — they have no retry policy and do not belong in
-   the job taxonomy. Never swallow an error, never return a silent fallback.
-8. **Degradation never re-renders.** `PostProfile` transforms a master; `PerformanceEdit`
-   transforms an audio take without regenerating speech (FR-32).
+Rules that have earned themselves:
 
-## This machine
+- **Partition by file.** Never let two agents edit the same module concurrently. Create
+  package skeletons before dispatching so agents cannot collide on `__init__.py`.
+- **Subagents start cold.** Point them at `AGENTS.md` and the specific PRD sections,
+  with exact file paths and an explicit "do not touch" list.
+- **Verify, do not trust.** Re-run the tests yourself. Check a claimed enumeration
+  against the spec. Reports have been accurate so far; that is not a reason to stop.
+- **A reviewer reports, it does not fix.** Tell test and review agents to surface a bug
+  rather than correct it, so adjudication stays in one place.
+- **Demand the gaps.** Ask every agent what it could not do and what the spec left
+  ambiguous. The most valuable lines in their reports are the admissions.
 
-Measured 2026-11-03/04. Paths are literal.
+## Invoking Codex
 
-| | |
-|---|---|
-| Blender | `D:\Blender\blender.exe` — **5.2.0 LTS**, engine id is `BLENDER_EEVEE` (4.4's `BLENDER_EEVEE_NEXT` does **not** work here) |
-| ComfyUI | `D:\ComfyUI_3\ComfyUI_windows_portable` — 0.21.1, embedded Python 3.12 |
-| FFmpeg | 8.1.1-full (Gyan), on PATH |
-| GPU | RTX 5070 Ti Laptop, 11.94 GB, sm_120. Foreign baseline drifts 1.3–2.7 GB |
-| RAM | 31.1 GB, and a browser routinely holds 9+ GB |
-| Orchestrator env | `.venv` in this repo |
+`codex-main` and `codex-alt` are PowerShell functions in the user's profile that only
+set `CODEX_HOME`; the PowerShell tool runs `-NoProfile`, so set it directly:
 
-**The ComfyUI tree is immutable.** Never `pip install` into `python_embeded`. The
-orchestrator keeps its own `.venv` and owns ComfyUI's lifecycle, launching it with
-`--disable-all-custom-nodes --whitelist-custom-nodes ...` — a third-party node
-(`comfyui_smznodes`) patches core sampling and breaks generation with an opaque CUDA
-error (spike 03).
-
-**Detect, don't assume:** engine ids by assigning and reading back; node inputs from
-`/object_info`; GPU devices explicitly pinned (this is a hybrid-graphics laptop and
-Cycles enables the iGPU by default).
-
-## Working rules
-
-- **Search before adding an abstraction.** Extend what exists rather than creating a
-  parallel one. Do not create a file merely to make files smaller — only at a real
-  responsibility boundary.
-- **Measure, don't assume.** This project has repeatedly been wrong about documented
-  values: official VRAM figures were differently scoped, a licence was misreported by its
-  own README, `--reserve-vram` does not cap allocation, and NVML cannot measure a job's
-  memory need. If a number matters, measure it and record where.
-- **Report verification honestly.** Never say tests, type checks or builds passed unless
-  you ran them. State what you did not verify.
-- **Rights and consent are requirements, not etiquette** (FR-16). Asset licences are
-  recorded per asset; voice identity needs consent, not just a licence; reference media is
-  never packaged into an export nor fed to a generative model as an image input.
-- **Model weights are executable input** (FR-25). Third-party loaders `torch.load()`
-  without `weights_only`. Fetch only from pinned, hashed sources; prefer `safetensors`.
-
-## Layout
-
-```
-CCTV_..._PRD_v1.2.md    the spec
-references/             REF-001 and the style bible (frames are gitignored, third-party)
-spikes/0N_*/            Phase 0 measurements; each has FINDINGS.md and is reproducible
-  01 determinism  02 render budget  03 flux fit  04 geometry conditioning  05 voice
-.venv/                  orchestrator environment (gitignored)
+```powershell
+$env:CODEX_HOME = "$HOME\.codex-alt"    # or $HOME\.codex
+codex exec -m <model> --sandbox read-only|workspace-write -C <dir> -o <outfile> "<prompt>"
 ```
 
-`_work/` directories are disposable spike output and gitignored. `D:\Work\index-tts` is a
-sibling checkout, not vendored here.
+`-o` writes only the final message, so a whole-repo review costs a few lines of context.
+Models: `gpt-6-luna` for implementation, `gpt-6.1-sol` for review. `codex-alt` carries
+the richer tool surface (Playwright, Chrome DevTools, Blender, context7).
 
-## Conventions
+**Long prompts must be passed from a file** (`Get-Content -Raw` into a variable), not as
+a here-string — embedded here-strings have been mangled in transit and Codex then
+rejects the arguments.
 
-Python 3.11+ for the orchestrator, Pydantic v2 for entities, FastAPI for the API, pytest
-for tests. Type hints on public interfaces. Prefer pure functions for anything
-deterministic — the degradation chain, seed derivation, the dependency graph — so they can
-be tested without a GPU, a renderer or a filesystem.
+## Tooling note
+
+Bash heredocs in this environment corrupt backslash escapes. Use the `Write`/`Edit`
+tools for any content containing `\\`, regex escapes or Windows paths.

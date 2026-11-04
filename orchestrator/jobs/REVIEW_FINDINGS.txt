@@ -1,0 +1,42 @@
+INDEPENDENT REVIEW - orchestrator/jobs/ IS NOT PRODUCTION READY
+Reviewed 2026-11-04 by gpt-6.1-sol against AGENTS.md, the PRD and the spike findings.
+Implementation by gpt-6-luna; both the code and its tests were written by that one
+agent, which is why 9 green tests coexist with hollow production paths.
+
+Do not treat this package as working. The headline defects:
+  - PynvmlReader exposes no total-memory accessor, so the real probe computes zero
+    free VRAM and refuses every job. Tests pass only because they inject a fake.
+  - unload / terminate / respawn default to no-ops, so a failed release reports
+    recovery without replacing the poisoned worker - the one thing spike 03 proved
+    is mandatory after a CUDA error.
+  - The persisted PID is the orchestrator's, not the GPU worker's, so orphan
+    detection cannot work.
+  - Job state is never persisted, so a restart loses the queue.
+  - FR-26 budget ceilings are not enforced at all.
+
+Scheduled for rewrite with the implementer and the test author as SEPARATE agents.
+
+--- full findings ---
+
+HIGH | orchestrator/jobs/lease.py:81 | Unload, terminate, and respawn default to no-ops; failed release can claim recovery without replacing the poisoned worker.
+HIGH | orchestrator/jobs/lease.py:150 | Termination failure still triggers respawn and lease removal; the surviving worker can overlap its replacement and subsequent jobs.
+HIGH | orchestrator/jobs/lease.py:136 | Release uses a fixed device-used floor without tracking foreign baseline drift; healthy unloading can repeatedly time out against desktop VRAM.
+HIGH | orchestrator/jobs/queue.py:101 | Preflight adds foreign usage to already-free VRAM and never checks actual foreign usage against the configured allowance; valid fits fail while allowance violations can pass.
+HIGH | orchestrator/jobs/queue.py:59 | PynvmlReader exposes neither total_memory_mb nor total_mb, so the production probe computes zero free VRAM and refuses jobs.
+HIGH | orchestrator/jobs/queue.py:134 | RAM/VRAM checks precede the potentially long lease wait; changed headroom is never checked immediately before loading the model.
+HIGH | orchestrator/jobs/lease.py:204 | On Windows, an absent PID can raise OSError with WinError 87, which is uncaught; stale acquisition fails instead of reclaiming.
+HIGH | orchestrator/jobs/lease.py:101 | The recorded PID belongs to the orchestrator, not its GPU worker; orchestrator death permits reclamation while an orphaned worker remains active.
+HIGH | orchestrator/jobs/queue.py:148 | CUDA failure does not independently force worker replacement; reaching the release floor permits reuse despite spike 03’s mandatory CUDA-context respawn.
+MED | tests/jobs/test_lease.py:71 | GpuLease.release lacks tests for unload/NVML exceptions and termination/respawn failures; callback-order assertions cannot establish successful worker replacement.
+MED | tests/jobs/test_queue.py:76 | JobQueue.run lacks tests for successful retries, attempt caps, backoff, release failure after respawn, and concurrent acquire timeout; its recovery lifecycle remains unchecked.
+MED | orchestrator/service/approval.py:21 | _review implements target/version matching and approval eligibility itself; these business rules must be delegated to domain functions.
+MED | orchestrator/service/dependencies.py:91 | revise_script defines script-change scope locally using only beats; the impact rule belongs in domain, including handling beat_to_shot changes.
+HIGH | orchestrator/service/approval.py:14 | ProjectStore has no Review layout, so every production approval fails with INTERNAL; the tests’ monkeypatched lookup hides this integration failure.
+HIGH | orchestrator/service/dependencies.py:48 | A later shot update failure leaves earlier shots stale and the upstream revision committed, with gate C still approved; reporting partial progress does not repair the cascade.
+HIGH | orchestrator/service/dependencies.py:94 | Shots are snapshotted before upstream revision; a concurrent review-to-approved transition can escape invalidation because impact selection uses the older status.
+HIGH | orchestrator/jobs/lease.py:185 | Re-reading then unlinking is not atomic across reclaimers; one contender can delete another’s newly acquired lease and admit overlapping holders.
+HIGH | orchestrator/jobs/queue.py:164 | Cleanup checks shared lease._owned rather than ownership acquired by this invocation; a concurrent waiter timing out can release the running job’s lease.
+HIGH | orchestrator/jobs/queue.py:194 | Watchdog ignores whether timed join actually stopped the worker thread; retry/release can proceed while the original attempt still runs and writes artifacts.
+HIGH | orchestrator/jobs/queue.py:165 | A release exception bypasses error-state handling and PID cleanup; a failed call can leave job.state completed and lease_holder_pid populated.
+HIGH | orchestrator/jobs/queue.py:138 | Attempts, progress, and terminal states only mutate the supplied object; no persistence mechanism records them, so restart loses queue execution state.
+HIGH | orchestrator/jobs/queue.py:132 | Execution never enforces configured retry, GPU-minute, wall-clock, or project-size ceilings; an advancing job can exceed FR-26 budgets indefinitely.

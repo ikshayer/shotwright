@@ -47,6 +47,7 @@ from orchestrator.domain.entities import (
     Project,
     Script,
     Shot,
+    Review,
     StyleBible,
     Timeline,
 )
@@ -109,6 +110,11 @@ _LAYOUTS: dict[type[Entity], _Layout] = {
     Location: _Layout(True, "location_id", lambda i, _e: f"locations/{i}"),
     CameraProfile: _Layout(True, "camera_id", lambda i, _e: f"camera_profiles/{i}"),
     StyleBible: _Layout(True, "project_id", lambda _i, _e: "references/style_bible"),
+    # Review is the only writer of approval state (10.1), so it must be
+    # persistable: without a layout here every production approval failed with
+    # INTERNAL while tests passed against a patched lookup. Unversioned - a
+    # review is a dated opinion about one (target, version), never revised.
+    Review: _Layout(False, "review_id", lambda i, _e: f"reviews/{i}.json"),
 }
 
 
