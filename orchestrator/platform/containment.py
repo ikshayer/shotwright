@@ -1,0 +1,288 @@
+"""Storage containment and upload validation (FR-25, AT-17).
+
+Every filesystem write in the project goes through ``ProjectRoot``. A caller never
+holds a raw ``Path`` it composed itself: it hands ``ProjectRoot`` a *relative* path and
+gets back either a resolved path inside the root or a ``ContainmentError`` that says
+what to fix.
+
+Limit worth knowing: resolution and the later open are two steps, so a symlink swapped
+in between could still redirect a write (TOCTOU). The orchestrator is the only writer to
+the project tree, which is what makes this acceptable; do not expose the root to other
+writers.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+_SUPERSCRIPT_DIGITS = "¹²³"  # also reserved device-name suffixes on Windows
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+    | {f"COM{n}" for n in range(10)}
+    | {f"LPT{n}" for n in range(10)}
+    | {f"COM{c}" for c in _SUPERSCRIPT_DIGITS}
+    | {f"LPT{c}" for c in _SUPERSCRIPT_DIGITS}
+)
+_ILLEGAL_COMPONENT_CHARS = frozenset('<>:"|?*') | {chr(c) for c in range(32)}
+_SHORT_NAME_PATTERN = re.compile(r"~\d")
+
+
+class ContainmentError(ValueError):
+    """A path was rejected. ``path`` is the offending input; the message says how to fix it."""
+
+    def __init__(self, path: str, problem: str) -> None:
+        self.path = path
+        self.problem = problem
+        super().__init__(f"Path {path!r} rejected: {problem}")
+
+
+class UploadRejected(ValueError):
+    """An upload was rejected. For size limits, ``limit`` and ``observed`` are populated."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        limit_name: str | None = None,
+        limit: float | None = None,
+        observed: float | None = None,
+    ) -> None:
+        self.limit_name = limit_name
+        self.limit = limit
+        self.observed = observed
+        super().__init__(message)
+
+
+def _component_problem(component: str) -> str | None:
+    if component in ("", "."):
+        return None  # harmless; dropped by the caller
+    if component == "..":
+        return "'..' traversal is not allowed; use a path below the project root"
+    bad = _ILLEGAL_COMPONENT_CHARS.intersection(component)
+    if bad:
+        shown = "".join(sorted(c if c.isprintable() else f"\\x{ord(c):02x}" for c in bad))
+        return (
+            f"component {component!r} contains {shown!r}; ':' also covers drive-relative "
+            "paths and NTFS alternate data streams"
+        )
+    if component != component.rstrip(" ."):
+        return f"component {component!r} ends in a dot or space, which Windows silently strips"
+    if component.split(".", 1)[0].upper() in _WINDOWS_RESERVED_NAMES:
+        return f"component {component!r} is a reserved Windows device name"
+    if _SHORT_NAME_PATTERN.search(component):
+        return f"component {component!r} looks like a Windows 8.3 short name; use the full name"
+    return None
+
+
+def _split_relative(relative: str) -> list[str]:
+    """Validate a caller-supplied relative path string and return its components."""
+    if not isinstance(relative, str):
+        raise ContainmentError(repr(relative), "path must be a string relative to the project root")
+    if not relative.strip():
+        raise ContainmentError(relative, "path is empty")
+    if "\x00" in relative:
+        raise ContainmentError(relative, "path contains a NUL byte")
+    # Both separators count on every OS so behaviour does not depend on the platform.
+    components = relative.replace("\\", "/").split("/")
+    if components[0] == "":
+        raise ContainmentError(
+            relative, "absolute and UNC paths are not allowed; give a path relative to the project root"
+        )
+    if re.fullmatch(r"[A-Za-z]:", components[0]):
+        raise ContainmentError(
+            relative, "drive-qualified paths are not allowed; give a path relative to the project root"
+        )
+    for component in components:
+        problem = _component_problem(component)
+        if problem:
+            raise ContainmentError(relative, problem)
+    kept = [c for c in components if c not in ("", ".")]
+    if not kept:
+        raise ContainmentError(relative, "path names the project root itself, not something inside it")
+    return kept
+
+
+def _is_within(root: Path, candidate: Path) -> bool:
+    """Case-insensitive on Windows (via normcase), exact elsewhere; both already resolved."""
+    root_norm = os.path.normcase(str(root))
+    candidate_norm = os.path.normcase(str(candidate))
+    try:
+        return os.path.commonpath([root_norm, candidate_norm]) == root_norm
+    except ValueError:  # different drives
+        return False
+
+
+class ProjectRoot:
+    """The only object allowed to turn a relative name into a writable location."""
+
+    def __init__(self, root: Path | str) -> None:
+        resolved = Path(root).resolve(strict=False)
+        if not resolved.is_dir():
+            raise ContainmentError(str(root), "project root does not exist or is not a directory; create it first")
+        self._root = resolved
+
+    @property
+    def path(self) -> Path:
+        return self._root
+
+    def resolve(self, relative: str) -> Path:
+        """Return the absolute, symlink-resolved location of ``relative``; raise if it leaves the root."""
+        components = _split_relative(relative)
+        resolved = self._root.joinpath(*components).resolve(strict=False)
+        if not _is_within(self._root, resolved) or resolved == self._root:
+            raise ContainmentError(
+                relative,
+                f"resolves to {str(resolved)!r}, outside the project root {str(self._root)!r} "
+                "(a symlink or junction points out of the root)",
+            )
+        return resolved
+
+    def make_dir(self, relative: str) -> Path:
+        target = self.resolve(relative)
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
+    def write_bytes(self, relative: str, data: bytes) -> Path:
+        target = self._prepare_file(relative)
+        target.write_bytes(data)
+        return target
+
+    def write_text(self, relative: str, text: str, *, encoding: str = "utf-8") -> Path:
+        target = self._prepare_file(relative)
+        target.write_text(text, encoding=encoding, newline="\n")
+        return target
+
+    def write_with(self, relative: str, writer: Callable[[Path], None]) -> Path:
+        """For external tools (FFmpeg, Blender) that must be handed an output path.
+
+        The writer receives only an already-contained path.
+        """
+        target = self._prepare_file(relative)
+        writer(target)
+        return target
+
+    def _prepare_file(self, relative: str) -> Path:
+        target = self.resolve(relative)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        return target
+
+
+# --- filenames and uploads -------------------------------------------------------------
+
+def sanitize_filename(name: str) -> str:
+    """Reduce an untrusted filename to a safe single path component, or raise.
+
+    Directory parts are discarded and unsafe characters become '_'. Names that are
+    empty or reserved are rejected rather than silently renamed.
+    """
+    base = name.replace("\\", "/").rsplit("/", 1)[-1]
+    cleaned = "".join("_" if (c in _ILLEGAL_COMPONENT_CHARS or not c.isprintable()) else c for c in base)
+    cleaned = cleaned.strip().rstrip(" .")
+    cleaned = _SHORT_NAME_PATTERN.sub("_", cleaned)
+    if cleaned in ("", ".", "..") or not cleaned.strip("_"):
+        raise UploadRejected(f"Filename {name!r} has no usable characters; rename the file and retry")
+    if cleaned.split(".", 1)[0].upper() in _WINDOWS_RESERVED_NAMES:
+        raise UploadRejected(f"Filename {name!r} is a reserved Windows device name; rename the file and retry")
+    return cleaned[:128]
+
+
+class UploadLimits(BaseModel):
+    """Section 6.1 default limits; overridable through settings (FR-23)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    max_image_bytes: int = Field(25 * 1024 * 1024, gt=0, description="Maximum image upload size in bytes.")
+    max_image_long_edge_px: int = Field(8192, gt=0, description="Maximum image long edge in pixels.")
+    max_video_bytes: int = Field(500 * 1024 * 1024, gt=0, description="Maximum video upload size in bytes.")
+    max_video_seconds: float = Field(120.0, gt=0, description="Maximum video duration in seconds.")
+
+
+MediaKind = Literal["image", "video"]
+
+_EXTENSION_KIND: dict[str, MediaKind] = {
+    ".jpg": "image", ".jpeg": "image", ".png": "image", ".webp": "image",
+    ".mp4": "video", ".mov": "video", ".webm": "video",
+}
+
+
+def _extensions_matching_magic(head: bytes) -> frozenset[str] | None:
+    """Extensions consistent with the leading bytes; None if unrecognised."""
+    if head.startswith(b"\xff\xd8\xff"):
+        return frozenset({".jpg", ".jpeg"})
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return frozenset({".png"})
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return frozenset({".webp"})
+    if head[4:8] == b"ftyp":
+        # QuickTime brand is .mov only; every other ISO-BMFF brand may be mp4 or mov.
+        return frozenset({".mov"}) if head[8:12] == b"qt  " else frozenset({".mp4", ".mov"})
+    if head.startswith(b"\x1a\x45\xdf\xa3"):
+        # EBML header shared by Matroska and WebM; WebM declares its DocType early on.
+        return frozenset({".webm"}) if b"webm" in head[:64] else frozenset()
+    return None
+
+
+@dataclass(frozen=True)
+class ValidatedUpload:
+    kind: MediaKind
+    extension: str
+    safe_filename: str
+
+
+def validate_upload(
+    filename: str,
+    head: bytes,
+    size_bytes: int,
+    limits: UploadLimits,
+    *,
+    image_long_edge_px: int | None = None,
+    duration_seconds: float | None = None,
+) -> ValidatedUpload:
+    """Check extension, magic bytes and size caps; raise ``UploadRejected`` otherwise.
+
+    ``head`` is the first bytes of the file (64 or more recommended). Pixel and duration
+    caps are checked only when the caller supplies the observed value, because measuring
+    them needs a decoder (ffprobe), which this pure module does not use.
+    """
+    safe_name = sanitize_filename(filename)
+    extension = os.path.splitext(safe_name)[1].lower()
+    kind = _EXTENSION_KIND.get(extension)
+    if kind is None:
+        allowed = ", ".join(sorted(_EXTENSION_KIND))
+        raise UploadRejected(f"Extension {extension or '(none)'!r} is not accepted; allowed: {allowed}")
+
+    matching = _extensions_matching_magic(head)
+    if matching is None or extension not in matching:
+        detected = "unrecognised content" if not matching else f"content of type {sorted(matching)}"
+        raise UploadRejected(
+            f"File {filename!r} has extension {extension} but its bytes show {detected}; "
+            "the extension and the file contents must agree"
+        )
+
+    if kind == "image":
+        _enforce("max_image_bytes", limits.max_image_bytes, size_bytes)
+        if image_long_edge_px is not None:
+            _enforce("max_image_long_edge_px", limits.max_image_long_edge_px, image_long_edge_px)
+    else:
+        _enforce("max_video_bytes", limits.max_video_bytes, size_bytes)
+        if duration_seconds is not None:
+            _enforce("max_video_seconds", limits.max_video_seconds, duration_seconds)
+    return ValidatedUpload(kind=kind, extension=extension, safe_filename=safe_name)
+
+
+def _enforce(limit_name: str, limit: float, observed: float) -> None:
+    if observed > limit:
+        raise UploadRejected(
+            f"Upload exceeds {limit_name}: limit {limit}, observed {observed}. "
+            f"Reduce the file or raise {limit_name} in settings.toml.",
+            limit_name=limit_name,
+            limit=limit,
+            observed=observed,
+        )

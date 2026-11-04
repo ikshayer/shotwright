@@ -1,0 +1,130 @@
+"""Shared vocabulary for the domain model.
+
+Enumerations here are closed sets drawn from the PRD. They are deliberately in
+one place because several of them are referenced by both entities and the
+behaviour modules (state, invalidation), and duplicating them would create the
+second source of truth that 10.0 exists to prevent.
+"""
+
+from __future__ import annotations
+
+from enum import StrEnum
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+SCHEMA_VERSION = 1
+
+
+class ShotStatus(StrEnum):
+    """States from 10.2. They bind to `(shot_id, version)`, not to a shot."""
+
+    DRAFT = "draft"
+    PLANNED = "planned"
+    BLOCKING = "blocking"
+    BUILDING = "building"
+    REVIEW = "review"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    FAILED = "failed"
+    STALE = "stale"
+
+
+class FramingStatus(StrEnum):
+    """FR-29. A shot leaves `blocking` only when this reaches `approved`."""
+
+    NONE = "none"
+    PENDING = "pending"
+    APPROVED = "approved"
+
+
+class ReferenceRole(StrEnum):
+    """FR-29's role exclusion: framing panels must not feed style extraction."""
+
+    MOOD = "mood"
+    FRAMING = "framing"
+
+
+class InputKind(StrEnum):
+    IMAGE_UPLOAD = "image_upload"
+    VIDEO_UPLOAD = "video_upload"
+    HOSTED_URL = "hosted_url"
+
+
+class ProductionMethod(StrEnum):
+    """The five routing options of 9."""
+
+    BLENDER = "blender"
+    IMAGE_COMPOSITE = "image_composite"
+    BLENDER_WITH_INSERT = "blender_with_insert"
+    IMAGE_TO_VIDEO = "image_to_video"
+    SOURCED_MEDIA = "sourced_media"
+
+
+class EvidenceTier(StrEnum):
+    """Per-claim provenance in the style bible (FR-18)."""
+
+    CREATOR = "creator"
+    OBSERVED = "observed"
+    REPORTED = "reported"
+    INFERRED = "inferred"
+
+
+class Invalidation(StrEnum):
+    """4.4's per-field split, which keys the dependency graph.
+
+    POST_ONLY changes are re-derived from the existing master.
+    REBUILD changes invalidate renders through the dependency graph.
+    """
+
+    POST_ONLY = "post_only"
+    REBUILD = "rebuild"
+
+
+def post_only(default: Any = ..., **kwargs: Any) -> Any:
+    """Declare a CameraProfile field re-derivable without re-rendering (4.4)."""
+    return _tagged(default, Invalidation.POST_ONLY, **kwargs)
+
+
+def rebuild_triggering(default: Any = ..., **kwargs: Any) -> Any:
+    """Declare a CameraProfile field whose change invalidates renders (4.4)."""
+    return _tagged(default, Invalidation.REBUILD, **kwargs)
+
+
+def _tagged(default: Any, kind: Invalidation, **kwargs: Any) -> Any:
+    """Attach the invalidation class to the field itself.
+
+    The tag lives with the field definition rather than in a side table, so a
+    field cannot be added without classifying it. `invalidation.py` reads these
+    back; nothing else should need to.
+    """
+    extra = dict(kwargs.pop("json_schema_extra", {}) or {})
+    extra["invalidation"] = kind.value
+    return Field(default, json_schema_extra=extra, **kwargs)
+
+
+class Entity(BaseModel):
+    """Base for every persisted record.
+
+    `schema_version` travels with the data because the project folder is the
+    portable artifact (10.0, AT-09) and must be readable by a later build.
+    """
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    schema_version: int = SCHEMA_VERSION
+
+
+class VersionedEntity(Entity):
+    """Append-only versioning (10.2).
+
+    A revision creates a new record with `supersedes` set; the superseded
+    record and its artifacts are retained, never overwritten.
+    """
+
+    version: int = Field(1, ge=1)
+    supersedes: int | None = Field(None, ge=1)
+
+    def next_version(self) -> dict[str, Any]:
+        """Field overrides for the successor to this record."""
+        return {"version": self.version + 1, "supersedes": self.version}
