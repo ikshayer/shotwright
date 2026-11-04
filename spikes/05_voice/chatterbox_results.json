@@ -1,0 +1,58 @@
+{
+  "device": "cpu",
+  "model_load_seconds": 196.0,
+  "runs": [
+    {
+      "audio_seconds": 4.6,
+      "cfg_weight": 0.5,
+      "exaggeration": 0.5,
+      "file": "cb_diegetic__neutral.wav",
+      "line": "diegetic",
+      "realtime_factor": 12.38,
+      "seconds": 56.9,
+      "setting": "neutral"
+    },
+    {
+      "audio_seconds": 3.96,
+      "cfg_weight": 0.3,
+      "exaggeration": 0.7,
+      "file": "cb_diegetic__expressive.wav",
+      "line": "diegetic",
+      "realtime_factor": 6.38,
+      "seconds": 25.3,
+      "setting": "expressive"
+    },
+    {
+      "audio_seconds": 3.92,
+      "cfg_weight": 0.3,
+      "exaggeration": 1.0,
+      "file": "cb_diegetic__distressed.wav",
+      "line": "diegetic",
+      "realtime_factor": 6.31,
+      "seconds": 24.7,
+      "setting": "distressed"
+    },
+    {
+      "audio_seconds": 5.36,
+      "cfg_weight": 0.5,
+      "exaggeration": 0.5,
+      "file": "cb_announce__neutral.wav",
+      "line": "announce",
+      "realtime_factor": 6.1,
+      "seconds": 32.7,
+      "setting": "neutral"
+    },
+    {
+      "audio_seconds": 5.52,
+      "cfg_weight": 0.3,
+      "exaggeration": 0.7,
+      "file": "cb_announce__expressive.wav",
+      "line": "announce",
+      "realtime_factor": 6.1,
+      "seconds": 33.7,
+      "setting": "expressive"
+    }
+  ],
+  "sample_rate": 24000,
+  "seed": 20051114
+}

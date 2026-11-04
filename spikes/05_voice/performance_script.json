@@ -1,0 +1,56 @@
+{
+  "schema": "PerformanceScript/0.1",
+  "note": "Human imperfection is structural, not a style scalar. An exaggeration dial makes a whole read more dramatic; a distressed person instead breaks at specific places - restarts a word, stops to breathe, drops in level, trails off. Those are events at positions, so they are scripted and seeded here rather than left to the model. Engine-agnostic: any TTS that renders a fragment can drive it.",
+  "line_id": "S003-L01",
+  "seed": 20051114,
+  "base": { "exaggeration": 0.7, "cfg_weight": 0.3 },
+  "fragments": [
+    {
+      "text": "Is",
+      "intent": "false start - begins the word, stops",
+      "exaggeration": 0.6,
+      "cfg_weight": 0.35,
+      "gain_db": -2.0,
+      "gap_after_ms": 180
+    },
+    {
+      "text": "Is somebody there?",
+      "intent": "the real attempt, slightly louder",
+      "exaggeration": 0.75,
+      "cfg_weight": 0.3,
+      "gain_db": 0.0,
+      "gap_after_ms": 900,
+      "breath_after": { "kind": "inhale", "duration_ms": 420, "gain_db": -16.0 }
+    },
+    {
+      "text": "I can hear you walking around upstairs.",
+      "intent": "steadier, trying to sound reasonable",
+      "exaggeration": 0.6,
+      "cfg_weight": 0.35,
+      "gain_db": -1.0,
+      "gap_after_ms": 650,
+      "breath_after": { "kind": "inhale", "duration_ms": 330, "gain_db": -19.0 }
+    },
+    {
+      "text": "Please,",
+      "intent": "level drops - the composure goes",
+      "exaggeration": 0.95,
+      "cfg_weight": 0.25,
+      "gain_db": -3.5,
+      "gap_after_ms": 520
+    },
+    {
+      "text": "just say something.",
+      "intent": "quieter still, trailing",
+      "exaggeration": 0.9,
+      "cfg_weight": 0.25,
+      "gain_db": -5.0,
+      "gap_after_ms": 0
+    }
+  ],
+  "jitter": {
+    "note": "seeded per fragment so the same script reproduces exactly",
+    "gap_ms_range": [-90, 120],
+    "gain_db_range": [-0.8, 0.8]
+  }
+}

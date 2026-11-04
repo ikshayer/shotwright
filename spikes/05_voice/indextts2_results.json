@@ -1,0 +1,109 @@
+{
+  "runs": [
+    {
+      "duration_s": 1.71,
+      "emo_vector": "[0, 0, 0, 0.0, 0, 0, 0, 1.0]",
+      "f0_median": 108,
+      "f0_p10": 80,
+      "f0_p90": 165,
+      "file": "ix2_short_calm.wav",
+      "line": "short",
+      "seconds": 21.6,
+      "variant": "calm"
+    },
+    {
+      "duration_s": 4.77,
+      "emo_vector": "[0, 0, 0, 0.0, 0, 0, 0, 1.0]",
+      "f0_median": 114,
+      "f0_p10": 86,
+      "f0_p90": 140,
+      "file": "ix2_long_calm.wav",
+      "line": "long",
+      "seconds": 12.1,
+      "variant": "calm"
+    },
+    {
+      "duration_s": 1.85,
+      "emo_vector": "[0, 0, 0, 0.4, 0, 0, 0, 0.4]",
+      "f0_median": 172,
+      "f0_p10": 86,
+      "f0_p90": 226,
+      "file": "ix2_short_afraid-40.wav",
+      "line": "short",
+      "seconds": 5.7,
+      "variant": "afraid-40"
+    },
+    {
+      "duration_s": 2.73,
+      "emo_vector": "[0, 0, 0, 0.7, 0, 0, 0, 0.2]",
+      "f0_median": 235,
+      "f0_p10": 168,
+      "f0_p90": 279,
+      "file": "ix2_short_afraid-70.wav",
+      "line": "short",
+      "seconds": 7.6,
+      "variant": "afraid-70"
+    },
+    {
+      "duration_s": 5.72,
+      "emo_vector": "[0, 0, 0, 0.7, 0, 0, 0, 0.2]",
+      "f0_median": 206,
+      "f0_p10": 162,
+      "f0_p90": 256,
+      "file": "ix2_long_afraid-70.wav",
+      "line": "long",
+      "seconds": 14.4,
+      "variant": "afraid-70"
+    },
+    {
+      "duration_s": 2.47,
+      "emo_vector": "[0, 0, 0, 1.0, 0, 0, 0, 0.0]",
+      "f0_median": 266,
+      "f0_p10": 189,
+      "f0_p90": 320,
+      "file": "ix2_short_afraid-100.wav",
+      "line": "short",
+      "seconds": 6.8,
+      "variant": "afraid-100"
+    },
+    {
+      "duration_s": 2.81,
+      "emo_vector": "[0, 0, 0.4, 0.8, 0, 0.2, 0, 0.0]",
+      "f0_median": 259,
+      "f0_p10": 192,
+      "f0_p90": 359,
+      "file": "ix2_short_afraid-sad.wav",
+      "line": "short",
+      "seconds": 8.8,
+      "variant": "afraid-sad"
+    },
+    {
+      "duration_s": 2.0,
+      "emo_alpha": "0.6",
+      "emo_text": "terrified, voice shaking, barely able to speak",
+      "f0_median": 204,
+      "f0_p10": 128,
+      "f0_p90": 252,
+      "file": "ix2_short_text-terrified.wav",
+      "line": "short",
+      "seconds": 11.5,
+      "use_emo_text": "True",
+      "variant": "text-terrified"
+    },
+    {
+      "duration_s": 5.58,
+      "emo_alpha": "0.6",
+      "emo_text": "terrified, voice shaking, barely able to speak",
+      "f0_median": 207,
+      "f0_p10": 140,
+      "f0_p90": 302,
+      "file": "ix2_long_text-terrified.wav",
+      "line": "long",
+      "seconds": 19.5,
+      "use_emo_text": "True",
+      "variant": "text-terrified"
+    }
+  ],
+  "speaker_ref_f0_median": 147,
+  "speaker_reference": "ref_male_piper.wav"
+}

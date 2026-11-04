@@ -1,0 +1,61 @@
+{
+  "schema": "AudioPostProfile/0.1",
+  "note": "Audio analogue of FR-21's PostProfile. Ordered stages, typed params, seeded noise, pinned encode. Real DVR audio is usually 8 kHz G.711 mu-law mono - the band limit is not a stylistic choice, it is what the hardware did.",
+  "profiles": [
+    {
+      "profile_id": "clean",
+      "intent": "baseline - what the TTS engine produced",
+      "stages": [],
+      "encode": { "codec": "pcm_s16le", "rate": 22050 }
+    },
+    {
+      "profile_id": "dvr-mic-2005",
+      "intent": "voice picked up by a cheap camera's built-in mic and written to a DVR",
+      "stages": [
+        { "name": "room", "filter": "aecho", "params": { "in_gain": 0.8, "out_gain": 0.35, "delays": "22|37", "decays": "0.28|0.18" } },
+        { "name": "mic_band", "filter": "highpass", "params": { "f": 220, "poles": 2 } },
+        { "name": "mic_band_hi", "filter": "lowpass", "params": { "f": 3600, "poles": 2 } },
+        { "name": "agc", "filter": "acompressor", "params": { "threshold": 0.05, "ratio": 9, "attack": 12, "release": 420, "makeup": 3 } },
+        { "name": "hiss", "filter": "_noise_mix", "params": { "color": "pink", "amplitude": 0.012 }, "seeded": true },
+        { "name": "mains_hum", "filter": "_tone_mix", "params": { "frequency": 60, "amplitude": 0.006 } },
+        { "name": "limit", "filter": "alimiter", "params": { "limit": 0.93 } }
+      ],
+      "encode": { "codec": "pcm_mulaw", "rate": 8000 }
+    },
+    {
+      "profile_id": "pa-announce",
+      "intent": "building PA / tannoy - should sound processed, not natural",
+      "stages": [
+        { "name": "horn_band", "filter": "highpass", "params": { "f": 420, "poles": 2 } },
+        { "name": "horn_band_hi", "filter": "lowpass", "params": { "f": 2800, "poles": 2 } },
+        { "name": "drive", "filter": "acrusher", "params": { "level_in": 1, "level_out": 0.8, "bits": 10, "mode": "log", "aa": 0.6 } },
+        { "name": "hall", "filter": "aecho", "params": { "in_gain": 0.8, "out_gain": 0.5, "delays": "90|160|240", "decays": "0.4|0.3|0.2" } },
+        { "name": "limit", "filter": "alimiter", "params": { "limit": 0.9 } }
+      ],
+      "encode": { "codec": "pcm_s16le", "rate": 16000 }
+    },
+    {
+      "profile_id": "tape-dub",
+      "intent": "voice surviving a tape generation - wow, hiss, dull top end",
+      "stages": [
+        { "name": "hf_roll", "filter": "lowpass", "params": { "f": 5200, "poles": 2 } },
+        { "name": "lf_roll", "filter": "highpass", "params": { "f": 90, "poles": 1 } },
+        { "name": "wow", "filter": "vibrato", "params": { "f": 1.7, "d": 0.08 } },
+        { "name": "hiss", "filter": "_noise_mix", "params": { "color": "white", "amplitude": 0.02 }, "seeded": true },
+        { "name": "squash", "filter": "acompressor", "params": { "threshold": 0.08, "ratio": 5, "attack": 20, "release": 300, "makeup": 2 } }
+      ],
+      "encode": { "codec": "pcm_s16le", "rate": 22050 }
+    },
+    {
+      "profile_id": "phone-call",
+      "intent": "heard through a handset - the reference's call-interface material",
+      "stages": [
+        { "name": "band", "filter": "highpass", "params": { "f": 300, "poles": 2 } },
+        { "name": "band_hi", "filter": "lowpass", "params": { "f": 3400, "poles": 2 } },
+        { "name": "codec_squash", "filter": "acompressor", "params": { "threshold": 0.06, "ratio": 7, "attack": 8, "release": 250, "makeup": 3 } },
+        { "name": "hiss", "filter": "_noise_mix", "params": { "color": "pink", "amplitude": 0.008 }, "seeded": true }
+      ],
+      "encode": { "codec": "pcm_mulaw", "rate": 8000 }
+    }
+  ]
+}

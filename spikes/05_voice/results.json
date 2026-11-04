@@ -1,0 +1,122 @@
+[
+  {
+    "bytes": 264270,
+    "codec": "pcm_s16le",
+    "file": "announce__clean.wav",
+    "intent": "baseline - what the TTS engine produced",
+    "line": "announce",
+    "lufs": -17.6,
+    "nyquist_hz": 11025,
+    "peak_db": -2.5,
+    "profile": "clean",
+    "sample_rate": 22050
+  },
+  {
+    "bytes": 48314,
+    "codec": "pcm_mulaw",
+    "file": "announce__dvr-mic-2005.wav",
+    "intent": "voice picked up by a cheap camera's built-in mic and written to a DVR",
+    "line": "announce",
+    "lufs": -18.0,
+    "nyquist_hz": 4000,
+    "peak_db": -0.8,
+    "profile": "dvr-mic-2005",
+    "sample_rate": 8000
+  },
+  {
+    "bytes": 199462,
+    "codec": "pcm_s16le",
+    "file": "announce__pa-announce.wav",
+    "intent": "building PA / tannoy - should sound processed, not natural",
+    "line": "announce",
+    "lufs": -17.7,
+    "nyquist_hz": 8000,
+    "peak_db": -1.0,
+    "profile": "pa-announce",
+    "sample_rate": 16000
+  },
+  {
+    "bytes": 264270,
+    "codec": "pcm_s16le",
+    "file": "announce__tape-dub.wav",
+    "intent": "voice surviving a tape generation - wow, hiss, dull top end",
+    "line": "announce",
+    "lufs": -18.0,
+    "nyquist_hz": 11025,
+    "peak_db": -2.6,
+    "profile": "tape-dub",
+    "sample_rate": 22050
+  },
+  {
+    "bytes": 48018,
+    "codec": "pcm_mulaw",
+    "file": "announce__phone-call.wav",
+    "intent": "heard through a handset - the reference's call-interface material",
+    "line": "announce",
+    "lufs": -17.9,
+    "nyquist_hz": 4000,
+    "peak_db": -1.0,
+    "profile": "phone-call",
+    "sample_rate": 8000
+  },
+  {
+    "bytes": 223310,
+    "codec": "pcm_s16le",
+    "file": "diegetic__clean.wav",
+    "intent": "baseline - what the TTS engine produced",
+    "line": "diegetic",
+    "lufs": -18.0,
+    "nyquist_hz": 11025,
+    "peak_db": -2.7,
+    "profile": "clean",
+    "sample_rate": 22050
+  },
+  {
+    "bytes": 40884,
+    "codec": "pcm_mulaw",
+    "file": "diegetic__dvr-mic-2005.wav",
+    "intent": "voice picked up by a cheap camera's built-in mic and written to a DVR",
+    "line": "diegetic",
+    "lufs": -18.4,
+    "nyquist_hz": 4000,
+    "peak_db": -1.1,
+    "profile": "dvr-mic-2005",
+    "sample_rate": 8000
+  },
+  {
+    "bytes": 169742,
+    "codec": "pcm_s16le",
+    "file": "diegetic__pa-announce.wav",
+    "intent": "building PA / tannoy - should sound processed, not natural",
+    "line": "diegetic",
+    "lufs": -18.3,
+    "nyquist_hz": 8000,
+    "peak_db": -1.0,
+    "profile": "pa-announce",
+    "sample_rate": 16000
+  },
+  {
+    "bytes": 223310,
+    "codec": "pcm_s16le",
+    "file": "diegetic__tape-dub.wav",
+    "intent": "voice surviving a tape generation - wow, hiss, dull top end",
+    "line": "diegetic",
+    "lufs": -18.3,
+    "nyquist_hz": 11025,
+    "peak_db": -1.1,
+    "profile": "tape-dub",
+    "sample_rate": 22050
+  },
+  {
+    "bytes": 40588,
+    "codec": "pcm_mulaw",
+    "file": "diegetic__phone-call.wav",
+    "intent": "heard through a handset - the reference's call-interface material",
+    "line": "diegetic",
+    "lufs": -18.4,
+    "nyquist_hz": 4000,
+    "peak_db": -1.0,
+    "profile": "phone-call",
+    "sample_rate": 8000
+  }
+]

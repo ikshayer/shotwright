@@ -1,0 +1,49 @@
+{
+  "false_start": {
+    "copy_ms": 300,
+    "gain_db": -3.0,
+    "gap_after_ms": 200
+  },
+  "jitter": {
+    "gain_db_range": [
+      -0.6,
+      0.6
+    ],
+    "gap_ms_range": [
+      -80,
+      110
+    ]
+  },
+  "pauses": [
+    {
+      "after_phrase": "Is somebody there?",
+      "breath": {
+        "duration_ms": 420,
+        "gain_db": -15.0
+      },
+      "target_ms": 1100
+    },
+    {
+      "after_phrase": "walking around upstairs.",
+      "breath": {
+        "duration_ms": 330,
+        "gain_db": -18.0
+      },
+      "target_ms": 760
+    },
+    {
+      "after_phrase": "Please,",
+      "breath": null,
+      "target_ms": 470
+    }
+  ],
+  "schema": "PerformanceEdit/0.3",
+  "seed": 20051114,
+  "segment_gain_db": [
+    0.0,
+    -1.0,
+    -3.0,
+    -4.5
+  ],
+  "take": "ix2_long_afraid-70.wav"
+}

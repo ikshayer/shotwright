@@ -14,3 +14,6 @@ references/_tier3/
 # Orchestrator virtualenv: recreate with
 #   python -m venv .venv && .venv/Scripts/pip install nvidia-ml-py requests websocket-client
 .venv/
+
+# Third-party tooling checked out beside the project (see spikes/05_voice/FINDINGS.md)
+# D:\Work\index-tts is a sibling clone, not part of this repo.

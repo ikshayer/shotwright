@@ -1,0 +1,53 @@
+{
+  "schema": "PerformanceScript/0.2",
+  "note": "Structure from the PerformanceScript, voice and emotion from IndexTTS-2. The engine changed; the script did not, which is what engine-agnostic was for. New in 0.2: each fragment carries its own emotion vector, so the line has an arc instead of one constant setting - which is how distress actually behaves. Someone frightened tries to sound reasonable, fails, and gets quieter.",
+  "line_id": "S003-L01",
+  "seed": 20051114,
+  "engine": "indextts2",
+  "speaker_reference": "ref_male_piper.wav",
+  "emotion_order": ["happy", "angry", "sad", "afraid", "disgusted", "melancholic", "surprised", "calm"],
+  "fragments": [
+    {
+      "text": "Is",
+      "intent": "false start - the word begins and stops",
+      "emo_vector": [0, 0, 0, 0.35, 0, 0, 0, 0.5],
+      "gain_db": -2.0,
+      "gap_after_ms": 180
+    },
+    {
+      "text": "Is somebody there?",
+      "intent": "the real attempt - wary, not yet panicked",
+      "emo_vector": [0, 0, 0, 0.45, 0, 0, 0.1, 0.3],
+      "gain_db": 0.0,
+      "gap_after_ms": 900,
+      "breath_after": { "kind": "inhale", "duration_ms": 420, "gain_db": -16.0 }
+    },
+    {
+      "text": "I can hear you walking around upstairs.",
+      "intent": "forcing composure - trying to sound reasonable",
+      "emo_vector": [0, 0, 0.15, 0.3, 0, 0, 0, 0.45],
+      "gain_db": -1.0,
+      "gap_after_ms": 650,
+      "breath_after": { "kind": "inhale", "duration_ms": 330, "gain_db": -19.0 }
+    },
+    {
+      "text": "Please,",
+      "intent": "composure goes - the peak of the arc",
+      "emo_vector": [0, 0, 0.2, 0.75, 0, 0.1, 0, 0.0],
+      "gain_db": -3.5,
+      "gap_after_ms": 520
+    },
+    {
+      "text": "just say something.",
+      "intent": "defeated, quieter, sadness entering",
+      "emo_vector": [0, 0, 0.45, 0.5, 0, 0.25, 0, 0.0],
+      "gain_db": -5.0,
+      "gap_after_ms": 0
+    }
+  ],
+  "jitter": {
+    "note": "seeded per fragment so the same script reproduces exactly",
+    "gap_ms_range": [-90, 120],
+    "gain_db_range": [-0.8, 0.8]
+  }
+}
