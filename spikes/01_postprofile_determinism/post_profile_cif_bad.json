@@ -1,0 +1,111 @@
+{
+  "profile_id": "cif-badschedule",
+  "profile_version": "0.2.0",
+  "display_aspect_ratio": "4:3",
+  "storage_resolution": [
+    352,
+    288
+  ],
+  "sample_aspect_ratio": "12/11",
+  "output_fps": 10,
+  "shot_id": "S003",
+  "degrade_seed": 20051114,
+  "artifact_schedule": [
+    {
+      "type": "drop",
+      "start_frame": 24,
+      "count": 6
+    },
+    {
+      "type": "freeze",
+      "start_frame": 48,
+      "count": 11
+    }
+  ],
+  "stages": [
+    {
+      "name": "resample",
+      "filter": "scale",
+      "params": {
+        "w": 352,
+        "h": 288,
+        "flags": "bicubic"
+      }
+    },
+    {
+      "name": "decimate",
+      "filter": "fps",
+      "params": {
+        "fps": 10
+      }
+    },
+    {
+      "name": "restructure",
+      "filter": "select",
+      "from_schedule": "drop+freeze"
+    },
+    {
+      "name": "hold_frozen",
+      "filter": "loop",
+      "from_schedule": "freeze"
+    },
+    {
+      "name": "clock_timebase",
+      "filter": "setpts",
+      "from_schedule": "clock"
+    },
+    {
+      "name": "overlay_burnin",
+      "filter": "drawtext",
+      "params": {
+        "camera_id": "CAM 03",
+        "clock_epoch": 1131984000,
+        "fontsize": 16,
+        "x": 8,
+        "y": "h-24"
+      }
+    },
+    {
+      "name": "output_timebase",
+      "filter": "setpts",
+      "params": {
+        "timebase": "1/output_fps",
+        "pts": "N"
+      }
+    },
+    {
+      "name": "bad_white_balance",
+      "filter": "eq",
+      "params": {
+        "brightness": 0.02,
+        "contrast": 1.08,
+        "saturation": 0.75
+      }
+    },
+    {
+      "name": "sensor_noise",
+      "filter": "noise",
+      "params": {
+        "alls": 12,
+        "allf": "t+u"
+      },
+      "seeded": true
+    },
+    {
+      "name": "cheap_sharpen",
+      "filter": "unsharp",
+      "params": {
+        "luma_msize_x": 5,
+        "luma_msize_y": 5,
+        "luma_amount": 0.8
+      }
+    }
+  ],
+  "encode": {
+    "codec": "libx264",
+    "preset": "medium",
+    "crf": 30,
+    "pix_fmt": "yuv420p",
+    "threads": 1
+  }
+}

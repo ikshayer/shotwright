@@ -1,0 +1,37 @@
+{
+  "checks": {
+    "clock jumps exactly at drop boundaries": true,
+    "clock keeps ticking across freeze": true,
+    "display AR is 4:3": true,
+    "encode reproducible (threads=1)": true,
+    "encode reproducible (threads=auto)": true,
+    "frame count matches artifact_schedule": true,
+    "frames reproducible": true,
+    "image is static across freeze": true,
+    "output file is CFR": true,
+    "seed actually changes output": true
+  },
+  "clock_jumps": {
+    "24": 0.583333
+  },
+  "encode_hash_threads1": "71544564c3f913901c2e590f1f11594177accbc9d4e111bcefcfa099daccbae4",
+  "encode_hash_threadsauto": "6b7741bc51ebd9a94cd9c601ae0d1077584f1ca1dc85fff8bc3e5d26d3c3eb24",
+  "ffmpeg": "ffmpeg version 8.1.1-full_build-www.gyan.dev Copyright (c) 2000-2026 the FFmpeg developers",
+  "filter_graph": "scale=640:480:flags=bicubic,fps=12,select='not(between(n,24,29)+between(n,48,58))',loop=loop=11:size=1:start=42,settb=1/12,setpts='N+if(gte(N,24),6,0)',drawtext=fontfile=overlay.ttf:text='CAM 03  %{pts\\:gmtime\\:1131984000}':x=8:y=h-24:fontsize=16:fontcolor=white:box=1:boxcolor=black@0.4,settb=1/12,setpts=N,eq=brightness=0.02:contrast=1.08:saturation=0.75,noise=alls=12:allf=t+u:all_seed=427241414,unsharp=5:5:0.8",
+  "filter_graph_hash": "7aa226a25d49082a579fea5d83c34e1e6941a5f58a3f0460b525329080ba91ae",
+  "frame_count": 54,
+  "frames_hash": "52f7b4e13ed55b8d1fff360302296b30bbb421c5e1f45aafb3bf8d8044576e38",
+  "freeze_runs": [
+    [
+      41,
+      12
+    ]
+  ],
+  "output_pts_delta_distribution": {
+    "0.083333": 35,
+    "0.083334": 18
+  },
+  "predicted_frame_count": 54,
+  "profile_id": "dvr-2005",
+  "profile_version": "0.2.0"
+}

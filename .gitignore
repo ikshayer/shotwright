@@ -1,0 +1,12 @@
+# Disposable spike output: regenerate with the spike scripts
+_work/
+__pycache__/
+
+# Tooling scratch
+.playwright-mcp/
+
+# Third-party reference media (REF-001). Held locally as a mood board under
+# PRD 6.2; deliberately NOT committed. The findings derived from these frames
+# live in references/STYLE_BIBLE_DRAFT.md and references/CODEX_REPORT.md.
+references/frames/
+references/_tier3/

@@ -1,0 +1,14 @@
+{
+  "checks": {
+    "display AR is 4:3": true,
+    "frame count matches schedule": true,
+    "frames reproducible over real footage": true
+  },
+  "delivered_bytes": 9015,
+  "ffv1_bytes_per_second": 13316031,
+  "filter_graph": "scale=640:480:flags=bicubic,fps=12,select='not(between(n,8,10)+between(n,14,18))',loop=loop=5:size=1:start=11,settb=1/12,setpts='N+if(gte(N,8),3,0)',drawtext=fontfile=overlay.ttf:text='CAM 03  %{pts\\:gmtime\\:1131984000}':x=8:y=h-24:fontsize=16:fontcolor=white:box=1:boxcolor=black@0.4,settb=1/12,setpts=N,eq=brightness=0.02:contrast=1.08:saturation=0.75,noise=alls=12:allf=t+u:all_seed=427241414,unsharp=5:5:0.8",
+  "frames_hash": "aebe90197ff3dfbc9dff696cf526886105b40f7205ae313750d90d748e57912f",
+  "master_duration_s": 2.0,
+  "master_frames": 120,
+  "png_bytes_per_second": 60880103
+}

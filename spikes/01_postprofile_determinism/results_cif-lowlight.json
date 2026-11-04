@@ -1,0 +1,36 @@
+{
+  "checks": {
+    "clock jumps exactly at drop boundaries": true,
+    "clock keeps ticking across freeze": true,
+    "display AR is 4:3": true,
+    "encode reproducible (threads=1)": true,
+    "encode reproducible (threads=auto)": true,
+    "frame count matches artifact_schedule": true,
+    "frames reproducible": true,
+    "image is static across freeze": true,
+    "output file is CFR": true,
+    "seed actually changes output": true
+  },
+  "clock_jumps": {
+    "20": 0.7
+  },
+  "encode_hash_threads1": "8782e0cdc3bf6911291b4706af9e761fbb62c6886cec4b23a735c52cba34efd4",
+  "encode_hash_threadsauto": "e485f0c056e271d2874bf763154e813412cffa3fe91af44b6ea7dfcd4e7f2952",
+  "ffmpeg": "ffmpeg version 8.1.1-full_build-www.gyan.dev Copyright (c) 2000-2026 the FFmpeg developers",
+  "filter_graph": "scale=352:288:flags=bicubic,fps=10,select='not(between(n,20,25)+between(n,32,39))',loop=loop=8:size=1:start=26,settb=1/10,setpts='N+if(gte(N,20),6,0)',drawtext=fontfile=overlay.ttf:text='CAM 03  %{pts\\:gmtime\\:1131984000}':x=8:y=h-24:fontsize=16:fontcolor=white:box=1:boxcolor=black@0.4,settb=1/10,setpts=N,eq=brightness=0.02:contrast=1.08:saturation=0.75,noise=alls=12:allf=t+u:all_seed=427241414,unsharp=5:5:0.8,setsar=12/11",
+  "filter_graph_hash": "8df45565afcd0620c3a5fade3aa1daab1227ba37e36ef4a7ca9281a9145f8e80",
+  "frame_count": 44,
+  "frames_hash": "d95123e3d73ff24fa9d8657123b297c02c95bf04a1cea8a3b1d430a78404a2e3",
+  "freeze_runs": [
+    [
+      25,
+      9
+    ]
+  ],
+  "output_pts_delta_distribution": {
+    "0.1": 43
+  },
+  "predicted_frame_count": 44,
+  "profile_id": "cif-lowlight",
+  "profile_version": "0.2.0"
+}
