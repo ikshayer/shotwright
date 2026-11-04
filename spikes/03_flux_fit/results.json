@@ -1,0 +1,88 @@
+{
+  "comfyui_version": "0.21.1",
+  "configs": [
+    {
+      "baseline_gb": 2.22,
+      "clip": "qwen_3_4b_fp4_flux2.safetensors",
+      "completed": true,
+      "name": "distilled-4b-fp4enc-1024",
+      "peak_gb": 11.7,
+      "release": {
+        "floor_gb": 2.59,
+        "released": true,
+        "seconds": 0.5,
+        "used_gb": 1.61
+      },
+      "resolution": [
+        1024,
+        1024
+      ],
+      "seconds": 32.7,
+      "steps": 4,
+      "unet": "flux-2-klein-4b.safetensors"
+    },
+    {
+      "baseline_gb": 1.61,
+      "clip": "qwen_3_4b_fp4_flux2.safetensors",
+      "completed": true,
+      "name": "distilled-4b-fp4enc-cctv",
+      "peak_gb": 11.7,
+      "release": {
+        "floor_gb": 2.59,
+        "released": true,
+        "seconds": 0.5,
+        "used_gb": 1.67
+      },
+      "resolution": [
+        1280,
+        960
+      ],
+      "seconds": 31.7,
+      "steps": 4,
+      "unet": "flux-2-klein-4b.safetensors"
+    },
+    {
+      "baseline_gb": 1.67,
+      "clip": "qwen_3_4b.safetensors",
+      "completed": true,
+      "name": "distilled-4b-fullenc-1024",
+      "peak_gb": 11.7,
+      "release": {
+        "floor_gb": 2.59,
+        "released": true,
+        "seconds": 0.5,
+        "used_gb": 1.64
+      },
+      "resolution": [
+        1024,
+        1024
+      ],
+      "seconds": 32.9,
+      "steps": 4,
+      "unet": "flux-2-klein-4b.safetensors"
+    },
+    {
+      "baseline_gb": 1.64,
+      "clip": "qwen_3_4b.safetensors",
+      "completed": true,
+      "name": "distilled-4b-fullenc-cctv",
+      "peak_gb": 11.71,
+      "release": {
+        "floor_gb": 2.59,
+        "released": true,
+        "seconds": 0.5,
+        "used_gb": 1.59
+      },
+      "resolution": [
+        1280,
+        960
+      ],
+      "seconds": 32.2,
+      "steps": 4,
+      "unet": "flux-2-klein-4b.safetensors"
+    }
+  ],
+  "custom_nodes_disabled": true,
+  "device_total_gb": 11.94,
+  "idle_baseline_gb": 2.09
+}

@@ -1,0 +1,94 @@
+{
+  "comfyui_version": "0.21.1",
+  "configs": [
+    {
+      "baseline_gb": 1.46,
+      "clip": "qwen_3_4b_fp4_flux2.safetensors",
+      "completed": false,
+      "error": [
+        "['execution_start', {'prompt_id': '3faaacf4-036e-4b40-ad6f-0a2470e1ea3b', 'timestamp': 1793774896592}]",
+        "['execution_cached', {'nodes': [], 'prompt_id': '3faaacf4-036e-4b40-ad6f-0a2470e1ea3b', 'timestamp': 1793774896599}]",
+        "['execution_error', {'prompt_id': '3faaacf4-036e-4b40-ad6f-0a2470e1ea3b', 'node_id': '12', 'node_type': 'VAEDecode', 'executed': ['5', '6', '4', '8', '1', '7', '3', '11', '9', '10', '2'], 'exception_message': 'bad allocation\\n', 'exception_type': 'RuntimeError', 'traceback': ['  File \"D:\\\\ComfyUI_3\\"
+      ],
+      "name": "distilled-4b-fp4enc-1024",
+      "peak_gb": 11.61,
+      "release": {
+        "floor_gb": 1.83,
+        "released": false,
+        "seconds": 60,
+        "used_gb": 9.28
+      },
+      "resolution": [
+        1024,
+        1024
+      ],
+      "seconds": 26.4,
+      "steps": 4,
+      "unet": "flux-2-klein-4b.safetensors"
+    },
+    {
+      "baseline_gb": 9.28,
+      "clip": "qwen_3_4b_fp4_flux2.safetensors",
+      "completed": true,
+      "name": "distilled-4b-fp4enc-cctv",
+      "peak_gb": 11.06,
+      "release": {
+        "floor_gb": 1.83,
+        "released": true,
+        "seconds": 0.0,
+        "used_gb": 1.62
+      },
+      "resolution": [
+        1280,
+        960
+      ],
+      "seconds": 7.7,
+      "steps": 4,
+      "unet": "flux-2-klein-4b.safetensors"
+    },
+    {
+      "baseline_gb": 1.62,
+      "clip": "qwen_3_4b.safetensors",
+      "completed": true,
+      "name": "distilled-4b-fullenc-1024",
+      "peak_gb": 11.68,
+      "release": {
+        "floor_gb": 1.83,
+        "released": true,
+        "seconds": 0.0,
+        "used_gb": 1.66
+      },
+      "resolution": [
+        1024,
+        1024
+      ],
+      "seconds": 39.9,
+      "steps": 4,
+      "unet": "flux-2-klein-4b.safetensors"
+    },
+    {
+      "baseline_gb": 1.66,
+      "clip": "qwen_3_4b.safetensors",
+      "completed": true,
+      "name": "distilled-4b-fullenc-cctv",
+      "peak_gb": 11.72,
+      "release": {
+        "floor_gb": 1.83,
+        "released": true,
+        "seconds": 0.0,
+        "used_gb": 1.63
+      },
+      "resolution": [
+        1280,
+        960
+      ],
+      "seconds": 48.2,
+      "steps": 4,
+      "unet": "flux-2-klein-4b.safetensors"
+    }
+  ],
+  "custom_nodes_disabled": true,
+  "device_total_gb": 11.94,
+  "idle_baseline_gb": 1.33,
+  "reserve_vram_gb": 8.0
+}

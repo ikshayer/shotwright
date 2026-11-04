@@ -1,0 +1,24 @@
+{
+  "checks": {
+    "display AR is 4:3": true,
+    "encode reproducible (threads=1)": true,
+    "encode reproducible (threads=auto)": true,
+    "frame count matches artifact_schedule": true,
+    "frames reproducible": true,
+    "seed actually changes output": true
+  },
+  "encode_hash_threads1": "3cd2e096b06c5c74caa7e8885cda03840793f15f875e6fdb81481700aa678c6d",
+  "encode_hash_threadsauto": "81cd7d081824e065326bd3e4771a606d7a103bdb47011f2e65c4b2d25dcf1208",
+  "ffmpeg": "ffmpeg version 8.1.1-full_build-www.gyan.dev Copyright (c) 2000-2026 the FFmpeg developers",
+  "filter_graph": "scale=640:480:flags=bicubic,fps=12,select='not(between(n,24,29))',setpts=N/FRAME_RATE/TB,loop=loop=11:size=1:start=48,setpts=N/FRAME_RATE/TB,eq=brightness=0.02:contrast=1.08:saturation=0.75,noise=alls=12:allf=t+u:all_seed=427241414,unsharp=5:5:0.8,drawtext=fontfile=overlay.ttf:text='CAM 03  %{pts\\:gmtime\\:1131984000}':x=8:y=h-24:fontsize=16:fontcolor=white:box=1:boxcolor=black@0.4",
+  "filter_graph_hash": "014bc92a189ba54cfc978bc9ec23bef67b373c37a0a28d000fcd1ffe05fd977f",
+  "frame_count": 65,
+  "frames_hash": "7dbe8682b494be6631d0913d9a1099fbaec8a249327918fd1d313da88c85e15f",
+  "predicted_frame_count": 65,
+  "profile_id": "dvr-2005",
+  "profile_version": "0.1.0",
+  "pts_delta_distribution": {
+    "0.083333": 43,
+    "0.083334": 21
+  }
+}

@@ -10,3 +10,7 @@ __pycache__/
 # live in references/STYLE_BIBLE_DRAFT.md and references/CODEX_REPORT.md.
 references/frames/
 references/_tier3/
+
+# Orchestrator virtualenv: recreate with
+#   python -m venv .venv && .venv/Scripts/pip install nvidia-ml-py requests websocket-client
+.venv/
