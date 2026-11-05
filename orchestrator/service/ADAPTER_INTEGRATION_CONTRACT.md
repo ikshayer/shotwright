@@ -194,3 +194,111 @@ forbids adding another that looks measured. Any new key states which recorded fi
 3. **Per-project or global serialisation?** §8.3 serialises GPU work and there is one GPU,
    so global is the safe reading. If two projects should be able to interleave CPU-only
    degradation while one holds the GPU, say so — it changes the runner's shape.
+
+## Amendment 2 — adjudication of the first implementation attempt
+
+The implementer and the test author worked in parallel from this file and disagreed in
+three places. In each one **this contract was at fault**: it named types it never defined
+and assumed a domain capability that does not exist. Recorded here rather than patched
+away, because the gap is the finding.
+
+State after that pass: **14 failed, 1129 passed, 30 skipped.** All 11 integration tests
+fail, as do the four route-status cases. That work stays on `worktree-integration` and is
+**not merged**; `main` remains green.
+
+### `AdapterRequest` and `AdapterResult` are now defined
+
+The contract pinned `submit(project_id, request: AdapterRequest)` and never said what
+`AdapterRequest` was, so the two agents invented different types and nothing could match.
+
+```python
+@dataclass(frozen=True)
+class AdapterRequest:
+    kind: AdapterKind
+    payload: Any                 # the adapter's own request model, passed through untouched
+    record_id: str               # the record this work derives from
+    record_version: int          # the content version it was derived from, never a token
+    episode_id: str | None = None
+    required_vram_gb: float = 0.0
+    required_ram_gb: float = 0.0
+    required_disk_gb: float = 0.0
+
+@dataclass(frozen=True)
+class AdapterResult:
+    artifact_path: str           # contained, relative to the project root
+    value: Any = None            # the adapter's own result object
+```
+
+Reconciled deliberately, not split down the middle:
+
+- **No `Job` on the request.** The implementer put one there, but `submit` *returns* a
+  `Job`, so it must create and persist it. A request that already carries a Job makes the
+  signature incoherent. Resource declarations come across as plain fields and `submit`
+  builds the Job from them.
+- **`record_version`, not `version`** — the test author's spelling. `version` alone is
+  ambiguous in a codebase where `expected_version` means a mutation token.
+- **`payload` is kept** — the implementer was right that an adapter needs its own typed
+  request, and the runner must pass it through without interpreting it.
+
+### Staleness is DERIVED, not stored — this contract was wrong
+
+Amendment 1 said a superseded result is "marked stale". That was a mistake. A stored
+`stale` flag is a second source of truth for something the data already implies, and this
+project has been bitten by duplicated state repeatedly.
+
+**Binding:** an output is stale **iff** its `record_version` differs from the record's
+current head version. Nothing writes a stale flag and nothing needs a "mark stale"
+mutation. This also removes the awkwardness of a completed job having to mutate a record
+it does not own: recording an output appends a row, it does not revise an entity.
+
+### The blocking domain gap this contract assumed away
+
+The implementer reported, correctly, that the store and domain have no operation or
+entity field for attaching an artifact to a historical shot version, so it fell back to a
+side-car receipt that is not domain-linked and does not use a recording-time mutation
+token. The test author independently reported that it cannot assert the exact
+result-to-version binding. Both hit the same wall from opposite sides.
+
+They are right, and no implementer could have conformed. `ArtifactScheduleEntry`,
+`block_artifacts` and `analog_artifacts` are **degradation parameters** — visual
+artifacts — not build outputs. The store has per-version snapshots
+(`_read_version_snapshot`, `_lifecycle_path`) for *entities*, and nothing for a produced
+file.
+
+**Required before this layer can conform:** a domain record for a produced output, bound
+to the content version it came from.
+
+- A new entity, provisionally `ShotOutput`, keyed by `(shot_id, record_version, kind)`
+  where kind is scene, master, preview, still or degraded.
+- It carries the contained relative path, a content hash, and the provenance the adapters
+  already emit — for degradation, FR-21 records `profile_semver`, `filter_graph_hash` and
+  `pinned_binaries`; for a render, the engine id and build.
+- **Append-only.** A new output never replaces an older one; artifacts are retained
+  (invariant 3). Several outputs may exist for one `(shot_id, record_version)` across
+  attempts, and all are kept.
+- It carries **no** stale flag, per the decision above.
+- Approval still binds to `(shot_id, version)`. An output whose `record_version` is not
+  head therefore cannot satisfy a Review, with no extra rule needed — the existing
+  freshness check already compares versions.
+
+This is a domain and store change. Both agents were forbidden from making it, correctly:
+it is an entity-invariant decision, and it is the parent's.
+
+### Still unsatisfied, and not to be reported as done
+
+- **No default runtime wiring.** `create_app` and the CLI submit only when a `JobRunner`
+  is injected, so the four operations still answer `501` by default, contradicting
+  Amendment 1. The amended status contract is not met until the default app wires a
+  runner.
+- **Blender and ComfyUI still reject a positive throughput floor.** Three passes have now
+  routed around this: FR-12 fixed the queue but was barred from the adapters, and this
+  pass was barred too. The partition keeps excluding the fix. Whoever takes it next must
+  be allowed inside the two adapters.
+- **FFmpeg degradation has no cancellation hook** in FR-21's signature, so cancellation is
+  incomplete for that operation. It needs an adapter change, not a runner workaround.
+- **The `CameraProfile` to `PostProfileSpec` mapping is partial**, and font provenance for
+  `in_recording` overlays is unresolved.
+- The implementation was committed **unverified**: no pytest, no ruff, not even an import.
+  The brief gave `.venv\Scripts\python.exe`, which does not exist inside a worktree.
+  Future briefs must give the absolute shared interpreter path,
+  `D:\Work\video_pipeline\.venv\Scripts\python.exe`.
