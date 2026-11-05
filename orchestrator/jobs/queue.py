@@ -100,12 +100,25 @@ class JobQueue:
                            f"free VRAM precondition failed: {usable_free_mb / 1024:.2f} GB available, "
                            f"{job.required_vram_gb:.2f} GB required",
                            job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
+        self._preflight_host(job, cpu_only=False)
+
+    def preflight_cpu(self, job: Job) -> None:
+        """Admit a job that the caller has classified as not using a GPU."""
+        self._preflight_host(job, cpu_only=True)
+
+    def _preflight_host(self, job: Job, *, cpu_only: bool) -> None:
         free_ram = self.host.free_ram_gb()
         if free_ram < job.required_ram_gb:
+            remediation = (
+                "Free host RAM or close host-memory consumers, then retry the stage or "
+                "reduce its host-memory requirement."
+                if cpu_only else None
+            )
             raise JobError(JobErrorKind.OUT_OF_MEMORY,
                            f"free host RAM precondition failed: {free_ram:.2f} GB available, "
                            f"{job.required_ram_gb:.2f} GB required",
-                           job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
+                           job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id,
+                           remediation=remediation)
         free_disk = self.host.free_disk_gb(self.root.path)
         disk_required = job.required_disk_gb + self.settings.budget.min_free_disk_gb
         if free_disk < disk_required:

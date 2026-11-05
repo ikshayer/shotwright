@@ -153,6 +153,7 @@ class JobError(Exception):
         shot_id: str | None = None,
         run_id: str | None = None,
         cause: BaseException | None = None,
+        remediation: str | None = None,
     ) -> None:
         if not isinstance(kind, JobErrorKind):
             raise TypeError(f"kind must be a JobErrorKind, got {type(kind).__name__}")
@@ -163,6 +164,7 @@ class JobError(Exception):
         self.shot_id = shot_id
         self.run_id = run_id
         self.__cause__ = cause
+        self._remediation = remediation
 
     @property
     def retryable(self) -> bool:
@@ -170,7 +172,7 @@ class JobError(Exception):
 
     @property
     def remediation(self) -> str:
-        return self.kind.remediation
+        return self._remediation or self.kind.remediation
 
     @classmethod
     def from_exception(
