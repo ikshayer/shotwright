@@ -302,3 +302,104 @@ it is an entity-invariant decision, and it is the parent's.
   The brief gave `.venv\Scripts\python.exe`, which does not exist inside a worktree.
   Future briefs must give the absolute shared interpreter path,
   `D:\Work\video_pipeline\.venv\Scripts\python.exe`.
+
+## Amendment 3 — adjudication of the second attempt
+
+The second attempt verified itself properly: ruff clean, imports checked, and all four
+wired routes exercised against a stored project, each answering `202` with a `job_id` and
+`state: queued`. Combined with the independent tests it is **14 failed, 1146 passed, 30
+skipped**. Ten of the eleven integration failures share **one** cause, and that cause is
+this contract, not either agent.
+
+### Amendment 1 decision 3 was wrong: the lease is keyed on kind, not on VRAM
+
+Amendment 1 said the runner distinguishes GPU from non-GPU work "by
+`Job.required_vram_gb`", and added that "declaring zero VRAM to skip the lease is a defect,
+not an optimisation". The implementer turned that into a hard precondition — *GPU adapter
+jobs must declare a positive `required_vram_gb`* — which is faithful, and which makes the
+layer unusable, because **this project has no measured VRAM reservations to declare.**
+Both adapter hardware passes declared zero for precisely that reason, and `AGENTS.md`
+forbids inventing a measured-looking number to fill the gap. The rule demanded a figure
+the project is not allowed to make up.
+
+**Binding, replacing Amendment 1 decision 3:**
+
+- **`AdapterKind` decides the GPU lease.** `scene`, `render` and `generate` are GPU work
+  and take the lease; `degrade` is FFmpeg and does not. The decision is structural and
+  cannot be influenced by a caller's declaration.
+- **`required_vram_gb` is for admission sizing only**, and **zero is legitimate** while
+  reservations remain UNMEASURED. It is not a routing input.
+- The thing Amendment 1 was reaching for still holds, and is now true by construction: a
+  caller cannot route around the lease by understating resources, because routing no
+  longer reads them.
+
+### `submit` validates synchronously
+
+The implementer returns `404` from `submit` when the project does not exist; the test
+author expected `202` unconditionally. **The implementer is right.** Queuing work for a
+record that does not exist produces a job id for something that was never possible and
+forces the caller to poll to discover a `404`-shaped failure.
+
+**Binding:**
+
+- A missing project or bound record at submit time is **`404`**, mapped from
+  `RecordNotFound` as the error table already requires.
+- A `JobQueue.preflight` admission refusal surfaces **synchronously from `submit`** as a
+  `JobError`, mapped 409 retryable / 422 terminal with its remediation hint. Admission is
+  checked before a job id is issued.
+- `202` therefore means *accepted and queued*, not merely *received*.
+- Tests for the wired routes must create the project (and shot) first. The `202`
+  assertion does not move; the setup was incomplete.
+- **One inconsistency to fix:** `build_scene` currently answers `202` for a nonexistent
+  project while the other three answer `404`. All four must validate identically.
+
+### `AdapterResult.value` projection, and the kind mapping
+
+Both were undefined, and the test author flagged both.
+
+- **`AdapterResult.value`** carries the adapter's own result object, passed through
+  untouched. The runner projects provenance into `ShotOutput` by reading **only** the
+  fields `ShotOutput` declares, taking them from `value` when it is a mapping or from
+  matching attributes when it is an object, and leaving absent fields unset. The runner
+  never invents provenance and never fails a completed job because a provenance field is
+  missing — a missing field is recorded as absent.
+- **`AdapterKind` to `ShotOutputKind`:** `scene` to `scene`, `render` to `master`,
+  `generate` to `still`, `degrade` to `degraded`. `preview` is produced by a render whose
+  request asks for a preview, so it is selected by the request rather than the kind; until
+  previews are wired, a render records `master`.
+
+### Corrections to earlier amendments
+
+- **Amendment 1's adapter-absent enumeration was incomplete.** It said the `501` rule
+  survives only for `search_assets`, `create_asset` and `export`, and omitted
+  **`sample_references`**, which is also adapter-absent and must keep its `501`. The
+  implementer caught this. The correct set is `search_assets`, `create_asset`,
+  `sample_references` and `export`.
+- **Amendment 1's "marked stale" wording is superseded** by Amendment 2: staleness is
+  derived from `record_version` versus head and is never stored. Amendment 1's text stands
+  as a record of what was decided and then corrected; it is not to be implemented.
+
+### Two real gaps the second attempt surfaced
+
+Both are reported rather than papered over, and neither is the integration layer's to fix
+alone.
+
+- **A one-shot CLI invocation can kill its own job.** The CLI submits and returns while the
+  in-process worker is a daemon thread, so process exit can terminate work mid-render.
+  Async submission is right for HTTP and wrong for a one-shot command. **Binding:** the
+  CLI waits for its job by default, reporting the result, with an explicit opt-out for
+  fire-and-forget. A CLI that returns before its work survives is worse than one that
+  blocks.
+- **`JobQueue` has no CPU-only preflight path**, so degradation avoids the GPU lease but
+  still probes GPU resources during admission. A CPU-only job can therefore be refused for
+  GPU reasons. That is a jobs-layer change and is not this layer's to make; it is recorded
+  as a follow-up.
+
+Also still open, from FR-21 rather than from here: the PostProfile adapter cannot stop
+FFmpeg mid-run, so a cancelled degradation is recognised only after the process returns
+and its artifact is not recorded. That needs the adapter cancellation hook FR-21 did not
+build.
+
+The `CameraProfile` to `PostProfileSpec` mapping covers the fields `PostProfileSpec` can
+represent; tagged fields with no target, such as bitrate and overlay detail, remain
+unmapped. That is a gap in `PostProfileSpec`, not in the mapping.
