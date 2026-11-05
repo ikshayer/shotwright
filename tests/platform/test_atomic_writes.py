@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator.platform.containment import ContainmentError, ProjectRoot
+from orchestrator.platform.containment import AtomicWriteError, ContainmentError, ProjectRoot
 
 
 def _read_through_replace(path, attempts: int = 200, pause: float = 0.002) -> bytes:
@@ -40,13 +40,22 @@ def test_concurrent_writers_never_expose_partial_or_empty_content(tmp_path):
     writers_done = threading.Event()
     failures: list[str] = []
     writer_errors: list[BaseException] = []
+    refusals: list[bytes] = []
 
     def writer(payload: bytes) -> None:
         try:
             if not start.wait(timeout=10):
                 raise TimeoutError("writer start gate was not released")
             for _ in range(iterations):
-                root.write_bytes("state/jobs/job.json", payload)
+                try:
+                    root.write_bytes("state/jobs/job.json", payload)
+                except AtomicWriteError:
+                    # A refused overwrite is a SANCTIONED outcome, not a defect. Amendment 2
+                    # measured that rename-over-an-open-file is refused on this platform
+                    # whatever share mode the reader used, so "the overwrite always wins"
+                    # is not available. The guarantee under test is the one that matters:
+                    # the target is never left torn. Failing loudly is how that is kept.
+                    refusals.append(payload[:1])
         except BaseException as error:  # noqa: BLE001 - report every worker-thread failure to pytest
             writer_errors.append(error)
 
@@ -83,6 +92,12 @@ def test_concurrent_writers_never_expose_partial_or_empty_content(tmp_path):
         "concurrency test threads exceeded their bounded join time"
     )
     assert not writer_errors, f"writer thread raised: {writer_errors!r}"
+    # Refusals are allowed but must not be the whole story: if EVERY write was refused
+    # the test proved nothing about torn content.
+    assert len(refusals) < iterations * 2, (
+        f"every overwrite was refused ({len(refusals)}); the test observed no completed "
+        "write and so cannot speak to torn content"
+    )
     assert not failures, "atomic write regression: " + "; ".join(failures)
     assert target.read_bytes() in payloads, "final target was not one complete writer version"
 
