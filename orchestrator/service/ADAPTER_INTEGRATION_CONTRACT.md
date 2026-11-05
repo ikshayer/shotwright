@@ -403,3 +403,106 @@ build.
 The `CameraProfile` to `PostProfileSpec` mapping covers the fields `PostProfileSpec` can
 represent; tagged fields with no target, such as bitrate and overlay detail, remain
 unmapped. That is a gap in `PostProfileSpec`, not in the mapping.
+
+## Amendment 4 — adjudication of the third attempt
+
+The third attempt conformed to Amendment 3 on all six points. Combined with the
+independent tests the integration surface went from **14 failed / 1146 passed** to
+**1 failed / 406 passed** across `tests/service` and `tests/api`. Four disagreements were
+adjudicated and one new defect was found, which is now the only thing outstanding.
+
+### Provenance: `ShotOutput` wins, and Amendment 3 was wrong
+
+**Both agents independently reported the same contradiction**, from opposite sides.
+Amendment 3 said a missing provenance field is "recorded as absent" and must not fail a
+completed job; `SHOTOUTPUT_CONTRACT.md` *requires* engine provenance for scene and master
+outputs and degradation provenance for degraded ones, and the store revalidates it. The
+test author could not write the case; the implementer could not satisfy it.
+
+**Binding:** `ShotOutput` wins.
+
+- Provenance is the point of the record. FR-06's acceptance requires that "the exact model
+  artifacts in use are recorded per run", and AT-05/AT-14 determinism rests on it. A master
+  with no engine id is not reproducible, so recording one with the field absent would
+  destroy the guarantee quietly.
+- Amendment 3's "recorded as absent" applies **only** to fields `ShotOutput` declares
+  optional. A missing **required** provenance field is a **terminal failure** with a
+  remediation hint naming the field and the adapter that should have supplied it.
+- In practice this costs nothing: Blender reads back its engine and device literally and
+  FR-21 records `profile_semver`, `filter_graph_hash` and `pinned_binaries`. An adapter
+  that cannot name what produced an artifact has a defect worth failing on.
+
+### Job state vocabulary: `completed`
+
+The implementer wrote `"completed"`; the test author expected `"succeeded"`. **The
+implementer is right**, and not as a matter of taste: `orchestrator/jobs/queue.py:228`
+already transitions to `"completed"`, and the queue is the authority on job state. The
+vocabulary is `queued`, `running`, `completed`, `failed`, `cancelled`. Correcting this one
+word turned eight failing tests green.
+
+### A missing project is not this layer's business
+
+The test author expected `JobRunner.submit` to raise `RecordNotFound` for a missing
+project. It does not, and should not: the runner is handed an already-resolved
+`ProjectStore`, so the project's existence was settled before `submit` was called.
+Resolution and its `404` belong to the API/CLI layer, where `tests/api/test_adapters.py`
+already proves it. Making the runner re-validate would be the duplicated path check FR-25
+forbids.
+
+A missing **bound record** *is* this layer's business, because the runner loads it, and
+that case is covered.
+
+### A cancellation is not a failure
+
+`_persist_job` in the runner hard-coded `state = "failed"` for every error kind, so a job
+cancelled before its adapter started reported `"failed"` and overwrote the `"cancelled"`
+state that `cancel()` had already written. FR-27 keeps the two distinct so an operator can
+tell "I stopped this" from "this broke", and `JobQueue`'s own terminal branch already makes
+the distinction. Fixed.
+
+### NEW DEFECT, and the only thing still failing: job records are written non-atomically
+
+Fixing the above exposed a worse problem underneath. The single remaining test failure is
+not an assertion mismatch — it is a **torn read**:
+
+```
+pydantic_core.ValidationError: Invalid JSON: EOF while parsing a value
+  at line 1 column 0 [input_value='']
+```
+
+The job record came back **empty**. Two threads write `state/jobs/<job_id>.json`:
+`cancel()` writes it on the caller's thread while the worker writes the same file through
+`queue._transition`, and `ProjectRoot.write_text` is a plain in-place write with no
+temp-and-rename. A concurrent cancel can therefore leave the record empty or partial.
+
+This matters more than the test it broke. **Invariant 1 makes project-local JSON the
+source of truth**, and a source of truth that can be read back empty is the worst failure
+mode this project has. It is not specific to jobs either — every `ProjectRoot.write_text`
+and `write_bytes` caller shares the exposure, and AT-09 requires an exported package to
+reopen standalone.
+
+**This is deliberately NOT patched here.** The right fix is atomic writes in
+`platform.containment.ProjectRoot` — write to a temp path inside the root and `os.replace`
+onto the target, which is atomic on both platforms — and that is a change to the single
+containment authority every write in the system passes through. It needs its own contract,
+its own independent tests and its own review, not an edit tacked onto this pass. Doing it
+there fixes the whole system at once; serialising only the runner's writes would leave the
+queue's writes, and every other caller, exposed.
+
+Until it lands, `test_cancel_after_submit_before_adapter_start_is_terminal` stays red, and
+the integration work stays unmerged. A green suite bought by papering over a torn write
+would be worth less than this failing test.
+
+### Still unresolved, recorded rather than guessed
+
+- Whether `drain()` must re-raise a job's `JobError` to its caller, or whether the
+  persisted job is the only authority. The tests currently allow either.
+- Which operations may bind to **non-shot** records. `generate_media` is project-scoped and
+  carries no shot in its URL, yet `ShotOutput` is shot-keyed; the tests supply shot ids in
+  the body to get around it. Either `generate_media` is genuinely shot-scoped and its route
+  should say so, or outputs need a non-shot owner. This needs deciding before FR-10.
+- FR-21 still has no FFmpeg cancellation hook, so a cancelled degradation is noticed only
+  after the process returns and its artifact is discarded.
+- `JobRunner` must select `preflight_cpu` for `AdapterKind.degrade`. That path landed in
+  `6256a48` and the runner was explicitly barred from touching the jobs layer while it was
+  in flight, so the two have not been joined up yet.

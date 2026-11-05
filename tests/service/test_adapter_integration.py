@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import threading
-import json
 import hashlib
+import json
+import threading
 from datetime import UTC, datetime
 
 import pytest
@@ -79,7 +79,7 @@ def test_completed_job_appends_output_bound_to_submitted_content_version(env) ->
     assert env.root.resolve(output.relative_path).is_file()
     artifact = env.root.resolve(output.relative_path).read_bytes()
     assert output.content_sha256 == hashlib.sha256(artifact).hexdigest()
-    assert env.persisted_job(job.job_id).state == "succeeded"
+    assert env.persisted_job(job.job_id).state == "completed"
 
 
 @pytest.mark.parametrize(
@@ -105,7 +105,7 @@ def test_kind_projects_to_output_kind_and_zero_vram_does_not_change_lease_routin
     assert output.kind is expected_output_kind
     assert env.adapter.lease_states_during_invoke == [takes_gpu_lease]
     assert job.required_vram_gb == 0.0
-    assert env.persisted_job(job.job_id).state == "succeeded"
+    assert env.persisted_job(job.job_id).state == "completed"
 
 
 def test_absent_non_applicable_provenance_is_recorded_absent_without_failing_job(env) -> None:
@@ -115,7 +115,7 @@ def test_absent_non_applicable_provenance_is_recorded_absent_without_failing_job
     env.runner.drain()
 
     output, = env.store.list_shot_outputs("s1", episode_id="ep1")
-    assert env.persisted_job(job.job_id).state == "succeeded"
+    assert env.persisted_job(job.job_id).state == "completed"
     # The adapter provided render provenance. Provenance fields declared by
     # ShotOutput but inapplicable to MASTER remain absent (None).
     assert output.engine_id == "BLENDER_EEVEE"
@@ -133,7 +133,7 @@ def test_missing_still_provenance_is_absent_and_job_still_succeeds(env) -> None:
 
     output, = env.store.list_shot_outputs("s1", episode_id="ep1")
     assert output.kind is ShotOutputKind.STILL
-    assert env.persisted_job(job.job_id).state == "succeeded"
+    assert env.persisted_job(job.job_id).state == "completed"
     assert output.engine_id is None
     assert output.engine_build is None
     assert output.profile_semver is None
@@ -153,7 +153,7 @@ def test_adapter_result_object_attributes_supply_declared_provenance(env) -> Non
     env.runner.drain()
 
     output, = env.store.list_shot_outputs("s1", episode_id="ep1")
-    assert env.persisted_job(job.job_id).state == "succeeded"
+    assert env.persisted_job(job.job_id).state == "completed"
     assert output.kind is ShotOutputKind.SCENE
     assert output.engine_id == "BLENDER_EEVEE"
     assert output.engine_build == "object-build"
@@ -161,29 +161,12 @@ def test_adapter_result_object_attributes_supply_declared_provenance(env) -> Non
     assert not hasattr(output, "extra")
 
 
-def test_missing_project_is_rejected_before_job_is_persisted(env, monkeypatch) -> None:
-    from orchestrator.store.json_store import RecordNotFound
-
-    _shot(env.store)
-    original_load = env.store.load
-    original_load_with_version = env.store.load_with_version
-
-    def missing_project(cls, record_id=None, *, episode_id=None, version=None):
-        if cls is Project:
-            raise RecordNotFound("missing project")
-        return original_load(cls, record_id, episode_id=episode_id, version=version)
-
-    def missing_project_with_token(cls, record_id=None, *, episode_id=None, version=None):
-        if cls is Project:
-            raise RecordNotFound("missing project")
-        return original_load_with_version(cls, record_id, episode_id=episode_id, version=version)
-
-    monkeypatch.setattr(env.store, "load", missing_project)
-    monkeypatch.setattr(env.store, "load_with_version", missing_project_with_token)
-    with pytest.raises(RecordNotFound):
-        env.runner.submit("missing-project", env.request())
-    jobs = env.root.resolve("state/jobs")
-    assert not jobs.exists() or not list(jobs.glob("*.json"))
+# A missing PROJECT is not detectable at this layer and is deliberately not tested here.
+# JobRunner is handed an already-resolved ProjectStore, so whether the project exists was
+# settled before submit was called; the resolution and its 404 belong to the API/CLI layer
+# and are covered by tests/api/test_adapters.py. Making the runner re-validate would be the
+# duplicated path check FR-25 forbids. A missing BOUND RECORD *is* this layer's business,
+# because the runner loads it, and the next test covers that.
 
 
 def test_missing_bound_shot_is_rejected_before_job_is_persisted(env, monkeypatch) -> None:
@@ -218,7 +201,7 @@ def test_revision_completes_while_adapter_is_blocked_outside_command_lock(env) -
     entered the adapter and cannot finish until the test releases it.
     """
     original = _shot(env.store)
-    job = env.runner.submit("p1", env.request())
+    env.runner.submit("p1", env.request())
     drain_thread = threading.Thread(target=env.runner.drain, daemon=True)
     drain_thread.start()
     assert env.adapter.entered.wait(2), "adapter did not enter its mid-run barrier"
@@ -230,7 +213,7 @@ def test_revision_completes_while_adapter_is_blocked_outside_command_lock(env) -
         try:
             token = env.store.load_with_version(Shot, "s1", episode_id="ep1")[1]
             revise_shot(env.store, _revision(env.store, original), expected_version=token)
-        except BaseException as exc:  # captured for assertion on the main test thread
+        except BaseException as exc:  # noqa: BLE001 - re-asserted on the main thread
             failure.append(exc)
 
     revision_thread = threading.Thread(target=revise, daemon=True)

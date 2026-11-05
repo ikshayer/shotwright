@@ -465,5 +465,11 @@ def _job_error(kind: JobErrorKind, message: str, job: Job,
 
 
 def _persist_job(root: ProjectRoot, job: Job, error: JobError) -> None:
-    job.state, job.error_kind = "failed", error.kind.value
+    # A cancellation is not a failure. This fallback path previously wrote "failed" for
+    # every error kind, so a job cancelled before its adapter started reported "failed"
+    # and overwrote the "cancelled" state cancel() had already persisted. FR-27 keeps the
+    # two distinct precisely so an operator can tell "I stopped this" from "this broke",
+    # and JobQueue's own terminal branch already makes the same distinction.
+    job.state = "cancelled" if error.kind is JobErrorKind.CANCELLED else "failed"
+    job.error_kind = error.kind.value
     root.write_text(f"state/jobs/{job.job_id}.json", job.model_dump_json(indent=2))
