@@ -97,3 +97,38 @@ would be the duplicated source of truth this project forbids.
 - At least one test asserts **API/CLI parity**: every operation in the table above is
   reachable from both, driven from the route table rather than a hand-written list, so
   adding an operation cannot silently skip one surface.
+
+## Amendment 1 — the interface, pinned
+
+The first pass specified behaviour but not names, so the test author had to assume an
+interface while the implementer chose its own. That was a defect in this contract, not
+in either agent. The assumptions below were reached independently and are sensible, so
+they are now binding. **Implementation conforms to these; tests do not move.**
+
+```python
+orchestrator.api.app.create_app(settings: Settings, token: str) -> FastAPI
+orchestrator.api.cli.app                      # Typer/Click application object
+orchestrator.api.manifest.build_manifest(app) -> dict   # tools each carrying "name"
+```
+
+- Loopback token header: **`X-Loopback-Token`**.
+- CLI command names follow their route function, with `_` and `-` both accepted.
+- A request from a foreign origin is **403**, not 400. 400 means malformed; a refused
+  origin is a policy decision.
+- A 501 body carries an **`adapter`** key naming the missing adapter as a string.
+- Every mapped error body shares one top-level shape, carrying `kind` and `retryable`,
+  and — where the exception provides them — `expected`, `actual`, `current`, `limit`,
+  `observed` and `remediation`.
+- Every route with `include_in_schema=True`, health included, needs a CLI twin.
+
+### `TokenConflict` does not exist — remove it
+
+The error table listed `TokenConflict` alongside `VersionConflict`. There is no such
+type. The store carries `mutation_token` and raises **`VersionConflict`** for both a
+stale content version and a stale mutation token. The API maps that one exception to
+409 and distinguishes the two cases **in the body**, not by type.
+
+The API layer must NOT define its own exception class for this. Declaring a type the
+store already owns puts policy in the transport layer, which this contract forbids in
+its second paragraph, and creates the duplicated source of truth the project keeps
+being bitten by. Import from the store; do not restate.
