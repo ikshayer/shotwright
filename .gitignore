@@ -21,3 +21,6 @@ references/_tier3/
 # pytest temp output (an agent redirected tmp into the workspace)
 Workvideo_pipeline_pytest_tmp/
 *_pytest_tmp/
+
+# disposable review/repro artifacts
+_work/

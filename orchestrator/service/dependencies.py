@@ -11,6 +11,7 @@ from orchestrator.domain.invalidation import (
     revokes_cut_approval,
     shots_invalidated_by,
     shots_invalidated_by_profile,
+    shots_invalidated_by_script,
 )
 from orchestrator.domain.state import TransitionContext, check_transition
 from orchestrator.platform.errors import JobError, JobErrorKind
@@ -88,16 +89,13 @@ def revise_script(
     before = store.load(Script, revised.script_id, episode_id=revised.episode_id)
     if before.version != expected_version:
         raise VersionConflict(f"script/{revised.script_id}", expected_version, before.version, before)
-    old = {beat.beat_id: beat for beat in before.beats}
-    new = {beat.beat_id: beat for beat in revised.beats}
-    changed = {beat_id for beat_id in old.keys() | new.keys() if old.get(beat_id) != new.get(beat_id)}
-    shots = _shots(store, [revised.episode_id]) if changed else []
+    shots = _shots(store, [revised.episode_id])
+    decision = shots_invalidated_by_script(before, revised, shots)
     store.revise(revised, expected_version=expected_version)
-    if not changed:
+    if not decision.shot_ids:
         return ()
-    hits = set().union(*(set(shots_invalidated_by(beat_id, shots, "Script beat changed").shot_ids) for beat_id in changed))
     return _invalidate(
-        store, shots, hits, "Script beat changed",
+        store, shots, decision.shot_ids, decision.reason,
         already_changed=(f"Script {revised.script_id}@{revised.version}",),
     )
 

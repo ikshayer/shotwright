@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from orchestrator.domain.base import ShotStatus
 from orchestrator.domain.entities import Episode, Review, Shot, StyleBible
-from orchestrator.domain.state import TransitionContext, TransitionError, check_transition
+from orchestrator.domain.state import (
+    ReviewApprovalError,
+    TransitionContext,
+    TransitionError,
+    check_review_approval,
+    check_transition,
+)
 from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.store.json_store import ProjectStore, RecordNotFound, VersionConflict
 
@@ -18,17 +24,16 @@ def _review(store: ProjectStore, review_id: str, target_id: str, target_version:
             f"approval Review {review_id!r} does not exist",
             cause=exc,
         ) from exc
-    if review.target_id != target_id or review.target_version != target_version:
+    try:
+        check_review_approval(
+            review, target_id=target_id, target_version=target_version,
+        )
+    except ReviewApprovalError as exc:
         raise JobError(
             JobErrorKind.INVALID_MANIFEST,
-            f"Review {review_id!r} targets {review.target_id!r}@{review.target_version}, "
-            f"not {target_id!r}@{target_version}",
-        )
-    if review.approval_state is not ShotStatus.APPROVED:
-        raise JobError(
-            JobErrorKind.INVALID_MANIFEST,
-            f"Review {review_id!r} records {review.approval_state.value}, not approval",
-        )
+            str(exc),
+            cause=exc,
+        ) from exc
     return review
 
 

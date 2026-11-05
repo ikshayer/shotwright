@@ -1,6 +1,6 @@
 """The approval state machine of 10.2.
 
-Pure: no I/O, no entity imports beyond the enums, so the whole machine is
+Pure: no I/O, only domain record and enum imports, so the guards are
 testable without a store, a renderer or a GPU.
 
 Two rules in 10.2 are easy to state and easy to violate in code, so they are
@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .base import FramingStatus, ShotStatus
+from .entities import Review
 
 S = ShotStatus
 
@@ -109,3 +110,34 @@ def check_transition(
                 "a rebuilt shot enters 'review', never 'approved' - regeneration "
                 "does not carry the previous approval forward",
             )
+
+
+class ReviewApprovalError(ValueError):
+    """A Review does not approve the exact requested target version."""
+
+
+def check_review_approval(
+    review: Review,
+    *,
+    target_id: str,
+    target_version: int,
+) -> None:
+    """Require a Review to approve exactly ``target_id@target_version``.
+
+    The guard is pure and shared by Shots, StyleBibles, and Episode cut versions.
+    """
+    if review.target_id != target_id:
+        raise ReviewApprovalError(
+            f"Review {review.review_id!r} targets {review.target_id!r}, "
+            f"not {target_id!r}"
+        )
+    if review.target_version != target_version:
+        raise ReviewApprovalError(
+            f"Review {review.review_id!r} targets version {review.target_version}, "
+            f"not version {target_version} of {target_id!r}"
+        )
+    if review.approval_state is not ShotStatus.APPROVED:
+        raise ReviewApprovalError(
+            f"Review {review.review_id!r} records {review.approval_state.value}, "
+            "not approval"
+        )

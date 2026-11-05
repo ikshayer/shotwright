@@ -13,7 +13,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from .base import Invalidation, ShotStatus
-from .entities import CameraProfile, Shot
+from .entities import CameraProfile, Script, Shot
 
 
 def field_invalidation(model: type, name: str) -> Invalidation | None:
@@ -158,3 +158,63 @@ def agent_overwrites_creator_fields(
             if name in protected and getattr(shot, name, None) != value
         )
     )
+
+
+def shots_invalidated_by_script(
+    before: Script,
+    after: Script,
+    shots: Iterable[Shot],
+) -> Invalidated:
+    """Select approved episode shots affected by Script beat or mapping edits.
+
+    Logline, ordering, and version metadata do not define invalidation scope.
+    The function is pure and preserves the supplied shot order and records.
+    """
+    if before.script_id != after.script_id:
+        raise ValueError(
+            f"cannot diff different scripts: {before.script_id!r} vs {after.script_id!r}"
+        )
+    if before.episode_id != after.episode_id:
+        raise ValueError(
+            f"cannot diff scripts from different episodes: "
+            f"{before.episode_id!r} vs {after.episode_id!r}"
+        )
+
+    old_beats = {beat.beat_id: beat for beat in before.beats}
+    new_beats = {beat.beat_id: beat for beat in after.beats}
+    affected_beats = {
+        beat_id
+        for beat_id in old_beats.keys() | new_beats.keys()
+        if old_beats.get(beat_id) != new_beats.get(beat_id)
+    }
+
+    old_mapping = before.beat_to_shot
+    new_mapping = after.beat_to_shot
+    mapping_changes = {
+        beat_id
+        for beat_id in old_mapping.keys() | new_mapping.keys()
+        if old_mapping.get(beat_id) != new_mapping.get(beat_id)
+    }
+    affected_beats.update(mapping_changes)
+    affected_shots = {
+        shot_id
+        for beat_id in affected_beats
+        for shot_id in (old_mapping.get(beat_id), new_mapping.get(beat_id))
+        if shot_id is not None
+    }
+
+    if not affected_beats and not affected_shots:
+        return Invalidated((), "no beat content or beat-to-shot mapping change")
+
+    hits = tuple(dict.fromkeys(
+        shot.shot_id
+        for shot in shots
+        if shot.episode_id == before.episode_id
+        and shot.status is ShotStatus.APPROVED
+        and (
+            shot.beat_id in affected_beats
+            or any(beat_id in shot.dependencies for beat_id in affected_beats)
+            or shot.shot_id in affected_shots
+        )
+    ))
+    return Invalidated(hits, "Script beat content or beat-to-shot mapping changed")
