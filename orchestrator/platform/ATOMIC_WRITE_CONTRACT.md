@@ -133,3 +133,104 @@ knowing, not a secret to keep.
 Once this lands, the parked integration conformance branch (`e73438c`, currently 1 failed /
 1177 passed) is expected to go green, because its one failure is the torn read above. The
 parent will confirm that; do not try to merge or test that branch yourself.
+
+## Amendment 1 — adjudication, and the finding that changes this pass
+
+The implementation conformed to the mechanism requirements and the full suite passed on its
+own branch: **1147 passed, 29 skipped**, ruff clean, with wall time **149.60 s** against a
+**162.07 s** baseline, so the extra file creation and rename cost nothing measurable.
+
+Combined with the independent tests, **one test fails, and it is right to fail.** It has
+taught us that requirement 1 is not achievable the way this contract stated it.
+
+### Requirement 4 was too strong: never MISINTERPRETED, not never observed
+
+The test author reported requirements 3 and 4 as mutually unsatisfiable, and was correct.
+Requirement 3 puts the staging artifact **inside** the root, because invariant 4 admits no
+exceptions for temp files. A raw `rglob("*")` from the root therefore sees it by
+definition. The contract also mis-stated the call site: `jobs/queue.py` uses `rglob("*")`
+(now `os.walk`), not `glob("*")`.
+
+**Binding restatement:** no enumeration may **misinterpret** a staging artifact as content.
+Concretely the artifact must not be named like a record (no `.json` suffix), must not be
+loadable as a project, and must be pruned from the disk-accounting walk. A staging
+directory listing its own file is not a leak. Checked against what the enumerators actually
+do with what they find:
+
+- `queue.py` sums file sizes for the FR-26 ceiling and parses nothing. The implementation
+  prunes the staging directory, which keeps accounting stable; the trade-off is that a
+  large in-flight write is briefly uncounted. Accepted.
+- `api/app.py:72` iterates the root, skips non-directories, and swallows `RecordNotFound`,
+  so a staging entry is already tolerated.
+- The `*.json` globs cannot see an artifact that is not named `*.json`.
+
+The enumeration test has been reconciled to this and passes.
+
+### Requirement 1 CANNOT be met by the writer alone on Windows
+
+This is the finding. Requirement 1 said a read returns either the complete previous or the
+complete new contents. `os.replace` guarantees that for *content* — but not for
+*openability*, and on Windows it does not even guarantee the replace will happen. The
+independent test produced both halves of the problem:
+
+```
+reader raised PermissionError: [Errno 13] Permission denied: ...state/jobs/job.json
+AtomicWriteError: replace was denied: [WinError 5] Access is denied
+```
+
+- A reader opening the target mid-replace can fail with `PermissionError`.
+- A replace attempted while a reader holds a handle fails with `WinError 5`.
+
+**Root cause:** on Windows a rename over an open file is refused unless every open handle
+was created with `FILE_SHARE_DELETE`, and Python's built-in `open()` does not set it. POSIX
+has no equivalent problem — `rename` always succeeds and existing readers keep the old
+inode.
+
+No retry budget fixes this. The implementation's five attempts over ~150 ms is a reasonable
+bound, but a reader in a loop will always win the race, and lengthening the budget only
+converts a fast loud failure into a slow one.
+
+**Consequence: this pass is half of the fix, and must not be merged alone.** It does strictly
+improve matters — a loud `AtomicWriteError` is far better than a silently empty source of
+truth — but it trades torn reads for refused writes, and both are failures.
+
+**Binding, and required before merge:** `ProjectRoot` gains a contained read —
+`read_bytes` / `read_text` — that opens with `FILE_SHARE_DELETE` on Windows, and the
+repository's reads are migrated onto it. `ProjectRoot` currently has **no read methods at
+all**: fourteen call sites do `root.resolve(rel).read_text()` themselves, which is why
+there is no single place to fix today. Giving the module a complete read/write surface is
+the right shape independently of this bug.
+
+Until that lands, `test_concurrent_writers_never_expose_partial_or_empty_content` stays red
+and this work stays unmerged. Its reader retries on `PermissionError` as a stand-in for the
+helper; its torn-content assertion is unchanged and still has teeth, having observed **0
+bytes** against the in-place implementation.
+
+### Ratified
+
+- **The staging mechanism:** `.projectroot-atomic-write/write-<32 hex>.tmp` inside the
+  root, resolved through `ProjectRoot`, with redirected staging symlinks and junctions
+  rejected and device IDs checked before replacement.
+- **`write_with` stays non-atomic**, as the contract required.
+- **The GPU lease lock file must never be atomically replaced.** The implementer found this
+  unprompted and it is load-bearing: `os.replace` substitutes file identity, so a process
+  holding an OS lock on the old file would be holding a lock on nothing. Lease
+  initialisation now uses exclusive `write_with` creation. **Any future file guarded by an
+  OS-level lock is in the same position** and must not be written atomically.
+- **Bounded retry then loud failure**, with no non-atomic fallback. `AtomicWriteError` is
+  the classified failure.
+
+### Open, and not to be reported as done
+
+- **The staging prefix is not reserved.** `ProjectRoot` still accepts caller paths under
+  `.projectroot-atomic-write`, so a caller can collide with staging, and anything it writes
+  there is excluded from disk accounting by the prune. Reserve the prefix in `resolve()`,
+  the way Windows device names are already refused.
+- **`json_store.py:875` has its own sibling-temp writer** using `write_with`, predating
+  this work. It should be migrated onto the atomic write so there is one staging mechanism
+  rather than two.
+- **Requirement 7's cleanup guarantee is not absolute.** If the OS persistently denies
+  deletion, the retries end in a loud error but a staging file may remain.
+- `fsync` remains omitted by design: atomic, not durable.
+- Native Windows sharing races and cross-volume replacement were not verified beyond what
+  the suite exercises.
