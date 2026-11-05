@@ -16,7 +16,10 @@ Two things here are load-bearing rather than descriptive:
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
+from enum import StrEnum
+from pathlib import PurePosixPath, PureWindowsPath
 
 from pydantic import Field, field_serializer, field_validator, model_validator
 
@@ -140,6 +143,7 @@ class Shot(VersionedEntity):
             )
         return self
 
+
     @model_validator(mode="after")
     def _approved_shots_cite_a_review(self) -> Shot:
         if self.status is ShotStatus.APPROVED and not self.approval_review_id:
@@ -159,6 +163,77 @@ class Shot(VersionedEntity):
         stable. Kept as a set in code because membership is the operation.
         """
         return sorted(value)
+
+
+class ShotOutputKind(StrEnum):
+    """The produced-file categories attached to one Shot content version."""
+
+    SCENE = "scene"
+    MASTER = "master"
+    PREVIEW = "preview"
+    STILL = "still"
+    DEGRADED = "degraded"
+
+
+class ShotOutput(Entity):
+    """Immutable receipt binding a retained output file to its source Shot version."""
+
+    output_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_-]+$")
+    episode_id: str = Field(min_length=1)
+    shot_id: str = Field(min_length=1)
+    record_version: int = Field(ge=1, strict=True)
+    kind: ShotOutputKind
+    relative_path: str = Field(min_length=1)
+    content_sha256: str
+    engine_id: str | None = None
+    engine_build: str | None = None
+    profile_semver: str | None = None
+    filter_graph_hash: str | None = None
+    pinned_binaries: dict[str, str] | None = None
+
+    @field_validator("relative_path")
+    @classmethod
+    def _relative_artifact_path(cls, value: str) -> str:
+        if "\x00" in value:
+            raise ValueError("relative_path must not contain NUL")
+        posix = PurePosixPath(value)
+        windows = PureWindowsPath(value)
+        if posix.is_absolute() or windows.is_absolute() or windows.drive:
+            raise ValueError("relative_path must be project-relative")
+        if any(part == ".." for part in value.replace("\\", "/").split("/")):
+            raise ValueError("relative_path must not traverse above its project-relative location")
+        return value
+
+    @field_validator("content_sha256", "filter_graph_hash")
+    @classmethod
+    def _sha256_hex(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ValueError("hash must be 64 lowercase hexadecimal characters")
+        return value
+
+    @model_validator(mode="after")
+    def _provenance_matches_kind(self) -> ShotOutput:
+        if not re.fullmatch(r"[0-9a-f]{64}", self.content_sha256):
+            raise ValueError("content_sha256 must be 64 lowercase hexadecimal characters")
+        if self.kind in {ShotOutputKind.SCENE, ShotOutputKind.MASTER, ShotOutputKind.PREVIEW}:
+            if not self.engine_id or not self.engine_build:
+                raise ValueError(f"{self.kind.value} output requires engine_id and engine_build")
+            if any(value is not None for value in
+                   (self.profile_semver, self.filter_graph_hash, self.pinned_binaries)):
+                raise ValueError("render outputs may not carry degradation provenance")
+        elif self.kind is ShotOutputKind.DEGRADED:
+            if not self.profile_semver or not self.filter_graph_hash or not self.pinned_binaries:
+                raise ValueError("degraded output requires profile_semver, filter_graph_hash, and pinned_binaries")
+            if self.engine_id is not None or self.engine_build is not None:
+                raise ValueError("degraded output may not carry render provenance")
+            if any(not key or not value for key, value in self.pinned_binaries.items()):
+                raise ValueError("pinned_binaries keys and values must be non-empty")
+        elif any(value is not None for value in (
+            self.engine_id, self.engine_build, self.profile_semver, self.filter_graph_hash,
+            self.pinned_binaries,
+        )):
+            raise ValueError("still output has no additional provenance fields")
+        return self
 
 
 class Location(VersionedEntity):
@@ -480,5 +555,6 @@ __all__ = [
     "ArtifactScheduleEntry", "Asset", "Attestation", "Beat", "CameraProfile",
     "Episode", "Export", "GenerationRun", "Invalidation", "Job", "Location",
     "PostProfile", "PostStage", "Project", "Reference", "Review", "RubricScores",
-    "Script", "Shot", "StyleBible", "StyleClaim", "Timeline", "TimelineEntry",
+    "Script", "Shot", "ShotOutput", "ShotOutputKind", "StyleBible", "StyleClaim",
+    "Timeline", "TimelineEntry",
 ]
