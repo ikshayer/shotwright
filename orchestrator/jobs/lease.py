@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ctypes
 import json
 import os
 import subprocess
@@ -13,6 +12,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Self
+
+import psutil
 
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.errors import JobError, JobErrorKind
@@ -193,24 +194,33 @@ class _ProcessLock:
 
 
 def pid_is_alive(pid: int) -> bool:
+    """Whether ``pid`` is a process that is still running.
+
+    Delegates to psutil, already a dependency, instead of hand-rolling the platform
+    check. The Windows path this replaces asked ``OpenProcess`` only whether a handle
+    could be opened — and on Windows an exited process keeps an openable handle for as
+    long as any parent still holds one, so a dead child reported itself alive. That made
+    a GPU lease held by a dead process look live, and on a single-GPU machine an
+    unreclaimable lease is a hang rather than a slowdown. Measured on this machine: a
+    child observed exiting with returncode 0 was reported alive by the old check and
+    dead by psutil.
+
+    A terminated-but-unreaped process is dead for leasing purposes, so a zombie counts
+    as dead. When the process exists but cannot be inspected it is reported **alive**:
+    refusing to reclaim a lease risks a stall, while reclaiming one whose owner is in
+    fact running would put two writers on the same project, which the concurrency
+    contract forbids outright.
+    """
+    if pid <= 0:
+        # 0 is not a reclaimable owner on either platform: on POSIX, signalling it
+        # addresses the whole process group, and on Windows it is the idle process.
+        return False
     try:
-        if os.name == "nt":
-            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
-            if not handle:
-                error = ctypes.get_last_error()
-                if error in {0, 5, 87, 1168}:
-                    return False
-                raise OSError(error, "OpenProcess failed")
-            ctypes.windll.kernel32.CloseHandle(handle)
-            return True
-        os.kill(pid, 0)
+        return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+    except psutil.AccessDenied:
         return True
-    except ProcessLookupError:
-        return False
-    except OSError as exc:
-        if getattr(exc, "winerror", None) in {5, 87, 1168} or exc.errno in {3, 22}:
-            return False
-        return False
 
 
 class GpuLease:
