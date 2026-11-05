@@ -24,3 +24,6 @@ Workvideo_pipeline_pytest_tmp/
 
 # disposable review/repro artifacts
 _work/
+
+# agent worktrees and local session state
+.claude/
