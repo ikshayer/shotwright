@@ -15,7 +15,6 @@ from orchestrator.jobs.queue import JobQueue
 from orchestrator.platform.containment import ContainmentError, ProjectRoot
 from orchestrator.store.json_store import ProjectStore
 
-
 TERMINAL = {"completed", "failed", "cancelled"}
 ALLOWED_STATES = {"queued", "running", *TERMINAL}
 
@@ -83,7 +82,7 @@ def test_cancel_and_worker_transition_resolve_by_forced_append_order(
                 raise TimeoutError("race start gate was not released")
             # This is the cancel-side transition at the shared queue persistence seam.
             queue._transition(first_job, first_state)
-        except BaseException as exc:  # report thread failures as assertions below
+        except BaseException as exc:  # noqa: BLE001 - re-asserted on the main thread
             errors.append(f"cancel writer: {type(exc).__name__}: {exc}")
 
     def worker_writer() -> None:
@@ -91,7 +90,7 @@ def test_cancel_and_worker_transition_resolve_by_forced_append_order(
             if not start.wait(5):
                 raise TimeoutError("race start gate was not released")
             queue._transition(later_job, later_state)
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - re-asserted on the main thread
             errors.append(f"worker writer: {type(exc).__name__}: {exc}")
 
     # Name the first-terminal side explicitly: the worker is first for completed-first;
@@ -179,7 +178,7 @@ def test_concurrent_appends_remain_parseable_while_reader_resolves(tmp_path: Pat
                 raise TimeoutError("append start barrier timed out")
             for index in range(iterations):
                 _append(root, "concurrent", state, attempts=index)
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - re-asserted on the main thread
             failures.append(f"{state} writer: {type(exc).__name__}: {exc}")
 
     def reader() -> None:
@@ -194,7 +193,7 @@ def test_concurrent_appends_remain_parseable_while_reader_resolves(tmp_path: Pat
                 observations.append(state)
             # Always take a final read, including when both writers finish very quickly.
             observations.append(_by_id(root, "concurrent")["state"])
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - re-asserted on the main thread
             failures.append(f"reader: {type(exc).__name__}: {exc}")
 
     threads = [

@@ -124,3 +124,97 @@ test must keep passing; the queue, the runner, the API and the lease all touch j
 Once this lands, the parked integration conformance branch `e73438c` — whose single failure
 is the torn read this removes — is expected to go green. The parent confirms that; do not
 test or merge that branch yourself.
+
+## Amendment 1 — adjudication, and two measured findings
+
+The implementer and the independent test author **agreed on the first combination**:
+**1195 passed, 29 skipped**, ruff clean, 139.85 s against a ~142 s baseline. All fourteen
+independently authored journal cases pass against an implementation their author never saw.
+That had not happened once in the preceding seven rounds, and it is what a settled contract
+looks like.
+
+Two findings came out of the measurement this contract demanded, and both correct it.
+
+### Appends are NOT atomic under concurrency — measured here
+
+The contract said to prove the append rather than assume it, because "an append of a short
+line is usually atomic" was the same species of claim that Amendment 1 of the atomic
+contract got wrong. It was right to insist. Two threads, 10,000 records each, lines of
+243–247 bytes, on this machine:
+
+- **Plain concurrent `open("a")`: 19,766 physical lines instead of 20,001, including 272
+  blank lines.** No record was split internally, but **appends were lost**.
+- With a process-wide lock: 20,001 complete lines, no blank or invalid lines, and no reader
+  errors across 905 resolutions.
+
+So the premise behind choosing Option 1 — that append-only removes the need for writer
+coordination — **is false.** Append-only removes the *rename*, which is what Windows
+refused, but concurrent appends still need a lock.
+
+**Binding:** the contained append serialises writers with a process-wide lock. This is not
+a weakening of Option 1; it is Option 1 plus the coordination Option 2 would have needed
+anyway, and it keeps the property that mattered — no overwrite, so nothing to tear and
+nothing for Windows to refuse.
+
+**Recorded limit:** that lock coordinates threads **in one process only**. It rests
+entirely on the single-orchestrator-process contract in
+`orchestrator/service/CONCURRENCY_CONTRACT.md`. A second writing process would lose
+appends exactly as measured above, and `HANDOFF.md` already lists cross-process writers as
+unverified. Anything that introduces one must revisit this.
+
+### Crash-then-resume is unresolved, and the contract caused it
+
+The contract said a partial final line is tolerable and must be ignored on read. That is
+true but incomplete, and the implementer found what it leaves out: a later append **joins
+onto** the unterminated fragment, losing that transition, and a further append turns the
+damaged text into an invalid **interior** line, which then raises `JobJournalError`. So
+tolerating a torn tail on read is not enough — a *writer* resuming after a crash has to
+deal with it.
+
+**Binding:**
+
+- A writer must **seal an unterminated tail before appending**: if the journal does not end
+  with `\n`, write one first, so the fragment becomes its own line instead of merging with
+  the next record.
+- Readers therefore **skip any unparseable line, not only the final one** — a crash
+  legitimately produces an unparseable interior line, so that is damage to be stepped over,
+  not a reason to fail the read. A skipped line must be **surfaced**, not swallowed: the
+  reader reports that it happened, because invariant "never swallow an error" still applies
+  and a damaged journal is something an operator should learn about.
+- If `.jsonl` exists but contains **no complete snapshot**, fall back to a legacy `.json` if
+  one is present; with neither, the record is damaged and that is a loud failure. The
+  literal "fall back only when `.jsonl` is absent" rule was too narrow.
+
+This was not implemented in that pass and **must not be reported as done.**
+
+### Two concurrent terminal appends: the race is real and that is correct
+
+Also raised: with first-terminal-wins, which of two simultaneous terminal entries lands
+first is schedule-dependent. That is fine, and worth stating so nobody "fixes" it. If a
+cancel and a completion genuinely race, **either outcome is legitimate** — the operator
+cancelled at the moment the work finished. What must be deterministic is that **reading the
+journal always yields the same answer**, which first-terminal-wins gives, and which the
+test author pinned by forcing both orders explicitly.
+
+### Ratified
+
+- `orchestrator/jobs/journal.py` owns serialisation, reading and resolution, and the
+  precedence rule has exactly one implementation.
+- Legacy `.json` is read without rewriting its bytes; `report_jobs` enumerates both
+  suffixes, prefers `.jsonl`, and de-duplicates using the host's path-case rules — which
+  correctly accounts for Windows case-insensitivity.
+- `append_line` must **reject text containing a newline**, as the test author asked: a
+  literal newline would silently break the one-line-per-record invariant.
+
+### The contract named a file that does not exist on this branch — my error
+
+Both agents were told to migrate `JobRunner.cancel` and `_persist_job` in
+`orchestrator/service/runner.py`. **That file is not on `main`;** it exists only on the
+parked integration branch `e73438c`. So neither agent could migrate the cancel-side writer,
+and the test author could not exercise the original cancel-versus-worker regression at all —
+it substituted a `JobQueue._transition` call and said so plainly.
+
+The journal work therefore covers `JobQueue` and `report_jobs` but **not** the cancel path
+that produced the defect. Completing it means applying this journal on top of `e73438c`,
+where `runner.py` lives, so the fix and the code it fixes land together. The integration
+branch is parked solely on this defect, so they belong in one merge.
