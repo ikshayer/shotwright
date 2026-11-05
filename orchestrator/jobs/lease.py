@@ -233,8 +233,10 @@ class GpuLease:
         root.make_dir("jobs")
         if not root.resolve("jobs/gpu_lease.lock").exists():
             try:
-                root.write_bytes("jobs/gpu_lease.lock", b"\xff")
-            except PermissionError:
+                # The OS lock is attached to this file's identity; replacing it atomically
+                # could let another process lock a new file while this process holds the old one.
+                root.write_with("jobs/gpu_lease.lock", lambda path: path.open("xb").close())
+            except (FileExistsError, PermissionError):
                 if not root.resolve("jobs/gpu_lease.lock").exists():
                     raise
         self._lock_path = root.resolve("jobs/gpu_lease.lock")

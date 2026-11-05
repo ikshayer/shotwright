@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import os
 import re
+import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +34,22 @@ _WINDOWS_RESERVED_NAMES = frozenset(
 )
 _ILLEGAL_COMPONENT_CHARS = frozenset('<>:"|?*') | {chr(c) for c in range(32)}
 _SHORT_NAME_PATTERN = re.compile(r"~\d")
+ATOMIC_WRITE_DIRECTORY = ".projectroot-atomic-write"
+_REPLACE_DELAYS_SECONDS = (0.01, 0.02, 0.04, 0.08)
+
+
+class AtomicWriteError(OSError):
+    """An atomic staging or replacement operation failed without an in-place fallback."""
+
+    def __init__(
+        self, relative: str, message: str, *, attempts: int, errno_code: int | None = None
+    ) -> None:
+        self.relative = relative
+        self.attempts = attempts
+        super().__init__(
+            errno_code,
+            f"Atomic write of {relative!r} failed after {attempts} attempt(s): {message}",
+        )
 
 
 class ContainmentError(ValueError):
@@ -151,22 +169,106 @@ class ProjectRoot:
 
     def write_bytes(self, relative: str, data: bytes) -> Path:
         target = self._prepare_file(relative)
-        target.write_bytes(data)
+
+        def write_temporary(temporary: Path) -> None:
+            with temporary.open("xb") as stream:
+                stream.write(data)
+
+        self._write_atomically(relative, target, write_temporary)
         return target
 
     def write_text(self, relative: str, text: str, *, encoding: str = "utf-8") -> Path:
         target = self._prepare_file(relative)
-        target.write_text(text, encoding=encoding, newline="\n")
+
+        def write_temporary(temporary: Path) -> None:
+            with temporary.open("x", encoding=encoding, newline="\n") as stream:
+                stream.write(text)
+
+        self._write_atomically(relative, target, write_temporary)
         return target
 
     def write_with(self, relative: str, writer: Callable[[Path], None]) -> Path:
         """For external tools (FFmpeg, Blender) that must be handed an output path.
 
-        The writer receives only an already-contained path.
+        The writer receives only an already-contained path. This is non-atomic by design:
+        callers that need atomic content writes must use ``write_bytes`` or ``write_text``.
         """
         target = self._prepare_file(relative)
         writer(target)
         return target
+
+    def _write_atomically(
+        self, relative: str, target: Path, writer: Callable[[Path], None]
+    ) -> None:
+        """Stage bytes below the project root and atomically replace the contained target."""
+        staging_directory = self.make_dir(ATOMIC_WRITE_DIRECTORY)
+        expected_staging_directory = self._root / ATOMIC_WRITE_DIRECTORY
+        if staging_directory != expected_staging_directory:
+            raise AtomicWriteError(
+                relative,
+                "reserved staging directory must not be a symlink or junction",
+                attempts=0,
+            )
+        temporary_relative = f"{ATOMIC_WRITE_DIRECTORY}/write-{uuid.uuid4().hex}.tmp"
+        temporary = self._prepare_file(temporary_relative)
+        try:
+            if os.stat(temporary.parent).st_dev != os.stat(target.parent).st_dev:
+                raise AtomicWriteError(
+                    relative,
+                    "staging directory and target parent are on different filesystems",
+                    attempts=0,
+                )
+            writer(temporary)
+            self._replace_atomically(temporary, target, relative)
+        except BaseException:
+            self._remove_temporary(temporary, relative)
+            raise
+
+    @staticmethod
+    def _remove_temporary(temporary: Path, relative: str) -> None:
+        for attempt in range(len(_REPLACE_DELAYS_SECONDS) + 1):
+            try:
+                temporary.unlink(missing_ok=True)
+                return
+            except PermissionError as exc:
+                if attempt == len(_REPLACE_DELAYS_SECONDS):
+                    raise AtomicWriteError(
+                        relative,
+                        f"temporary-file cleanup was denied: {exc}",
+                        attempts=attempt + 1,
+                        errno_code=exc.errno,
+                    ) from exc
+                time.sleep(_REPLACE_DELAYS_SECONDS[attempt])
+            except OSError as exc:
+                raise AtomicWriteError(
+                    relative,
+                    f"temporary-file cleanup failed: {exc}",
+                    attempts=attempt + 1,
+                    errno_code=exc.errno,
+                ) from exc
+
+    @staticmethod
+    def _replace_atomically(temporary: Path, target: Path, relative: str) -> None:
+        for attempt in range(len(_REPLACE_DELAYS_SECONDS) + 1):
+            try:
+                os.replace(temporary, target)
+                return
+            except PermissionError as exc:
+                if attempt == len(_REPLACE_DELAYS_SECONDS):
+                    raise AtomicWriteError(
+                        relative,
+                        f"replace was denied: {exc}",
+                        attempts=attempt + 1,
+                        errno_code=exc.errno,
+                    ) from exc
+                time.sleep(_REPLACE_DELAYS_SECONDS[attempt])
+            except OSError as exc:
+                raise AtomicWriteError(
+                    relative,
+                    f"replace failed: {exc}",
+                    attempts=attempt + 1,
+                    errno_code=exc.errno,
+                ) from exc
 
     def _prepare_file(self, relative: str) -> Path:
         target = self.resolve(relative)

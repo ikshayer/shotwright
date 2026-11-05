@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import shutil
 import threading
 import time
@@ -14,7 +15,7 @@ from typing import Protocol, TypeVar
 
 from orchestrator.domain.entities import Job
 from orchestrator.jobs.lease import GpuLease, NvmlProbe
-from orchestrator.platform.containment import ProjectRoot
+from orchestrator.platform.containment import ATOMIC_WRITE_DIRECTORY, ProjectRoot
 from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.platform.settings import Settings
 from orchestrator.store.json_store import ProjectStore
@@ -29,6 +30,11 @@ class HostResources(Protocol):
 
 class Quarantine(Protocol):
     def quarantine(self, paths: Sequence[Path]) -> Path: ...
+
+
+def _raise_walk_error(error: OSError) -> None:
+    """A project-size scan must not silently undercount an unreadable subtree."""
+    raise error
 
 
 class SystemHostResources:
@@ -127,7 +133,20 @@ class JobQueue:
                            f"{disk_required:.2f} GB required",
                            job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
         if self.root.path.exists():
-            project_size = sum(p.stat().st_size for p in self.root.path.rglob("*") if p.is_file()) / 1024**3
+            project_size_bytes = 0
+            for current, directories, filenames in os.walk(
+                self.root.path, onerror=_raise_walk_error
+            ):
+                if Path(current) == self.root.path:
+                    directories[:] = [
+                        name
+                        for name in directories
+                        if os.path.normcase(name) != os.path.normcase(ATOMIC_WRITE_DIRECTORY)
+                    ]
+                project_size_bytes += sum(
+                    (Path(current) / name).stat().st_size for name in filenames
+                )
+            project_size = project_size_bytes / 1024**3
             if project_size + job.required_disk_gb > self.settings.budget.disk_ceiling_gb:
                 raise JobError(JobErrorKind.BUDGET_EXCEEDED,
                                "project disk ceiling would be exceeded by this job",
