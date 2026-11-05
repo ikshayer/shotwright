@@ -16,7 +16,7 @@ findings without fixes.
   Keep the existing render deadline, cancellation,
   supervision, progress reporting, token fencing, artifact retention and lease behavior.
 - `ComfyAdapter.generate(request, job, *, queue, cancel=None)` must accept a configured
-  positive floor. Remove its zero-only refusal and pass **33.5 seconds** as the per-run
+  positive floor. Remove its zero-only refusal and pass `COMFYUI_STARTUP_ALLOWANCE_SECONDS` as the per-run
   startup allowance, from PRD §8.4 and spike 03's measured clean ComfyUI boot with the
   adapter's enforced disabled custom-node launch. The 150.5 s ambient-node boot is not
   applicable because that node set is disabled. Keep the whole-generate hard deadline,

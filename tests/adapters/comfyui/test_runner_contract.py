@@ -13,7 +13,10 @@ from typing import Any
 import pytest
 from PIL import Image
 
-from orchestrator.adapters.comfyui.runner import ComfyAdapter
+from orchestrator.adapters.comfyui.runner import (
+    COMFYUI_STARTUP_ALLOWANCE_SECONDS,
+    ComfyAdapter,
+)
 from orchestrator.adapters.comfyui.workflow import ImageRequest, ModelPin
 from orchestrator.domain.entities import GenerationRun, Job
 from orchestrator.jobs.lease import GpuLease, MemoryReading
@@ -249,7 +252,9 @@ def test_positive_floor_forwards_measured_startup_allowance(tmp_path: Path) -> N
 
     assert result.generation_run.status == "completed"
     assert len(popen.calls) == 1
-    assert forwarded == [33.5]
+    # Asserts the wiring, not the number: the allowance is a derived upper bound that
+    # changes when the pre-progress cost is finally measured directly.
+    assert forwarded == [COMFYUI_STARTUP_ALLOWANCE_SECONDS]
 
 
 def test_success_retains_reopenable_png_graph_provenance_and_generation_run(tmp_path: Path) -> None:

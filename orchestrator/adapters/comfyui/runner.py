@@ -24,7 +24,21 @@ from orchestrator.platform.settings import Settings
 from .runtime import HttpTransport, OwnedComfyWorker, build_command
 from .workflow import ImageRequest, build_workflow
 
-COMFYUI_STARTUP_ALLOWANCE_SECONDS = 33.5  # PRD §8.4 / spike 03: clean boot, custom nodes disabled.
+#: The watchdog's startup clock runs until the first progress update, and this adapter
+#: does considerably more than boot a server before then: it verifies the hash of every
+#: pinned multi-GB safetensors file, launches and awaits ComfyUI, fetches /object_info,
+#: builds the graph and submits the prompt. Progress only reaches 0.1 after submission.
+#:
+#: So §8.4's 33.5 s clean-boot figure is NOT the right bound, and using it would kill
+#: healthy jobs with a terminal BUDGET_EXCEEDED. The pre-progress cost has never been
+#: measured on its own. What IS recorded, from FR-06's retained hardware probe, is a
+#: 189.391 s total adapter run containing 60.95 s of prompt execution, so pre-progress
+#: work cannot have exceeded their difference. That upper bound is used here.
+#:
+#: This is a DERIVED UPPER BOUND, not a measurement, and it is deliberately generous:
+#: an over-long allowance only delays stall detection, while a short one fails working
+#: jobs. Replace it with a direct measurement of pre-progress cost when one exists.
+COMFYUI_STARTUP_ALLOWANCE_SECONDS = 128.4
 
 
 @dataclass(frozen=True)
