@@ -96,10 +96,10 @@ def test_temp_artifact_is_contained_and_invisible_to_enumerators(tmp_path, monke
                     enumeration_observations.append(f"glob('*') in {directory} saw {source_path.name}")
                 if source_path in directory.glob("*.json"):
                     enumeration_observations.append(f"glob('*.json') in {directory} saw {source_path.name}")
+                if source_path in directory.iterdir():
+                    enumeration_observations.append(f"iterdir() in {directory} saw {source_path.name}")
         if source_path in root.path.rglob("*"):
             enumeration_observations.append(f"root.rglob('*') saw {source_path.relative_to(root.path)}")
-        if source_path.parent == root.path and source_path in root.path.iterdir():
-            enumeration_observations.append(f"root.iterdir() saw {source_path.name}")
         return original_replace(source, destination)
 
     monkeypatch.setattr(os, "replace", inspect_then_replace)
