@@ -217,3 +217,7 @@ reset it on stop/reconfiguration. Tests' process fakes should reflect argv from 
 actual injected Popen call, not invent another ownership API. Child PID remains
 separately verified alive. This covers accidental port takeover; no malicious local
 process trust boundary or cross-process orchestrator support is claimed.
+
+## Amendment 3 — startup-aware throughput floor (binding)
+
+The initial zero-only throughput-floor limitation is superseded. ComfyAdapter.generate accepts a positive configured floor and passes startup_allowance_seconds=33.5 to queue.run, grounded in PRD §8.4 and spike 03’s measured clean boot with the adapter’s disabled custom-node set. The 150.5 s ambient-node boot is not applicable. Queue watchdog behavior, whole-generate hard deadline, cancellation, endpoint/child ownership, callback fencing, cleanup, lease handling and output behavior remain unchanged. Do not fake progress or claim measured production resource reservations.

@@ -188,3 +188,9 @@ install-tree database default; the adapter overrides it explicitly.
 - API generate_media and Blender routes remain their existing 501 contract. Existing
   upload containment/caps/reference-operation/store-conflict backlog remains open.
   FR-04 operational limits, FR-21 and the finished-shot Phase1 exit remain separate work.
+
+## Startup-aware throughput-floor follow-up — 2026-11-05
+
+The earlier operational-limit statement above is superseded: ComfyUI now accepts a positive configured floor and passes the measured 33.5 s §8.4/spike 03 clean-boot allowance to JobQueue.run (the enforced adapter boot disables custom nodes). Independent tests in 	ests/adapters/comfyui/test_runner_contract.py exercise a positive-floor generation through the real queue and assert the forwarded allowance. The queue suite independently covers silent startup before allowance, startup expiry, post-startup silence, below-floor later progress, confirmed termination and lease retention when stop is unconfirmed.
+
+Final verification after this change: whole suite 1123 passed, 29 skipped, 6 existing warnings; whole orchestrator/tests Ruff check passed. No ComfyUI/GPU hardware was run for this follow-up. Production resource reservations remain unmeasured.

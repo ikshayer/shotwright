@@ -22,6 +22,8 @@ from orchestrator.platform.settings import Settings
 
 from .scene import RenderRequest, build_scene_plan
 
+BLENDER_STARTUP_ALLOWANCE_SECONDS = 74.0  # PRD §8.4: measured cold shader/kernel cache cost.
+
 
 @dataclass(frozen=True)
 class RenderResult:
@@ -219,8 +221,6 @@ class BlenderAdapter:
             raise ValueError("queue must share adapter ProjectRoot, settings, and worker lease")
         if job.shot_id != request.shot_id or job.run_id != request.run_id:
             raise ValueError("job shot_id/run_id must match the render request")
-        if self.settings.resources.throughput_floor_per_second != 0:
-            raise ValueError("BlenderAdapter requires throughput_floor_per_second=0 until JobQueue startup grace exists")
         plan_base = build_scene_plan(request)
         base_rel = f"renders/{request.shot_id}/v{request.shot_version:04d}/{request.run_id}"
         base = self.root.resolve(base_rel)
@@ -441,7 +441,8 @@ class BlenderAdapter:
             return result_box[0]
 
         self._control.bind_lease(epoch, lambda: queue.lease)
-        return queue.run(job, queued_worker, partial_artifacts=(base,))
+        return queue.run(job, queued_worker, partial_artifacts=(base,),
+                         startup_allowance_seconds=BLENDER_STARTUP_ALLOWANCE_SECONDS)
 
 
 def _forward(path: Path) -> str:

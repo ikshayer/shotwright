@@ -24,6 +24,8 @@ from orchestrator.platform.settings import Settings
 from .runtime import HttpTransport, OwnedComfyWorker, build_command
 from .workflow import ImageRequest, build_workflow
 
+COMFYUI_STARTUP_ALLOWANCE_SECONDS = 33.5  # PRD §8.4 / spike 03: clean boot, custom nodes disabled.
+
 
 @dataclass(frozen=True)
 class ImageResult:
@@ -75,8 +77,6 @@ class ComfyAdapter:
             if queue.root.path != self.root.path or queue.lease.worker is not self.worker or queue.settings is not self.settings:
                 raise ValueError("queue must share adapter ProjectRoot, settings, and worker lease")
             if (job.shot_id, job.run_id) != (request.shot_id, request.run_id): raise ValueError("job IDs must match request")
-            if self.settings.resources.throughput_floor_per_second != 0:
-                raise ValueError("ComfyAdapter requires throughput_floor_per_second=0 until queue startup grace exists")
             self._control.activate(epoch, lambda: queue.lease, self._interrupt)
             self._deadline = time.monotonic() + self.settings.budget.per_shot_wall_clock_seconds
             self._queue_clock = queue.clock
@@ -155,7 +155,8 @@ class ComfyAdapter:
                 if errors: raise errors[0]
                 if not box: raise JobError(JobErrorKind.INTERNAL, "ComfyUI attempt ended without a result")
                 return box[0]
-            result = queue.run(job, invoke, partial_artifacts=partial_paths)
+            result = queue.run(job, invoke, partial_artifacts=partial_paths,
+                               startup_allowance_seconds=COMFYUI_STARTUP_ALLOWANCE_SECONDS)
             return result
         finally:
             self._epoch += 1

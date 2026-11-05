@@ -266,3 +266,7 @@ compress=False plus preferences.use_file_compression=False; file_preview_type='N
 to suppress per-user thumbnails; XDG_CACHE_HOME contained at launch. The default
 compressed5.2 blend began with Zstd rather than BLENDER magic, so compression is
 explicitly disabled instead of teaching tests to accept arbitrary headers.
+
+## Amendment 5 — startup-aware throughput floor (binding)
+
+The zero-only throughput-floor limitation in Amendment 1 item 4 is superseded. BlenderAdapter.render accepts a positive configured floor and passes startup_allowance_seconds=74.0 to queue.run, grounded in PRD §8.4’s measured ~74 s one-time cold shader/kernel cache cost. Queue watchdog behavior, hard deadline, progress reporting, cancellation, supervision, fencing, lease handling and output behavior remain unchanged. Do not fake progress or claim measured production resource reservations.

@@ -197,7 +197,8 @@ class FakeTransport:
 
 def setup(tmp_path: Path, *, mode: str = "success", port: int = 8188,
           transport_type: type[FakeTransport] = FakeTransport, wall_seconds: float = 30.0,
-          queue_clock: ManualClock | None = None, retries: int = 1):
+          queue_clock: ManualClock | None = None, retries: int = 1,
+          floor: float = 0.0):
     root = ProjectRoot(tmp_path)
     install = root.make_dir("fake-comfy")
     root.write_bytes("fake-comfy/python_embeded/python.exe", b"python shim")
@@ -215,7 +216,7 @@ def setup(tmp_path: Path, *, mode: str = "success", port: int = 8188,
         "project_root": str(root.path),
         "binaries": {"comfyui_root": str(install), "comfyui_port": port},
         "budget": {"per_shot_wall_clock_seconds": wall_seconds, "retries_per_shot": retries},
-        "resources": {"throughput_floor_per_second": 0.0,
+        "resources": {"throughput_floor_per_second": floor,
                       "vram_release_timeout_seconds": 0.05},
     })
     popen = FakePopen()
@@ -231,6 +232,24 @@ def setup(tmp_path: Path, *, mode: str = "success", port: int = 8188,
                        prompt="A quiet corridor", degrade_seed=41, models=tuple(models))
     job = Job(job_id="job-1", type="flux_still", shot_id="shot-1", run_id="run-1")
     return root, settings, adapter, queue, job, req, popen, transport
+
+
+def test_positive_floor_forwards_measured_startup_allowance(tmp_path: Path) -> None:
+    _root, _settings, adapter, queue, job, req, popen, _transport = setup(
+        tmp_path, floor=0.001)
+    original_run = queue.run
+    forwarded: list[float | None] = []
+
+    def capture_run(*args: Any, **kwargs: Any) -> Any:
+        forwarded.append(kwargs.get("startup_allowance_seconds"))
+        return original_run(*args, **kwargs)
+
+    queue.run = capture_run  # type: ignore[method-assign]
+    result = adapter.generate(req, job, queue=queue)
+
+    assert result.generation_run.status == "completed"
+    assert len(popen.calls) == 1
+    assert forwarded == [33.5]
 
 
 def test_success_retains_reopenable_png_graph_provenance_and_generation_run(tmp_path: Path) -> None:

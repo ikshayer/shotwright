@@ -185,11 +185,24 @@ def setup(tmp_path: Path, *, floor: float = 0.0, wall: float = 900.0,
     return root, settings, adapter, queue, job
 
 
-def test_render_rejects_nonzero_queue_watchdog_floor_before_writes(tmp_path: Path) -> None:
-    root, _settings, adapter, queue, job = setup(tmp_path, floor=0.001)
-    with pytest.raises(ValueError):
-        adapter.render(request(), job, queue=queue)
-    assert not root.resolve("renders").exists()
+def test_render_accepts_positive_floor_and_forwards_measured_startup_allowance(
+    tmp_path: Path,
+) -> None:
+    fake = FakePopen()
+    _root, _settings, adapter, queue, job = setup(tmp_path, floor=0.001, popen=fake)
+    original_run = queue.run
+    forwarded: list[float | None] = []
+
+    def capture_run(*args: Any, **kwargs: Any) -> Any:
+        forwarded.append(kwargs.get("startup_allowance_seconds"))
+        return original_run(*args, **kwargs)
+
+    queue.run = capture_run  # type: ignore[method-assign]
+    result = adapter.render(request(), job, queue=queue)
+
+    assert result.generation_run.status == "completed"
+    assert len(fake.calls) == 1
+    assert forwarded == [74.0]
 
 
 @pytest.mark.parametrize("mismatch", ["shot", "run"])

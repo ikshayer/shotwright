@@ -131,3 +131,9 @@ service, store, API, PRD or spike internals changed. Context7 tools were unavail
 Blender 5 API details were checked using official release notes and local 5.2 reflection:
 https://developer.blender.org/docs/release_notes/5.0/python_api/
 https://developer.blender.org/docs/release_notes/5.0/migration/compositor_migration/
+
+## Startup-aware throughput-floor follow-up — 2026-11-05
+
+The earlier operational-limit statement above is superseded: Blender now accepts a positive configured floor and passes the measured 74.0 s §8.4 cold shader/kernel allowance to JobQueue.run. Independent tests in 	ests/adapters/blender/test_supervision_contract.py exercise a positive-floor render through the real queue and assert the forwarded allowance. The queue suite independently covers silent startup before allowance, startup expiry, post-startup silence, below-floor later progress, confirmed termination and lease retention when stop is unconfirmed.
+
+Final verification after this change: whole suite 1123 passed, 29 skipped, 6 existing warnings; whole orchestrator/tests Ruff check passed. No Blender/GPU hardware was run for this follow-up. Production resource reservations remain unmeasured.
