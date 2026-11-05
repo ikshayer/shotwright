@@ -95,6 +95,10 @@ class ResourceSettings(_Section):
         None, ge=0, description="Unset means: use the idle VRAM baseline recorded by preflight (FR-24)."
     )
     ram_floor_gb: float = Field(4.0, ge=0, description="Free system RAM that must remain after loading a checkpoint.")
+    # UNMEASURED PLACEHOLDER: configure from observed progress rates on this hardware.
+    throughput_floor_per_second: float = Field(
+        0.001, ge=0, description="Minimum job progress per second before the GPU stall watchdog fires."
+    )
 
 
 class Settings(_Section):

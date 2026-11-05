@@ -17,3 +17,7 @@ references/_tier3/
 
 # Third-party tooling checked out beside the project (see spikes/05_voice/FINDINGS.md)
 # D:\Work\index-tts is a sibling clone, not part of this repo.
+
+# pytest temp output (an agent redirected tmp into the workspace)
+Workvideo_pipeline_pytest_tmp/
+*_pytest_tmp/

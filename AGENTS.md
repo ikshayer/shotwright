@@ -103,3 +103,46 @@ Python 3.11+ for the orchestrator, Pydantic v2 for entities, FastAPI for the API
 for tests. Type hints on public interfaces. Prefer pure functions for anything
 deterministic — the degradation chain, seed derivation, the dependency graph — so they can
 be tested without a GPU, a renderer or a filesystem.
+
+## Orchestrating (applies to whichever agent is driving)
+
+Work on this repository is **delegated and adjudicated, never done alone**. Whoever
+holds the session is an orchestrator first: it designs, dispatches, verifies and
+decides. It does not hand-write what a sub-agent can write, and it does not accept a
+sub-agent's report as fact.
+
+**Spawning sub-agents.** Any agent with a shell can spawn one by calling `codex exec`
+recursively:
+
+```powershell
+$env:CODEX_HOME = "$HOME\.codex-alt"
+Get-Content prompt.txt -Raw | codex exec -m <model> --sandbox read-only -C <repo> -o out.txt
+```
+
+- Pass long prompts on **stdin**, never as an argument. PowerShell 5.1 mangles native
+  arguments somewhere above ~500 characters and Codex then rejects them.
+- `-o` writes only the final message, so a whole-package review costs a few lines of
+  the orchestrator's context. This is the main lever for working cheaply.
+- `--sandbox read-only` for review, `workspace-write` for implementation.
+- Models: `gpt-6-luna` implements, `gpt-6.1-sol` reviews. Claude models are reached
+  through the Agent tool when the session is Claude Code.
+
+**Rules that were learned the hard way here.**
+
+1. **Never let one agent write both an implementation and its own tests.** It produced
+   nine green tests over production code that could not run: a VRAM probe with no
+   total-memory accessor, respawn callbacks defaulting to no-ops. The tests validated
+   the fakes. A green suite proved nothing.
+2. **Write a contract first, then run implementer and test author in parallel from it.**
+   Neither reads the other's output. Where they disagree, the contract decides and the
+   disagreement is a finding. Done this way the same package produced 12 honest
+   failures naming nine real defects — see `orchestrator/jobs/CONTRACT.md`.
+3. **Tell test and review agents to report, not fix.** Adjudication stays in one place.
+4. **Partition by file** and create package skeletons before dispatching, so concurrent
+   agents cannot collide.
+5. **Verify independently.** Re-run the suite yourself. Check a claimed enumeration
+   against the spec. Every report so far has been honest; that is not a reason to stop.
+6. **Ask what they could not do.** The admissions are the most valuable lines in a
+   sub-agent report, and have repeatedly exposed gaps in the contract itself.
+7. **Review is cheaper than rework.** One read-only review pass returned 18 HIGH
+   findings; one discarded package cost far more than several reviews.

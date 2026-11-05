@@ -358,6 +358,9 @@ class Job(Entity):
     resource_metrics: dict[str, float] = Field(default_factory=dict)
     log_path: str | None = None
     shot_id: str | None = None
+    #: FR-26 budgets GPU-minutes per shot AND per episode, so a job must know
+    #: which episode it belongs to or the episode ceiling cannot be enforced.
+    episode_id: str | None = None
     run_id: str | None = None
 
 
