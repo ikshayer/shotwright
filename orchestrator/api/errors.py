@@ -1,4 +1,4 @@
-"""The single exception-to-transport mapping shared by every API surface.
+﻿"""The single exception-to-transport mapping shared by every API surface.
 
 CONTRACT.md calls this "the only place this translation happens". HTTP and the CLI
 therefore both map through :func:`describe`; neither restates the table. A second copy
@@ -53,6 +53,10 @@ class RequestMismatch(Exception):
         self.body_value = body_value
 
 
+class AdapterRequestInvalid(Exception):
+    """A routed job request lacks a valid Shot binding or resource declaration."""
+
+
 #: Keys promoted to the top level of every body when the exception supplies them, so a
 #: client can read them without knowing which exception it is looking at (Amendment 1).
 _PROMOTED = ("expected", "actual", "current", "limit", "observed", "remediation")
@@ -62,6 +66,7 @@ _PROMOTED = ("expected", "actual", "current", "limit", "observed", "remediation"
 MAPPED: tuple[type[BaseException], ...] = (
     VersionConflict, RecordNotFound, ContainmentError, UploadRejected,
     TransitionError, ReviewApprovalError, JobError, MissingAdapter, RequestMismatch,
+    AdapterRequestInvalid,
     ValidationError,
 )
 
@@ -135,6 +140,8 @@ def describe(exc: BaseException) -> tuple[int, dict[str, Any]] | None:
     if isinstance(exc, RequestMismatch):
         return 400, error_body("request_mismatch", str(exc), field=exc.field,
                                expected=exc.path_value, actual=exc.body_value)
+    if isinstance(exc, AdapterRequestInvalid):
+        return 422, error_body("validation_error", str(exc), field="payload")
     if isinstance(exc, ValidationError):
         return 422, error_body("validation_error", str(exc), field="payload")
     return None

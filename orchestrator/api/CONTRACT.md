@@ -1,4 +1,4 @@
-# Contract — API, CLI and tool manifest (FR-14, FR-25)
+﻿# Contract — API, CLI and tool manifest (FR-14, FR-25)
 
 Written by the orchestrator. Implementation and tests come from **different agents
 working in parallel from this file**, neither reading the other's output. Where they
@@ -25,19 +25,19 @@ Every operation below must be reachable from **both** the HTTP API and the CLI.
 | draft script, revise script | `service.dependencies.revise_script` |
 | propose shots, revise shot | `service` |
 | search assets, create asset | *adapter absent* |
-| build scene | *adapter absent* |
-| render preview | *adapter absent* |
-| generate media | *adapter absent* |
+| build scene | `service.runner` / Blender adapter |
+| render preview | `service.runner` / Blender adapter |
+| generate media | `service.runner` / ComfyUI adapter |
+| degrade media | `service.runner` / PostProfile adapter |
 | sample references | *adapter absent* |
 | report jobs | `jobs.queue` |
 | apply typed feedback | `service` |
 | score rubric | `domain.entities.RubricScores` |
 | export | *adapter absent* |
 
-**Operations whose adapter does not exist yet are still routed, typed and documented.**
-They return a `501`-shaped error naming the missing adapter. They are NOT omitted:
-AT-10 requires the enumeration to be complete, and the UI is built against it. An
-endpoint that silently does not exist is worse than one that says what is missing.
+`search_assets`, `create_asset`, `sample_references` and `export` have no adapter and
+return a `501`-shaped error naming that missing adapter. They are NOT omitted: AT-10
+requires the enumeration to be complete, and the UI is built against it.
 
 ## Security (FR-25, AT-17)
 
@@ -59,6 +59,7 @@ The only place this translation happens:
 | Raised | HTTP |
 |---|---|
 | `VersionConflict` (store) | **409**, body carries expected, actual and the current head |
+| accepted adapter job submission | **202**, body carries `job_id` and initial `state` |
 | `TokenConflict` / stale mutation token | **409** |
 | `RecordNotFound` | 404 |
 | `ContainmentError`, `UploadRejected` | 400, naming the offending field |
@@ -384,3 +385,20 @@ declared dependencies; both were previously only transitive.
 `test_security.py::test_non_loopback_origin_is_refused` accepted `400` or `403` for a
 refused origin. Amendment 1 requires `403`. Tightened to `403` — a test may not be more
 permissive than the contract it exists to enforce.
+
+## Amendment 5 — asynchronous adapter submissions
+
+`build_scene`, `render_preview`, `generate_media` and `degrade_media` submit persisted
+jobs through `service.runner`. HTTP returns `202 Accepted` with `{ "job_id": ...,
+"state": "queued" }`; it does not wait for an artifact. The same operations are exposed
+by the CLI and return the same JSON fields. Clients read progress and terminal status
+through `report_jobs`.
+
+`degrade_media` is the FR-21 PostProfile operation at
+`POST /projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/degrade`. The
+normative operation table includes it for both API and CLI generation.
+
+The `501` adapter-absent rule applies to `search_assets`, `create_asset`,
+`sample_references` and `export`. The four operations above are backed by the in-process
+runner. Their results append `ShotOutput` receipts that carry the request's
+`record_version`; the current head version is never substituted during recording.

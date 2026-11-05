@@ -10,6 +10,7 @@ from typing import Any
 import click
 
 from orchestrator.platform.containment import ProjectRoot
+from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.platform.settings import Settings
 
 from .app import OperationContext
@@ -68,11 +69,22 @@ def _command_callback(operation_name: str):
             model = _OPERATION_MODELS.get(operation_name)
             if model is not None:
                 payload = model.model_validate(payload).model_dump(mode="python")
+            wait_for_job = values.pop("wait", True)
             payload.update({key: value for key, value in values.items() if value is not None})
             if files:
                 payload["uploads"] = [_describe_file(path) for path in files]
             root = ProjectRoot(configured.project_root) if configured.project_root.is_dir() else None
-            result = OperationContext(configured, root).invoke(operation_name, payload)
+            context = OperationContext(configured, root)
+            result = context.invoke(operation_name, payload)
+            if (operation_name in {"build_scene", "render_preview", "generate_media", "degrade_media"}
+                    and wait_for_job):
+                job = context.job_runner.wait(payload["project_id"], result["job_id"])
+                context.job_runner.close()
+                if job.state != "completed":
+                    kind = JobErrorKind(job.error_kind or JobErrorKind.INTERNAL.value)
+                    raise JobError(kind, f"job {job.job_id} ended in state {job.state}",
+                                   job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
+                result = {"job_id": job.job_id, "state": job.state}
         except Exception as exc:  # CLI failures are reported to stderr with a nonzero status.
             click.echo(json.dumps(_error_payload(exc), ensure_ascii=False), err=True)
             raise click.exceptions.Exit(1) from exc
@@ -97,6 +109,11 @@ def _build_command(operation: Any, name: str) -> click.Command:
     ]
     for path_name in path_parameters(operation.path):
         params.append(click.Option([f"--{path_name.replace('_', '-')}"]),)
+    if operation.name in {"build_scene", "render_preview", "generate_media", "degrade_media"}:
+        params.append(click.Option(
+            ["--wait/--no-wait"], default=True, show_default=True,
+            help="Wait for this job to finish (default), or return after submission.",
+        ))
     if operation.upload:
         params.append(click.Option(
             ["--file"], multiple=True,

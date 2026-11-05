@@ -1,4 +1,4 @@
-"""The shared, typed operation registry for HTTP, CLI, and agent tools."""
+﻿"""The shared, typed operation registry for HTTP, CLI, and agent tools."""
 
 from __future__ import annotations
 
@@ -100,6 +100,7 @@ OPERATIONS = (
     Operation("build_scene", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/scene", "Build a scene", True, "scene builder adapter", OpenRequest, _call("build_scene")),
     Operation("render_preview", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/preview", "Render a preview", True, "preview renderer adapter", OpenRequest, _call("render_preview")),
     Operation("generate_media", "POST", "/projects/{project_id}/media/generate", "Generate media", True, "media generation adapter", OpenRequest, _call("generate_media")),
+    Operation("degrade_media", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/degrade", "Degrade a shot master", True, "PostProfile adapter", OpenRequest, _call("degrade_media")),
     Operation("sample_references", "POST", "/projects/{project_id}/references/sample", "Sample references", True, "reference sampling adapter", OpenRequest, _call("sample_references")),
     Operation("report_jobs", "GET", "/projects/{project_id}/jobs", "Report jobs", False, "jobs.queue", None, _call("report_jobs")),
     Operation("apply_typed_feedback", "POST", "/projects/{project_id}/feedback", "Apply typed feedback", True, "service.apply_typed_feedback", OpenRequest, _call("apply_typed_feedback")),

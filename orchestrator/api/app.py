@@ -1,8 +1,10 @@
-"""FastAPI transport for the project-local orchestrator."""
+﻿"""FastAPI transport for the project-local orchestrator."""
 
 from __future__ import annotations
 
 import hmac
+import json
+import math
 from typing import Annotated, Any
 from urllib.parse import urlsplit
 
@@ -13,13 +15,27 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from orchestrator.domain.entities import Project, RubricScores, Script, Shot
 from orchestrator.jobs.journal import read_job_records
-from orchestrator.jobs.queue import JobQueue
+from orchestrator.jobs.lease import GpuLease, PynvmlProbe
+from orchestrator.jobs.queue import JobQueue, ProjectQuarantine, SystemHostResources
 from orchestrator.platform.containment import ProjectRoot, validate_upload
 from orchestrator.platform.settings import Settings
 from orchestrator.service.dependencies import revise_script, revise_shot
+from orchestrator.service.runner import (
+    AdapterKind,
+    AdapterRegistry,
+    AdapterRequest,
+    JobRunner,
+)
 from orchestrator.store.json_store import ProjectStore, RecordNotFound
 
-from .errors import MAPPED, MissingAdapter, RequestMismatch, describe, error_body
+from .errors import (
+    MAPPED,
+    AdapterRequestInvalid,
+    MissingAdapter,
+    RequestMismatch,
+    describe,
+    error_body,
+)
 from .manifest import build_manifest
 from .routes import MAGIC_HEADER_BYTES, OPERATIONS, Operation, UploadedFile
 
@@ -41,10 +57,18 @@ class OperationContext:
         root: ProjectRoot | None,
         *,
         job_queues: dict[str, JobQueue] | None = None,
+        job_runner: JobRunner | None = None,
     ) -> None:
         self.settings = settings
         self.root = root
         self.job_queues = job_queues or {}
+        if job_runner is None and root is not None:
+            runtime = _DefaultRuntime(settings, root)
+            job_runner = JobRunner(
+                lambda project_id: ProjectStore(runtime.project_root(project_id)), settings,
+                queue_for=runtime, adapters=runtime.registry,
+            )
+        self.job_runner = job_runner
 
     def _project_root(self, project_id: str, *, create: bool = False) -> ProjectRoot:
         if self.root is None:
@@ -112,6 +136,47 @@ class OperationContext:
         if operation == "report_jobs":
             queue = self.job_queues.get(data["project_id"])
             return self._read_job_reports(data["project_id"], root=queue.root if queue else None)
+        if operation in {"build_scene", "render_preview", "generate_media", "degrade_media"}:
+            if self.job_runner is None:
+                raise RuntimeError("default JobRunner was not configured")
+            kind = {
+                "build_scene": AdapterKind.SCENE,
+                "render_preview": AdapterKind.RENDER,
+                "generate_media": AdapterKind.GENERATE,
+                "degrade_media": AdapterKind.DEGRADE,
+            }[operation]
+            record_id = data.get("shot_id")
+            if not record_id:
+                raise AdapterRequestInvalid(f"{operation} requires shot_id")
+            store = self._store(data["project_id"])
+            shot = store.load(Shot, record_id, episode_id=data.get("episode_id"))
+            payload = data.get("request", data)
+            record_version = data.get("record_version")
+            if record_version is None:
+                record_version = getattr(payload, "shot_version", None)
+            if record_version is None and isinstance(payload, dict):
+                record_version = payload.get("shot_version")
+            if record_version is None:
+                record_version = shot.version
+            if type(record_version) is not int or record_version < 1:
+                raise AdapterRequestInvalid("record_version must be a positive content version")
+            resources = data.get("resources", {})
+            if not isinstance(resources, dict):
+                raise AdapterRequestInvalid("resources must be an object")
+            required_vram = data.get("required_vram_gb", resources.get("required_vram_gb", 0.0))
+            if (isinstance(required_vram, bool) or not isinstance(required_vram, (int, float))
+                    or not math.isfinite(required_vram)
+                    or required_vram < 0):
+                raise AdapterRequestInvalid("required_vram_gb must be a finite nonnegative number")
+            request = AdapterRequest(
+                kind=kind, payload=payload, record_id=record_id,
+                record_version=record_version, episode_id=shot.episode_id,
+                required_vram_gb=required_vram,
+                required_ram_gb=data.get("required_ram_gb", resources.get("required_ram_gb", 0.0)),
+                required_disk_gb=data.get("required_disk_gb", resources.get("required_disk_gb", 0.0)),
+            )
+            job = self.job_runner.submit(data["project_id"], request)
+            return {"job_id": job.job_id, "state": job.state}
         item = next((route for route in OPERATIONS if route.name == operation), None)
         if item is None:
             raise MissingAdapter(operation)
@@ -179,13 +244,21 @@ def create_app(
     token: str,
     *,
     job_queues: dict[str, JobQueue] | None = None,
+    job_runner: JobRunner | None = None,
 ) -> FastAPI:
     """Create an app; invalid/non-loopback settings fail immediately at startup."""
     configured = settings
     if not token:
         raise ValueError("a loopback token must be provided")
     root = ProjectRoot(configured.project_root)
-    context = OperationContext(configured, root, job_queues=job_queues)
+    if job_runner is None:
+        runtime = _DefaultRuntime(configured, root)
+        job_runner = JobRunner(
+            lambda project_id: ProjectStore(runtime.project_root(project_id)), configured,
+            queue_for=runtime, adapters=runtime.registry,
+        )
+    runner = job_runner
+    context = OperationContext(configured, root, job_queues=job_queues, job_runner=runner)
     app = FastAPI(title="CCTV Production Pipeline API", version="0.1.0")
     app.state.settings = configured
     app.state.loopback_token = token
@@ -300,7 +373,10 @@ def _register_operation(app: FastAPI, operation: Operation, context: OperationCo
         data.update({key: value for key, value in values.items() if value is not None})
         if files:
             data["uploads"] = [await _describe_upload(item) for item in files]
-        return operation.invoke(context, data)
+        result = operation.invoke(context, data)
+        if operation.name in {"build_scene", "render_preview", "generate_media", "degrade_media"}:
+            return JSONResponse(status_code=202, content=result)
+        return result
 
     path_names = [part[1:-1] for part in operation.path.split("/") if part.startswith("{")]
     params = [Parameter(name, Parameter.POSITIONAL_OR_KEYWORD, annotation=str)
@@ -335,6 +411,9 @@ def _register_operation(app: FastAPI, operation: Operation, context: OperationCo
     app.add_api_route(operation.path, endpoint, methods=[operation.method],
                       name=operation.name, operation_id=operation.name,
                       summary=operation.summary, response_model=None, include_in_schema=True,
+                      status_code=202 if operation.name in {
+                          "build_scene", "render_preview", "generate_media", "degrade_media",
+                      } else 200,
                       openapi_extra={"parameters": [{
                           "name": "X-Loopback-Token",
                           "in": "header",
@@ -342,6 +421,117 @@ def _register_operation(app: FastAPI, operation: Operation, context: OperationCo
                           "schema": {"type": "string"},
                           "description": "Loopback token required for mutations.",
                       }]} if operation.mutating else None)
+
+
+class _CpuWorker:
+    """Worker identity for CPU-only PostProfile work; it never acquires a GPU lease."""
+
+    def unload(self) -> None:
+        return None
+
+    def terminate(self) -> bool:
+        return True
+
+    def respawn(self) -> int:
+        return 0
+
+    def pid(self) -> int | None:
+        return None
+
+
+class _RuntimeAdapter:
+    def __init__(self, runtime: _DefaultRuntime, kind: AdapterKind) -> None:
+        self.runtime, self.kind = runtime, kind
+        self._cancel_check: Any = None
+
+    def set_cancel_check(self, check: Any) -> None:
+        self._cancel_check = check
+
+    def invoke(self, request: Any, job: Any, *, queue: JobQueue) -> Any:
+        adapter = self.runtime.adapter_for(queue.root, self.kind)
+        from orchestrator.service.runner import _AdapterShim
+
+        shim = _AdapterShim(self.kind, adapter, self.runtime.settings)
+        shim.cancel_check = self._cancel_check
+        try:
+            return shim.invoke(request, job, queue=queue)
+        finally:
+            self._cancel_check = None
+
+    def close(self) -> None:
+        self.runtime.close()
+
+
+class _DefaultRuntime:
+    """Lazily build project/kind adapter queues after HTTP/CLI submission returns."""
+
+    def __init__(self, settings: Settings, root: ProjectRoot) -> None:
+        self.settings, self.root = settings, root
+        self._lock = __import__("threading").RLock()
+        self._queues: dict[tuple[str, AdapterKind], JobQueue] = {}
+        self._adapters: dict[tuple[str, AdapterKind], Any] = {}
+        self._nvml: Any = None
+        self.registry = AdapterRegistry({kind: _RuntimeAdapter(self, kind) for kind in AdapterKind})
+
+    def project_root(self, project_id: str) -> ProjectRoot:
+        path = self.root.resolve(project_id)
+        if not path.is_dir():
+            raise RecordNotFound(f"project {project_id!r} does not exist")
+        return ProjectRoot(path)
+
+    def adapter_for(self, project_root: ProjectRoot, kind: AdapterKind) -> Any:
+        key = (str(project_root.path), kind)
+        with self._lock:
+            if key not in self._adapters:
+                if kind in {AdapterKind.SCENE, AdapterKind.RENDER}:
+                    from orchestrator.adapters.blender.runner import BlenderAdapter
+                    adapter = BlenderAdapter(project_root, self.settings)
+                elif kind is AdapterKind.GENERATE:
+                    from orchestrator.adapters.comfyui.runner import ComfyAdapter
+                    adapter = ComfyAdapter(project_root, self.settings)
+                else:
+                    from orchestrator.adapters.postprofile.runner import PostProfileAdapter
+                    adapter = PostProfileAdapter(project_root, self.settings)
+                self._adapters[key] = adapter
+            return self._adapters[key]
+
+    def queue_for(self, project_id: str) -> JobQueue:
+        return self.for_kind(project_id, AdapterKind.RENDER)
+
+    def __call__(self, project_id: str) -> JobQueue:
+        return self.queue_for(project_id)
+
+    def for_kind(self, project_id: str, kind: AdapterKind) -> JobQueue:
+        root = self.project_root(project_id)
+        key = (str(root.path), kind)
+        with self._lock:
+            if key in self._queues:
+                return self._queues[key]
+            adapter = self.adapter_for(root, kind)
+            if self._nvml is None:
+                self._nvml = PynvmlProbe()
+            worker = getattr(adapter, "worker", _CpuWorker())
+            lease = GpuLease(root, self.settings, nvml=self._nvml, worker=worker)
+            queue = JobQueue(root, self.settings, lease, ProjectStore(root), nvml=self._nvml,
+                             host=SystemHostResources(), quarantine=ProjectQuarantine(root))
+            self._queues[key] = queue
+            return queue
+
+    def close(self) -> None:
+        with self._lock:
+            adapters = tuple(self._adapters.values())
+            self._adapters.clear()
+            self._queues.clear()
+        first: Exception | None = None
+        for adapter in adapters:
+            close = getattr(adapter, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception as exc:  # noqa: BLE001 - close every adapter, then report first failure.
+                    first = first or exc
+        if first is not None:
+            raise first
 
 
 def get_tool_manifest(app: FastAPI) -> dict[str, Any]:
