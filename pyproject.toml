@@ -3,7 +3,20 @@ name = "cctv-pipeline"
 version = "0.1.0"
 description = "Local agent-operated CCTV analog-horror production pipeline"
 requires-python = ">=3.11"
-dependencies = ["pydantic>=2.7", "fastapi>=0.110", "uvicorn>=0.29", "nvidia-ml-py>=12", "psutil>=5.9"]
+dependencies = [
+    "pydantic>=2.7",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    # Imported directly by orchestrator/api/cli.py; previously only transitive.
+    "click>=8.1",
+    # Required by FastAPI to accept the multipart upload route (FR-25 validation).
+    "python-multipart>=0.0.9",
+    "nvidia-ml-py>=12",
+    "psutil>=5.9",
+]
+
+[project.scripts]
+cctv-pipeline = "orchestrator.api.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-cov>=5"]

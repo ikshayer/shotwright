@@ -11,7 +11,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from .conftest import TOKEN_HEADER, TOKEN, find_key, operations, valid_request_kwargs
+from .conftest import TOKEN, TOKEN_HEADER, find_key, operations, valid_request_kwargs
 
 # CONTRACT.md operation table, rows marked "adapter absent". One pattern per operation,
 # matched against route path + function name.

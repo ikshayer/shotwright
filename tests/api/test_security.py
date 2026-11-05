@@ -37,7 +37,10 @@ def test_non_loopback_origin_is_refused(client: TestClient, app, op: Op) -> None
         headers={"Origin": EVIL_ORIGIN, TOKEN_HEADER: TOKEN},
         **valid_request_kwargs(app, op),
     )
-    assert resp.status_code in (400, 403), f"{op.key}: cross-origin got {resp.status_code}"
+    # Amendment 1: a refused origin is 403, never 400. 400 means malformed; refusing an
+    # origin is a policy decision. Tightened from "in (400, 403)", which was weaker than
+    # the contract it tests.
+    assert resp.status_code == 403, f"{op.key}: cross-origin got {resp.status_code}"
     assert resp.headers.get("access-control-allow-origin") != EVIL_ORIGIN
     assert TOKEN not in resp.text
 

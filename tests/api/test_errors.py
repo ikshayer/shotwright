@@ -13,8 +13,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from orchestrator.domain.entities import RubricScores
 from orchestrator.domain.base import ShotStatus
+from orchestrator.domain.entities import RubricScores
 from orchestrator.domain.state import ReviewApprovalError, TransitionError
 from orchestrator.platform.containment import ContainmentError, UploadRejected
 from orchestrator.platform.errors import JobError, JobErrorKind

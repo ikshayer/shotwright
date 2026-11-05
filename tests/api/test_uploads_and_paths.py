@@ -45,6 +45,21 @@ def _multipart_ops(app: FastAPI) -> list[Op]:
     return found
 
 
+def _is_binary(prop: dict[str, Any]) -> bool:
+    """True if a multipart property carries file content, in either OpenAPI spelling.
+
+    OpenAPI 3.0 marks file content `format: "binary"`, which this harness originally
+    assumed. FastAPI emits OpenAPI 3.1 by default, where the same field is spelled
+    `contentMediaType`. This widens only *discovery* — which property the test attaches
+    its upload to. Every assertion in this module is unchanged; before this, the
+    oversize, magic-byte, extension and containment cases could not run at all.
+    """
+    for node in (prop, prop.get("items") or {}):
+        if isinstance(node, dict) and (node.get("format") == "binary" or node.get("contentMediaType")):
+            return True
+    return False
+
+
 def _file_field(app: FastAPI, op: Op) -> tuple[str, dict[str, str]]:
     spec = app.openapi()
     content = spec["paths"][op.path][op.method.lower()]["requestBody"]["content"]["multipart/form-data"]
@@ -57,7 +72,7 @@ def _file_field(app: FastAPI, op: Op) -> tuple[str, dict[str, str]]:
     file_field = ""
     data: dict[str, str] = {}
     for name, prop in schema.get("properties", {}).items():
-        if prop.get("format") == "binary" or prop.get("items", {}).get("format") == "binary":
+        if _is_binary(prop):
             file_field = name
         elif name in schema.get("required", []):
             data[name] = str(sample_value(prop, spec))

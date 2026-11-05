@@ -13,7 +13,6 @@ import importlib
 import re
 from typing import Any
 
-import pytest
 from fastapi import FastAPI
 
 from .conftest import Op, operations
@@ -83,7 +82,7 @@ def _spellings(op: Op) -> set[str]:
 def test_route_table_covers_every_contract_operation(app: FastAPI) -> None:
     haystack = [f"{o.path} {o.name}" for o in operations(app)]
     missing = [
-        name for name, pat in CONTRACT_OPERATIONS.items() if not any(re.search(pat, h, re.I) for h in haystack)
+        name for name, pat in CONTRACT_OPERATIONS.items() if not any(re.search(pat, h, re.IGNORECASE) for h in haystack)
     ]
     assert not missing, f"contract operations with no HTTP route: {missing}"
 
@@ -130,7 +129,7 @@ def test_openapi_lists_every_route(app: FastAPI) -> None:
 
 def _manifest(app: FastAPI) -> list[dict[str, Any]]:
     module = importlib.import_module("orchestrator.api.manifest")
-    builder = getattr(module, "build_manifest", None) or getattr(module, "tool_manifest")
+    builder = getattr(module, "build_manifest", None) or module.tool_manifest
     result = builder(app)
     return result["tools"] if isinstance(result, dict) else list(result)
 
