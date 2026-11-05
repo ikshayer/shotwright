@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -36,6 +37,7 @@ _ILLEGAL_COMPONENT_CHARS = frozenset('<>:"|?*') | {chr(c) for c in range(32)}
 _SHORT_NAME_PATTERN = re.compile(r"~\d")
 ATOMIC_WRITE_DIRECTORY = ".projectroot-atomic-write"
 _REPLACE_DELAYS_SECONDS = (0.01, 0.02, 0.04, 0.08)
+_APPEND_LOCK = threading.Lock()
 
 
 class AtomicWriteError(OSError):
@@ -185,6 +187,20 @@ class ProjectRoot:
                 stream.write(text)
 
         self._write_atomically(relative, target, write_temporary)
+        return target
+
+    def append_line(self, relative: str, text: str) -> Path:
+        """Append one UTF-8 line to a contained file and close it before returning."""
+        if not isinstance(text, str):
+            raise TypeError("line text must be a string")
+        line = text.rstrip("\r\n")
+        if "\n" in line or "\r" in line:
+            raise ValueError("line text must not contain embedded line breaks")
+        target = self._prepare_file(relative)
+        with _APPEND_LOCK, target.open("a+b") as stream:
+            stream.seek(0, os.SEEK_END)
+            stream.write((line + "\n").encode("utf-8"))
+            stream.flush()
         return target
 
     def write_with(self, relative: str, writer: Callable[[Path], None]) -> Path:

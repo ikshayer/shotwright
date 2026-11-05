@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Protocol, TypeVar
 
 from orchestrator.domain.entities import Job
+from orchestrator.jobs.journal import append_job
 from orchestrator.jobs.lease import GpuLease, NvmlProbe
 from orchestrator.platform.containment import ATOMIC_WRITE_DIRECTORY, ProjectRoot
 from orchestrator.platform.errors import JobError, JobErrorKind
@@ -83,7 +84,6 @@ class JobQueue:
         self.nvml, self.host, self.quarantine, self.clock = nvml, host, quarantine, clock
         self._budget_lock = threading.Lock()
         self._watch_context = threading.local()
-        self._job_path = "state/jobs"
 
     def preflight(self, job: Job) -> None:
         memory = self.nvml.device_memory()
@@ -384,10 +384,5 @@ class JobQueue:
         self._persist(job)
 
     def _persist(self, job: Job) -> None:
-        save_job = getattr(self.store, "save_job", None)
-        if callable(save_job):
-            save_job(job)
-            return
-        self.root.write_text(f"{self._job_path}/{job.job_id}.json",
-                             json.dumps(job.model_dump(mode="json"), sort_keys=True, indent=2))
+        append_job(self.root, job)
 

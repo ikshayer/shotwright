@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hmac
-import json
 from typing import Annotated, Any
 from urllib.parse import urlsplit
 
@@ -13,6 +12,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from orchestrator.domain.entities import Project, RubricScores, Script, Shot
+from orchestrator.jobs.journal import read_job_records
 from orchestrator.jobs.queue import JobQueue
 from orchestrator.platform.containment import ProjectRoot, validate_upload
 from orchestrator.platform.settings import Settings
@@ -124,12 +124,9 @@ class OperationContext:
         jobs_path = project_root.resolve("state/jobs")
         if not jobs_path.is_dir():
             return []
-        result: list[dict[str, Any]] = []
-        for path in sorted(jobs_path.glob("*.json")):
-            # Resolve every discovered name through the one containment authority.
-            contained = project_root.resolve(path.relative_to(project_root.path).as_posix())
-            result.append(json.loads(contained.read_text(encoding="utf-8")))
-        return result
+        job_ids = {path.stem for path in jobs_path.glob("*.json")}
+        job_ids.update(path.stem for path in jobs_path.glob("*.jsonl"))
+        return read_job_records(project_root, list(job_ids))
 
 
 def _require_path_match(data: dict[str, Any], field: str, body_value: str) -> None:
