@@ -132,3 +132,30 @@ The API layer must NOT define its own exception class for this. Declaring a type
 store already owns puts policy in the transport layer, which this contract forbids in
 its second paragraph, and creates the duplicated source of truth the project keeps
 being bitten by. Import from the store; do not restate.
+
+## Amendment 2 — Host validation (DNS rebinding)
+
+Found by security review of the first implementation. It is a real hole, not a
+theoretical one, and it must be closed in the conformance pass.
+
+The origin middleware checks `Origin` **only when the header is present**, and nothing
+validates `Host`. A cross-site simple `GET` carries no `Origin`, and reads require no
+token. So a page on `attacker.com` whose DNS is re-pointed to `127.0.0.1` reaches this
+API, and the browser treats it as same-origin, meaning CORS never engages. Binding to
+loopback does not prevent this: the attacker's own browser is on loopback.
+
+Binding requirements:
+
+- **Validate `Host` against a loopback allowlist** on every request: `127.0.0.1`,
+  `localhost`, `[::1]`, each optionally with the configured port. A `Host` outside it is
+  **403**, before routing and before any handler runs. Starlette's `TrustedHostMiddleware`
+  is acceptable if configured from `Settings` rather than hard-coded.
+- **A missing `Origin` is not a pass.** Absence must not route around the check; the
+  `Host` check is what makes absence safe.
+- The check applies to **reads as well as mutations**. Reads are unauthenticated by
+  design, which is exactly why they are the exposed surface here.
+
+Tests must cover: a `Host` of `attacker.com` refused with 403; a rebinding-shaped request
+with a foreign `Host` and **no** `Origin` refused; `127.0.0.1`, `localhost` and `[::1]`
+accepted, with and without the port; and the refusal happening on a **read**, not only
+on a mutating call.

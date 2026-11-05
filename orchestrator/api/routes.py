@@ -1,10 +1,38 @@
-"""Shared operation registry for the HTTP API, CLI, OpenAPI, and tool manifest."""
+"""The shared, typed operation registry for HTTP, CLI, and agent tools."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+
+from pydantic import BaseModel, ConfigDict
+
+from orchestrator.domain.entities import Project, RubricScores, Script, Shot
+
+
+class OpenRequest(BaseModel):
+    """Typed envelope for operations whose adapters are not implemented yet."""
+
+    model_config = ConfigDict(extra="allow")
+
+    project_id: str | None = None
+    episode_id: str | None = None
+    shot_id: str | None = None
+
+
+class ScriptRevision(BaseModel):
+    script: Script
+    expected_version: int
+
+
+class ShotRevision(BaseModel):
+    shot: Shot
+    expected_version: int
+
+
+class RubricRequest(BaseModel):
+    scores: RubricScores
 
 
 @dataclass(frozen=True)
@@ -15,6 +43,7 @@ class Operation:
     summary: str
     mutating: bool
     adapter: str
+    request_model: type[BaseModel] | None
     invoke: Callable[[Any, dict[str, Any]], Any]
 
 
@@ -25,43 +54,28 @@ def _call(name: str) -> Callable[[Any, dict[str, Any]], Any]:
     return invoke
 
 
-# Paths, CLI names, and tool definitions are all derived from this table.
+# This is the sole operation list. OpenAPI, CLI commands, and tool definitions
+# are generated from these entries.
 OPERATIONS = (
-    Operation("create_project", "POST", "/projects", "Create a project", True, "store", _call("create_project")),
-    Operation("list_projects", "GET", "/projects", "List projects", False, "store", _call("list_projects")),
-    Operation("load_project", "GET", "/projects/{project_id}", "Load a project", False, "store", _call("load_project")),
-    Operation("draft_script", "POST", "/projects/{project_id}/episodes/{episode_id}/scripts/draft", "Draft a script", True, "service.dependencies.revise_script", _call("draft_script")),
-    Operation("revise_script", "POST", "/projects/{project_id}/episodes/{episode_id}/scripts/revise", "Revise a script", True, "service.dependencies.revise_script", _call("revise_script")),
-    Operation("propose_shots", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/propose", "Propose shots", True, "service", _call("propose_shots")),
-    Operation("revise_shot", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/revise", "Revise a shot", True, "service.dependencies.revise_shot", _call("revise_shot")),
-    Operation("search_assets", "GET", "/projects/{project_id}/assets/search", "Search assets", False, "asset search adapter", _call("search_assets")),
-    Operation("create_asset", "POST", "/projects/{project_id}/assets", "Create an asset", True, "asset creation adapter", _call("create_asset")),
-    Operation("build_scene", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/scene", "Build a scene", True, "scene builder adapter", _call("build_scene")),
-    Operation("render_preview", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/preview", "Render a preview", True, "preview renderer adapter", _call("render_preview")),
-    Operation("generate_media", "POST", "/projects/{project_id}/media/generate", "Generate media", True, "media generation adapter", _call("generate_media")),
-    Operation("sample_references", "POST", "/projects/{project_id}/references/sample", "Sample references", True, "reference sampling adapter", _call("sample_references")),
-    Operation("report_jobs", "GET", "/projects/{project_id}/jobs", "Report jobs", False, "jobs.queue", _call("report_jobs")),
-    Operation("apply_typed_feedback", "POST", "/projects/{project_id}/feedback", "Apply typed feedback", True, "service typed feedback adapter", _call("apply_typed_feedback")),
-    Operation("score_rubric", "POST", "/projects/{project_id}/rubric/score", "Score rubric criteria", True, "domain.entities.RubricScores", _call("score_rubric")),
-    Operation("export", "POST", "/projects/{project_id}/export", "Export a project", True, "export adapter", _call("export")),
+    Operation("health", "GET", "/health", "Check API health", False, "api", None, _call("health")),
+    Operation("create_project", "POST", "/projects", "Create a project", True, "store", Project, _call("create_project")),
+    Operation("list_projects", "GET", "/projects", "List projects", False, "store", None, _call("list_projects")),
+    Operation("load_project", "GET", "/projects/{project_id}", "Load a project", False, "store", None, _call("load_project")),
+    Operation("draft_script", "POST", "/projects/{project_id}/episodes/{episode_id}/scripts/draft", "Draft a script", True, "service.dependencies.revise_script", OpenRequest, _call("draft_script")),
+    Operation("revise_script", "POST", "/projects/{project_id}/episodes/{episode_id}/scripts/revise", "Revise a script", True, "service.dependencies.revise_script", ScriptRevision, _call("revise_script")),
+    Operation("propose_shots", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/propose", "Propose shots", True, "service", OpenRequest, _call("propose_shots")),
+    Operation("revise_shot", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/revise", "Revise a shot", True, "service.dependencies.revise_shot", ShotRevision, _call("revise_shot")),
+    Operation("search_assets", "GET", "/projects/{project_id}/assets/search", "Search assets", False, "asset search adapter", OpenRequest, _call("search_assets")),
+    Operation("create_asset", "POST", "/projects/{project_id}/assets", "Create an asset", True, "asset creation adapter", OpenRequest, _call("create_asset")),
+    Operation("build_scene", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/scene", "Build a scene", True, "scene builder adapter", OpenRequest, _call("build_scene")),
+    Operation("render_preview", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/preview", "Render a preview", True, "preview renderer adapter", OpenRequest, _call("render_preview")),
+    Operation("generate_media", "POST", "/projects/{project_id}/media/generate", "Generate media", True, "media generation adapter", OpenRequest, _call("generate_media")),
+    Operation("sample_references", "POST", "/projects/{project_id}/references/sample", "Sample references", True, "reference sampling adapter", OpenRequest, _call("sample_references")),
+    Operation("report_jobs", "GET", "/projects/{project_id}/jobs", "Report jobs", False, "jobs.queue", None, _call("report_jobs")),
+    Operation("apply_typed_feedback", "POST", "/projects/{project_id}/feedback", "Apply typed feedback", True, "service typed feedback adapter", OpenRequest, _call("apply_typed_feedback")),
+    Operation("score_rubric", "POST", "/projects/{project_id}/rubric/score", "Score rubric criteria", True, "domain.entities.RubricScores", RubricRequest, _call("score_rubric")),
+    Operation("export", "POST", "/projects/{project_id}/export", "Export a project", True, "export adapter", OpenRequest, _call("export")),
 )
-
-
-def tool_manifest() -> list[dict[str, Any]]:
-    """Build agent tool definitions from the same registry as the HTTP routes."""
-    return [
-        {
-            "name": item.name,
-            "description": item.summary,
-            "input_schema": {
-                "type": "object",
-                "properties": {key: {"type": "string"} for key in _path_parameters(item.path)},
-                "additionalProperties": True,
-            },
-            "http": {"method": item.method, "path": item.path},
-        }
-        for item in OPERATIONS
-    ]
 
 
 def _path_parameters(path: str) -> list[str]:
