@@ -234,3 +234,74 @@ bytes** against the in-place implementation.
 - `fsync` remains omitted by design: atomic, not durable.
 - Native Windows sharing races and cross-volume replacement were not verified beyond what
   the suite exercises.
+
+## Amendment 2 — the central premise is false, measured on this machine
+
+Amendment 1 concluded that writer-side atomicity fails on Windows because readers open
+without `FILE_SHARE_DELETE`, and that a contained read requesting it would let the replace
+proceed. **That is wrong.** The contained-read pass was told to demonstrate the mechanism
+rather than cite it, and the demonstration failed.
+
+Measured on this machine's NTFS `D:` volume:
+
+- the reader opened via `CreateFileW` with `FILE_SHARE_READ | FILE_SHARE_WRITE |
+  FILE_SHARE_DELETE`, the handle adopted through `msvcrt.open_osfhandle`;
+- while that reader was held, a **second handle requesting `DELETE` access opened
+  successfully**, which proves the reader's share mode really was permissive;
+- `os.replace(stage, target)` nevertheless failed with **`WinError 5`**;
+- `MoveFileExW` and `ReplaceFileW` failed the same way;
+- `DeleteFileW` **succeeded** against the same open file;
+- `os.replace` succeeded as soon as the reader closed.
+
+So rename-over-an-open-file is refused here regardless of the reader's share mode, while
+*deleting* that same open file is permitted. Share flags are not the obstacle, and no
+read-side change can rescue the write side. The read API and twelve call-site migrations
+are sound and preserved on `worktree-cread` at `5b5f308`; the premise they were built to
+serve is not.
+
+Cost note from that pass: the suite ran **175.19 s** against roughly **150 s**, so a
+`ctypes` call per read is not free.
+
+### What this means
+
+Atomic overwrite of a file that anything might be reading is not available on this
+platform through any of the three rename APIs. The options are therefore about **avoiding
+the overwrite**, not about perfecting it.
+
+1. **Make mutable records append-only.** The torn-write problem only ever affected records
+   that are *overwritten*. Everything the store writes is already per-version and
+   append-only under invariant 3, so it is never replaced and never contends. The single
+   hot exception is `state/jobs/<id>.json`, rewritten on every transition — which is
+   exactly the file that was read back empty. Written as a journal (append one record per
+   transition, read the last complete entry) there is no overwrite, so no rename, so no
+   Windows refusal and no torn read. **This pattern already exists in the codebase:** the
+   adapters write `job.jsonl` per attempt. Atomic replace stays for the rare genuine
+   overwrite, where contention is negligible.
+2. **Coordinate with a per-file lock** so reads and writes never overlap. Deterministic,
+   with precedent in the GPU lease's cross-process lock, but it puts a lock on the hot path
+   of the source of truth and brings its own failure modes.
+3. **Accept retry-and-loud-failure on both sides.** Cheapest. Under realistic access
+   patterns — readers are brief and occasional, not tight loops — retries would almost
+   always succeed, and a loud `AtomicWriteError` is far better than silent corruption. But
+   it is a probabilistic guarantee for a source of truth.
+4. **Delete-then-rename.** `DeleteFileW` does succeed against an open file, so the target
+   could be deleted and the stage renamed in. This trades "write refused" for "target
+   transiently absent", which is worse: a reader would observe a missing record rather than
+   an old one.
+
+**Recommendation: option 1, with atomic replace retained everywhere else.** It dissolves
+the problem instead of fighting the platform, aligns the one offending file with invariant
+3 rather than excepting it, and reuses a pattern the repository already has. Option 3 is
+the fallback if the job-record format must not change.
+
+### Status
+
+- `main` remains green and carries only the two contracts.
+- The atomic write implementation plus Amendments 1 and 2 are on `atomic-combined`,
+  **unmerged**, with the acceptance test red.
+- The contained read is on `worktree-cread` at `5b5f308`, **unmerged**, with its own 26
+  tests red on `worktree-cread-tests` at `8839e0f`.
+- The integration conformance branch `e73438c` remains parked behind all of this.
+
+Nothing here is to be reported as fixed. The original defect — a job record readable as
+`''` under concurrent cancel and worker writes — is still present on `main`.
