@@ -9,6 +9,7 @@ unknown keys are rejected so a pasted ``api_key = "..."`` is an error, not a lea
 from __future__ import annotations
 
 import ipaddress
+import math
 import os
 import re
 import shutil
@@ -99,6 +100,16 @@ class ResourceSettings(_Section):
     throughput_floor_per_second: float = Field(
         0.001, ge=0, description="Minimum job progress per second before the GPU stall watchdog fires."
     )
+    startup_allowance_seconds: float = Field(
+        74.0, ge=0, description="Maximum startup time before the first progress update (PRD §8.4)."
+    )
+
+    @field_validator("throughput_floor_per_second", "startup_allowance_seconds")
+    @classmethod
+    def _watchdog_value_is_finite(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("watchdog thresholds must be finite")
+        return value
 
 
 class Settings(_Section):

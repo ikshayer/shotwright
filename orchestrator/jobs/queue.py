@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import threading
 import time
@@ -75,6 +76,7 @@ class JobQueue:
         self.root, self.settings, self.lease, self.store = root, settings, lease, store
         self.nvml, self.host, self.quarantine, self.clock = nvml, host, quarantine, clock
         self._budget_lock = threading.Lock()
+        self._watch_context = threading.local()
         self._job_path = "state/jobs"
 
     def preflight(self, job: Job) -> None:
@@ -119,7 +121,22 @@ class JobQueue:
                                job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
 
     def run(self, job: Job, worker_fn: Callable[[Job], T], *,
-            partial_artifacts: Sequence[Path] = ()) -> T:
+            partial_artifacts: Sequence[Path] = (),
+            startup_allowance_seconds: float | None = None) -> T:
+        if startup_allowance_seconds is not None:
+            try:
+                finite_allowance = math.isfinite(startup_allowance_seconds)
+            except (OverflowError, TypeError):
+                finite_allowance = False
+            if (isinstance(startup_allowance_seconds, bool)
+                    or not isinstance(startup_allowance_seconds, (int, float))
+                    or not finite_allowance or startup_allowance_seconds < 0):
+                raise ValueError("startup_allowance_seconds must be a finite nonnegative number")
+        startup_allowance = (
+            self.settings.resources.startup_allowance_seconds
+            if startup_allowance_seconds is None
+            else startup_allowance_seconds
+        )
         self._transition(job, "queued")
         try:
             self.preflight(job)
@@ -149,7 +166,11 @@ class JobQueue:
                 job.lease_holder_pid = self.lease.worker.pid()
                 self._transition(job, "running")
                 try:
-                    result = self._watch(worker_fn, job, deadline)
+                    self._watch_context.startup_allowance_seconds = startup_allowance
+                    try:
+                        result = self._watch(worker_fn, job, deadline)
+                    finally:
+                        del self._watch_context.startup_allowance_seconds
                 except JobError as error:
                     last_error = JobError.from_exception(error, job_id=job.job_id,
                                                          shot_id=job.shot_id, run_id=job.run_id)
@@ -253,27 +274,36 @@ class JobQueue:
                 done.set()
 
         thread = threading.Thread(target=invoke, name=f"job-{job.job_id}", daemon=True)
+        last_progress = job.progress
+        startup_started = self.clock()
+        last_change = startup_started
+        startup_complete = False
         thread.start()
-        last_progress, last_change = job.progress, self.clock()
         last_heartbeat = time.monotonic()
         configured_floor = self.settings.resources.throughput_floor_per_second
+        startup_allowance_seconds = getattr(
+            self._watch_context,
+            "startup_allowance_seconds",
+            self.settings.resources.startup_allowance_seconds,
+        )
         while not done.wait(0.01):
             now = self.clock()
             if now >= deadline:
                 raise JobError(JobErrorKind.BUDGET_EXCEEDED, "per-shot wall-clock budget exceeded")
-            if job.progress > last_progress:
-                progress_rate = (job.progress - last_progress) / max(now - last_change, 1e-9)
-                last_progress, last_change = job.progress, now
-                stalled = progress_rate < configured_floor
-            else:
-                progress_rate = 0.0
-                stalled = now - last_change >= 1.0
-            if configured_floor > 0 and stalled and progress_rate < configured_floor:
-                if not self.lease.worker.terminate():
-                    raise JobError(JobErrorKind.INTERNAL,
-                                   "throughput watchdog could not confirm worker stopped")
-                raise JobError(JobErrorKind.BUDGET_EXCEEDED,
-                               "VRAM thrash suspected: job progress rate fell below configured floor")
+            if configured_floor > 0:
+                if not startup_complete:
+                    if job.progress > last_progress:
+                        last_progress, last_change = job.progress, now
+                        startup_complete = True
+                    elif now - startup_started >= startup_allowance_seconds:
+                        self._fail_throughput_stall()
+                elif job.progress > last_progress:
+                    progress_rate = (job.progress - last_progress) / max(now - last_change, 1e-9)
+                    last_progress, last_change = job.progress, now
+                    if progress_rate < configured_floor:
+                        self._fail_throughput_stall()
+                elif now - last_change >= 1.0 / configured_floor:
+                    self._fail_throughput_stall()
             heartbeat_interval = max(1.0, self.lease.ttl_seconds / 3)
             if time.monotonic() - last_heartbeat >= heartbeat_interval:
                 try:
@@ -287,6 +317,13 @@ class JobQueue:
                 raise error
             raise JobError.from_exception(error, job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
         return result[0] if result else None  # type: ignore[return-value]
+
+    def _fail_throughput_stall(self) -> None:
+        if not self.lease.worker.terminate():
+            raise JobError(JobErrorKind.INTERNAL,
+                           "throughput watchdog could not confirm worker stopped")
+        raise JobError(JobErrorKind.BUDGET_EXCEEDED,
+                       "VRAM thrash suspected: job progress rate fell below configured floor")
 
     def _charge_budget(self, job: Job, key: str, elapsed: float) -> None:
         path = "jobs/budgets.json"
