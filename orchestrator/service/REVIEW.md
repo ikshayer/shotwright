@@ -1,87 +1,100 @@
 # Service review and adjudication - 2026-11-04
 
-Read-only review: gpt-6.1-sol. Implementation: gpt-6-luna. Tests: a separate agent
-from CONTRACT.md, without reading the concurrent production changes. The parent
-orchestrator inspected the diff, reran verification and adjudicated the findings.
-Initial review used source at commit 2907631; production fixes remain uncommitted.
+Baseline for this pass: b386a28, 560 tests. Parent authored
+CONCURRENCY_CONTRACT.md, dispatched separate implementation and test authors through
+codex exec, reviewed their source, reran the suite/probes, and adjudicated findings.
+All changes are uncommitted for the parent session to inspect and commit.
 
-## Resolved in this bounded repair
+## Closed: SVC-01, SVC-02 and SVC-03
 
-1. Approval binding policy was defined in service/approval.py. The comparisons were
-   correct, but belonged to the domain. domain/state.py now exposes
-   check_review_approval and ReviewApprovalError. Service retains loading, persistence
-   and INVALID_MANIFEST mapping, including the original cause.
-2. Script beat-change scope was defined in service/dependencies.py. Domain now owns
-   shots_invalidated_by_script. It handles beat addition/removal/content edits, mapping
-   changes and old/new mapped Shot IDs; dependencies and Shot.beat_id also link Shots.
-   Selection is approved-only, episode-scoped, stable and deduplicated.
-3. HIGH: mapping-only revisions previously committed without invalidating anything.
-   The new real-store integration test demonstrates staleness of old/new mapped Shots,
-   retained artifacts and Script history, gate-C revocation, and reopening from JSON.
+| Finding | Prevention and independently checked evidence |
+|---|---|
+| SVC-01: lost lifecycle updates | Every successful entity write advances a mutation token, distinct from content version. load_with_version returns the token from the same locked snapshot. update/revise/save reject a stale expected_version with VersionConflict carrying current state for future HTTP 409 mapping. Two snapshots cannot both overwrite notes. Lifecycle, no-op and revision writes, historical-head rejection, reopen and two-store/thread cases are covered. |
+| SVC-02: stale Shot under an approved gate | A durable immutable cascade plan precedes entity writes. All affected gates are revoked before upstream append or Shot state changes. Failure leaves a pending plan; all service approvals/revisions refuse new work until explicit resume_invalidations rolls it forward. Reopen and standalone copied-project tests exercise failure at plan, both gates, upstream, both stale writes and completion; repeated failure and repeated recovery preserve artifacts and append upstream only once. Current stale/draft Shots also block gate reapproval. |
+| SVC-03: approval escaping invalidation | Approval, revision and recovery commands hold the same resolved-project lock across reads and commit. Same-thread nested service commands fail explicitly; other threads serialize. Domain dependency guards revalidate immediately before commit. Durable all-state impact fences prevent review/draft content from being approved after a completed upstream revision; approval first instead causes staleness. Persisted Reviews bind to content versions throughout. |
 
-The first HANDOFF description called approval matching a reimplementation; source
-review found no pre-existing domain matcher. This was misplaced policy, rather than
-an inconsistent duplicate executable rule. No approval behavior relaxation was needed.
+Original reproduced failures at b386a28: two content-v1 lifecycle writes erased
+feedback; a second-stale-write failure left Location v2 and a stale Shot under gate
+cut 3; approval injected before Location commit escaped the old candidate snapshot.
+The superseding probes assert those outcomes are prevented rather than reproduced.
 
-The parent's first implementation inspection found repeated input Shots could produce
-repeated IDs, plus an outdated state.py docstring. The implementer corrected both;
-a separate test author added the repeated-input ordering regression. Final independent
-review found no blocking findings within CONTRACT.md's scope.
+## Persistence, domain ownership and recovery
 
-## Open HIGH findings - address before adapters
+Content revisions retain version/supersedes. Lifecycle writes append immutable
+vNNNN.lifecycle.TOKEN.json snapshots; they do not replace content files. Mutation
+metadata has a predecessor token, validated within and across content versions.
+Lifecycle reads reuse the existing lifecycle-only change/transition guard, rejecting
+content/artifact corruption and illegal edges. Update payloads are Pydantic-validated
+after CAS before append. Rejected writes leave bytes and tokens unchanged.
 
-### SVC-01: lifecycle writes have no advancing concurrency token
+Legacy schema-1 bases without metadata remain readable, including multi-version
+histories whose final lifecycle state was stored in place. Their synthetic token is
+the content version. New tracked successors must continue that token, and a legacy
+file cannot regress a newer persisted lifecycle token. Reads never rewrite history.
 
-Evidence: load two review-state Shot snapshots, both content version 1. Save
-approval_notes="creator feedback" through the first. Approve using the older snapshot
-and expected_version=1. Both writes succeed; notes become empty and version stays 1.
+_journal/cascades contains immutable plans and completion markers. Completed plans
+remain dependency-freshness evidence and are validated by the service before use.
+The store validates journal structure; the domain owns revision, approval, Script
+impact and CameraProfile classification rules; service coordinates I/O and recovery.
+All new production writes use the existing ProjectRoot/atomic-write boundary.
 
-Location: store/json_store.py update(), _head_checked(), _read_record(); approval.py
-read/modify/write orchestration. PRD 10.0 and AT-12 require conflicts instead of lost
-updates. The next contract must distinguish an advancing mutation token from the
-content version to which Review binds. Merely serializing individual writes is
-insufficient when stale snapshots still carry an accepted token.
+Recovery is explicit: resume_invalidations(store) returns completed plan IDs and
+then returns () on another call. Exact committed successors and already stale Shots
+are skipped. Divergent content, invalid plans or persistent failures fail closed,
+retain evidence, and report cause/progress/remediation. No automatic plan deletion,
+rollback or approval inheritance exists. Store primitives remain persistence APIs;
+future mutating API commands must use the serialized service boundary.
 
-### SVC-02: partial cascades can leave a stale Shot under an approved gate
+## Review findings and adjudication
 
-Evidence: two approved Shots depend on Location hall; Episode gate C approves cut 3.
-Inject failure on the second stale write. Reopen JSON: hall is version 2, first Shot
-is stale, second remains approved, and Episode still has approved_cut_version=3 and
-approval_review_id=gate. The raised JobError reports shots stale=[s1], gates revoked=[].
+The first independent suite exposed four failures rather than validating the new
+implementation's assumptions. Subsequent independent hardening exposed token
+regression and seven malformed completed-plan variants. Read-only gpt-6.1-sol reviews
+also reproduced wrong Shot key selection, unchanged mappings missed by edited beats,
+late path validation, incomplete history checks, lifecycle content corruption and
+invalid lifecycle input. Parent accepted these findings and sent corrections to
+implementation agents; independent test authors added regressions.
 
-Location: service/dependencies.py _invalidate(). revise_shot() has the analogous
-append-draft-before-gate-revocation ordering. PRD 10.2/AT-12 require fresh gate C once
-a Shot becomes stale or draft. Conservative gate-first revocation is a bounded
-improvement, but does not provide atomicity, recovery or protection from reapproval.
-Define failure/recovery semantics with independent fault-injection tests.
+Corrections preserve populated Shot location/camera links, reuse the existing Script
+selector, validate revision payloads/containment before recording plans or revoking
+gates, retain StyleBible revision support, validate completed plans and lifecycle
+history, and preserve exception causes. Post-only/no-op profile and Script metadata
+changes preserve gates and create no invalidation fence. Returned changed IDs name
+only approved-to-stale transitions. Prior boundary-repair tests remain substantive.
 
-### SVC-03: approval can escape an upstream invalidation snapshot
+Parent rejected the test author's broadened dependency-race assertion accepting
+VersionConflict with equal target tokens: changed dependency evidence must rerun the
+domain freshness guard and reject as INVALID_MANIFEST. The precise assertion was
+restored; target-token races still require VersionConflict. Earlier suspicions about
+post-only gate revocation, marker filename matching and Iterable annotations were
+rejected against the corrected source and probes; those cases had already been fixed.
 
-Evidence: snapshot a dependent Shot in review; inject real approve_shot immediately
-before the Location revision commits. revise_location returns no changed Shots.
-Reopen JSON: Location is version 2 and the dependent Shot remains approved.
+## Independent final verification
 
-Location: service/dependencies.py revise_script/revise_location/revise_camera_profile
-candidate snapshot and commit boundary. PRD 10.2/AT-12 require invalidation of affected
-approved Shots. Define command-level serialization and dependency revalidation across
-approval/revision operations. Moving the snapshot alone leaves a race window.
+- `.venv\Scripts\python.exe -m pytest -o addopts="" -q`: **716 passed, 5 warnings in 83.40s**. Warnings are from intentionally malformed Pydantic payloads.
+- `.venv\Scripts\python.exe -m ruff check orchestrator/ tests/ --output-format=concise`: **All checks passed!**
+- git diff --check: clean.
+- _work/service-review/reproduce_consistency.py: SVC-01/02/03 closed=true;
+  all_closed=true. It checks retained feedback/stale-token rejection, gate-first
+  partial failure, reapproval refusal, idempotent recovery, both approval/revision
+  orderings, nested-command refusal and same-root threaded serialization.
+- 156 new cases were written by agents other than every production implementer. They
+  use real JSON, persisted Reviews, deterministic interleavings and injected errors.
 
-## Verification and limits
+## Still open / not verified
 
-The parent inspected and independently reran all three deterministic reproduction
-probes successfully after the boundary repair. Disposable probe source is
-_work/service-review/reproduce_consistency.py; it uses a unique contained project
-root per run. Each probe used real ProjectStore JSON; Reviews were persisted.
-These demonstrate deterministic interleavings and an injected OSError, not actual
-thread scheduling, a physical disk failure or crash-recovery guarantees.
+No SVC-01..03 finding remains open within the single-writer contract. Actual HTTP
+409 responses await the API layer; only the boundary's VersionConflict data/type is
+tested here. Cross-process writers are unsupported, not tested. Physical power loss,
+forced process termination, real disk exhaustion and OS-level crash durability were
+not verified; reopen/copy recovery uses deterministic injected failures on real JSON.
+No GPU, Blender, ComfyUI, FFmpeg adapter or finished-shot acceptance test was run.
+Long-history performance was not benchmarked. Broader narrative policy for logline
+and beat-order changes remains outside this repair, as in the prior CONTRACT.md.
 
-Baseline: 527 tests passed, Ruff clean. Standard pytest temporary-root discovery was
-denied by this session's sandbox. Redirecting TMP, TEMP and PYTEST_DEBUG_TEMPROOT to
-a ProjectRoot-created _work/pytest-takeover directory let the full suite run.
-Final suite/lint results are recorded in HANDOFF.md. No GPU, Blender, ComfyUI, FFmpeg
-adapter or finished-shot acceptance test was run for this CPU-only boundary repair.
+## Retained prior boundary-repair result
 
-Logline-only and beat-order-only revisions preserve prior behavior (no invalidation),
-as explicitly scoped in CONTRACT.md. Broader narrative scope policy is not settled
-by these tests. Existing PRD example/normative-storage discrepancies in HANDOFF remain
-unmodified; this repair does not change store concurrency or append-only semantics.
+The preceding pass moved check_review_approval and Script impact selection into the
+domain, persisted real Reviews and proved mapping-only invalidation with retained
+history/artifacts and standalone reopen. It resolved policy placement, not the three
+consistency defects above. That distinction and its regression assertions are kept.

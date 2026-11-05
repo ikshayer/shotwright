@@ -32,7 +32,8 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, TypeVar
@@ -51,7 +52,13 @@ from orchestrator.domain.entities import (
     StyleBible,
     Timeline,
 )
-from orchestrator.domain.state import TransitionContext, check_transition
+from orchestrator.domain.state import (
+    RevisionError,
+    TransitionContext,
+    TransitionError,
+    check_revision,
+    check_transition,
+)
 from orchestrator.platform.containment import ContainmentError, ProjectRoot
 from orchestrator.platform.errors import JobError, JobErrorKind
 
@@ -59,6 +66,7 @@ E = TypeVar("E", bound=Entity)
 
 _ABSOLUTE_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\|/)")
 _VERSION_FILE = re.compile(r"^v(\d{4,})\.json$")
+_LIFECYCLE_FILE = re.compile(r"^v(\d{4,})\.lifecycle\.(\d{8,})\.json$")
 _REPLACE_ATTEMPTS = 5
 _REPLACE_BACKOFF_S = 0.02
 _LIFECYCLE_FIELDS = frozenset({
@@ -85,6 +93,10 @@ class VersionConflict(Exception):
         self.expected = expected
         self.actual = actual
         self.current = current
+
+
+class CommandInProgress(RuntimeError):
+    """A nested service command was attempted on the same project thread."""
 
 
 class RecordNotFound(LookupError):
@@ -159,11 +171,29 @@ class ProjectStore:
     #: ProjectStore objects cannot both replace the same successor file.
     _locks: ClassVar[dict[Path, Any]] = {}
     _locks_guard: ClassVar[threading.Lock] = threading.Lock()
+    _commands_local: ClassVar[threading.local] = threading.local()
 
     def __init__(self, root: ProjectRoot) -> None:
         self._root = root
         with self._locks_guard:
             self._lock = self._locks.setdefault(root.path.resolve(), threading.RLock())
+
+    @contextmanager
+    def command(self) -> Iterator[None]:
+        """Serialize one complete service command for this resolved project."""
+        active = getattr(self._commands_local, "roots", set())
+        root = self._root.path.resolve()
+        if root in active:
+            raise CommandInProgress(f"a service command is already active for {root}")
+        with self._lock:
+            active = set(getattr(self._commands_local, "roots", set()))
+            active.add(root)
+            self._commands_local.roots = active
+            try:
+                yield
+            finally:
+                active.remove(root)
+                self._commands_local.roots = active
 
     # -- reads -----------------------------------------------------------------------
 
@@ -188,40 +218,44 @@ class ProjectStore:
         episode_id: str | None = None,
         version: int | None = None,
     ) -> tuple[E, int]:
-        """Load a record and its expected_version token from the same snapshot."""
-        layout = self._checked_layout(cls, record_id, episode_id)
-        place = layout.place(record_id, episode_id)
-        if not layout.versioned:
-            if version is not None:
-                raise _invalid(f"{cls.__name__} is not versioned")
-            return self._read_record(cls, place)
-        if version is None:
+        """Load an entity and the mutation token from one locked snapshot."""
+        with self._lock:
+            layout = self._checked_layout(cls, record_id, episode_id)
+            place = layout.place(record_id, episode_id)
+            if not layout.versioned:
+                if version is not None:
+                    raise _invalid(f"{cls.__name__} is not versioned")
+                return self._read_record(cls, place)
             existing = self._versions_in(place)
             if not existing:
                 raise RecordNotFound(f"{cls.__name__} {record_id!r} does not exist")
-            version = existing[-1]
-        return self._read_record(cls, self._version_path(place, version))
+            selected = existing[-1] if version is None else version
+            if selected not in existing:
+                raise RecordNotFound(f"{cls.__name__} {record_id!r} version {selected} does not exist")
+            return self._read_version_snapshot(cls, place, selected)
 
     def versions(
         self, cls: type[Entity], record_id: str | None, *, episode_id: str | None = None
     ) -> list[int]:
         """Stored version numbers, ascending. Empty if the record does not exist."""
-        layout = self._checked_layout(cls, record_id, episode_id)
-        if not layout.versioned:
-            raise _invalid(f"{cls.__name__} is not versioned")
-        return self._versions_in(layout.place(record_id, episode_id))
+        with self._lock:
+            layout = self._checked_layout(cls, record_id, episode_id)
+            if not layout.versioned:
+                raise _invalid(f"{cls.__name__} is not versioned")
+            return self._versions_in(layout.place(record_id, episode_id))
 
     def ids(self, cls: type[Entity], *, episode_id: str | None = None) -> list[str]:
         """Ids of stored records of a per-id versioned type (sorted)."""
-        layout = _layout_for(cls)
-        if not layout.versioned:
-            raise _invalid(f"{cls.__name__} cannot be enumerated")
-        if layout.episode_scoped and not episode_id:
-            raise _invalid(f"{cls.__name__} is scoped to an episode; pass episode_id")
-        parent = self._resolve(layout.place("x", episode_id)).parent
-        if not parent.is_dir():
-            return []
-        return sorted(p.name for p in parent.iterdir() if self._versions_in_path(p))
+        with self._lock:
+            layout = _layout_for(cls)
+            if not layout.versioned:
+                raise _invalid(f"{cls.__name__} cannot be enumerated")
+            if layout.episode_scoped and not episode_id:
+                raise _invalid(f"{cls.__name__} is scoped to an episode; pass episode_id")
+            parent = self._resolve(layout.place("x", episode_id)).parent
+            if not parent.is_dir():
+                return []
+            return sorted(p.name for p in parent.iterdir() if self._versions_in_path(p))
 
     # -- writes ----------------------------------------------------------------------
 
@@ -250,7 +284,7 @@ class ProjectStore:
             return actual + 1
 
     def create(self, entity: VersionedEntity) -> None:
-        """Write version 1 of a new record."""
+        """Create content version 1 with mutation token 1."""
         if entity.version != 1 or entity.supersedes is not None:
             raise _invalid("a new record must be version 1 with no `supersedes`")
         if isinstance(entity, Shot) and entity.status is not ShotStatus.DRAFT:
@@ -259,52 +293,156 @@ class ProjectStore:
         with self._lock:
             existing = self._versions_in(directory)
             if existing:
-                head = self._read(type(entity), self._version_path(directory, existing[-1]))
-                raise VersionConflict(directory, 0, head.version, head)
-            self._write(self._version_path(directory, 1), entity)
+                head, token = self._read_version_snapshot(type(entity), directory, existing[-1])
+                raise VersionConflict(directory, 0, token, head)
+            self._write(self._version_path(directory, 1), entity, mutation_token=1, predecessor_token=0)
 
     def update(self, entity: VersionedEntity, *, expected_version: int) -> None:
-        """Update lifecycle fields on the head; content changes require revise().
-
-        An approved version is immutable, except a Shot's approved -> stale move, which
-        the state machine permits and which retains every artifact.
-        """
+        """Append a lifecycle snapshot for the current content version."""
         directory = self._directory_of(entity)
         with self._lock:
-            head = self._head_checked(entity, directory, expected_version)
-            if entity.version != head.version or entity.supersedes != head.supersedes:
+            head, token = self._head_checked(entity, directory, expected_version)
+            validated = self.validate_entity_payload(entity)
+            if validated.version != head.version or validated.supersedes != head.supersedes:
                 raise _invalid("update() keeps version and `supersedes`; use revise() for a new version")
-            self._check_in_place_change(head, entity)
-            self._write(self._version_path(directory, head.version), entity)
+            self._check_in_place_change(head, validated)
+            self._write(self._lifecycle_path(directory, head.version, token + 1), validated,
+                        mutation_token=token + 1, predecessor_token=token)
 
     def revise(self, entity: VersionedEntity, *, expected_version: int) -> None:
-        """Append the successor of the head version; the superseded record is never touched."""
+        """Append a content successor; mutation token advances independently."""
         directory = self._directory_of(entity)
         with self._lock:
-            head = self._head_checked(entity, directory, expected_version)
-            if entity.version != head.version + 1 or entity.supersedes != head.version:
-                raise _invalid(
-                    f"a revision of version {head.version} must be version {head.version + 1} "
-                    f"with supersedes={head.version}"
-                )
-            if getattr(entity, "approval_review_id", None) is not None:
-                raise _invalid("a revision never inherits approval; it must pass review again")
-            if isinstance(entity, Shot) and entity.status is not ShotStatus.DRAFT:
-                raise _invalid("a revised Shot must be draft")
-            self._write(self._version_path(directory, entity.version), entity)
+            _, token = self._validate_revision_locked(entity, expected_version)
+            target = self._version_path(directory, entity.version)
+            if self._resolve(target).exists():
+                raise _invalid(f"revision target {target} already exists; version files are append-only")
+            self._write(self._version_path(directory, entity.version), entity,
+                        mutation_token=token + 1, predecessor_token=token)
+
+    def validate_revision(
+        self, entity: VersionedEntity, *, expected_version: int,
+    ) -> tuple[VersionedEntity, int]:
+        """Validate CAS, payload, successor policy, and path containment without writing."""
+        with self._lock:
+            return self._validate_revision_locked(entity, expected_version)
+
+    def validate_entity_payload(self, entity: Entity) -> Entity:
+        """Revalidate a model instance and its declared paths without writing."""
+        with self._lock:
+            try:
+                validated = type(entity).model_validate(entity.model_dump(mode="python"))
+            except (ValidationError, TypeError, ValueError) as exc:
+                raise _invalid(f"{type(entity).__name__} payload is invalid: {exc}", cause=exc) from exc
+            self._check_path_fields(validated.model_dump(mode="json"), type(validated))
+            return validated
+
+    def _validate_revision_locked(
+        self, entity: VersionedEntity, expected_version: int,
+    ) -> tuple[VersionedEntity, int]:
+        directory = self._directory_of(entity)
+        head, token = self._head_checked(entity, directory, expected_version)
+        validated = self.validate_entity_payload(entity)
+        try:
+            check_revision(head, validated)
+        except RevisionError as exc:
+            raise _invalid(str(exc), cause=exc) from exc
+        return head, token
+
+    def record_cascade(self, plan: dict[str, Any]) -> None:
+        """Append an opaque cascade plan after validating its journal envelope."""
+        with self._lock:
+            self._validate_cascade_plan(plan)
+            cascade_id = plan["cascade_id"]
+            relative = f"_journal/cascades/{cascade_id}.json"
+            if self._resolve(relative).exists():
+                raise _invalid(f"cascade plan {cascade_id} already exists")
+            self._atomic_write(relative, json.dumps(plan, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+
+    def cascades(self, *, pending_only: bool = False) -> tuple[dict[str, Any], ...]:
+        """Return validated immutable plans, including completed history by default."""
+        with self._lock:
+            directory = self._resolve("_journal/cascades")
+            if not directory.exists():
+                return ()
+            plans: list[dict[str, Any]] = []
+            completed: set[str] = set()
+            for item in sorted(directory.glob("*.json")):
+                relative = f"_journal/cascades/{item.name}"
+                try:
+                    raw = json.loads(self._resolve(relative).read_text(encoding="utf-8"))
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise _invalid(f"cannot read cascade journal entry {item.name}: {exc}", cause=exc) from exc
+                if item.name.endswith(".done.json"):
+                    if (not isinstance(raw, dict) or set(raw) != {"cascade_id"}
+                            or not isinstance(raw["cascade_id"], str)
+                            or not re.fullmatch(r"[0-9a-f]{32}", raw["cascade_id"])
+                            or item.name != f"{raw['cascade_id']}.done.json"):
+                        raise _invalid(f"malformed cascade completion marker {item.name}")
+                    completed.add(raw["cascade_id"])
+                    continue
+                if not isinstance(raw, dict):
+                    raise _invalid(f"malformed cascade plan {item.name}")
+                self._validate_cascade_plan(raw)
+                if item.stem != raw["cascade_id"]:
+                    raise _invalid(f"cascade plan filename does not match its id: {item.name}")
+                plans.append(raw)
+            known = {plan["cascade_id"] for plan in plans}
+            if completed - known:
+                raise _invalid(f"completion marker references missing cascade plan {sorted(completed-known)}")
+            return tuple(plan for plan in plans if not pending_only or plan["cascade_id"] not in completed)
+
+    def complete_cascade(self, cascade_id: str) -> None:
+        with self._lock:
+            plans = {p["cascade_id"] for p in self.cascades()}
+            if cascade_id not in plans:
+                raise _invalid(f"cannot complete unknown cascade {cascade_id}")
+            relative = f"_journal/cascades/{cascade_id}.done.json"
+            if not self._resolve(relative).exists():
+                self._atomic_write(relative, json.dumps({"cascade_id": cascade_id}, sort_keys=True) + "\n")
+
+    @staticmethod
+    def _validate_cascade_plan(plan: dict[str, Any]) -> None:
+        required = {"cascade_id", "entity_type", "before", "after", "expected_version", "episode_ids", "affected"}
+        if set(plan) != required or not isinstance(plan.get("cascade_id"), str) or not re.fullmatch(r"[0-9a-f]{32}", plan["cascade_id"]):
+            raise _invalid("malformed cascade plan structure")
+        if not isinstance(plan.get("entity_type"), str) or not plan["entity_type"]:
+            raise _invalid("cascade plan entity_type must be a nonempty string")
+        if not isinstance(plan.get("before"), dict) or not isinstance(plan.get("after"), dict):
+            raise _invalid("cascade before/after payloads must be objects")
+        if type(plan.get("expected_version")) is not int or plan["expected_version"] < 1:
+            raise _invalid("cascade expected_version must be a positive token")
+        if (not isinstance(plan.get("episode_ids"), list)
+                or any(not isinstance(x, str) or not x for x in plan["episode_ids"])):
+            raise _invalid("cascade episode_ids must be strings")
+        if plan["episode_ids"] != sorted(set(plan["episode_ids"])):
+            raise _invalid("cascade episode_ids must be sorted and unique")
+        if not isinstance(plan.get("affected"), list):
+            raise _invalid("cascade affected must be a list")
+        seen: set[tuple[str, str]] = set()
+        for row in plan["affected"]:
+            if (not isinstance(row, dict) or set(row) != {"episode_id", "shot_id", "version"}
+                    or not isinstance(row["episode_id"], str) or not row["episode_id"]
+                    or not isinstance(row["shot_id"], str) or not row["shot_id"]
+                    or type(row["version"]) is not int or row["version"] < 1):
+                raise _invalid("malformed affected Shot reference in cascade plan")
+            key = (row["episode_id"], row["shot_id"])
+            if key in seen or row["episode_id"] not in plan["episode_ids"]:
+                raise _invalid("duplicate or unlisted affected Shot in cascade plan")
+            seen.add(key)
 
     # -- guards ----------------------------------------------------------------------
 
     def _head_checked(
         self, entity: VersionedEntity, directory: str, expected: int
-    ) -> VersionedEntity:
+    ) -> tuple[VersionedEntity, int]:
         existing = self._versions_in(directory)
         if not existing:
             raise RecordNotFound(f"{type(entity).__name__} at {directory!r} does not exist")
-        head = self._read(type(entity), self._version_path(directory, existing[-1]))
-        if head.version != expected:
-            raise VersionConflict(directory, expected, head.version, head)
-        return head
+        head, token = self._read_version_snapshot(type(entity), directory, existing[-1])
+        if token != expected:
+            raise VersionConflict(directory, expected, token, head)
+        return head, token
 
     @staticmethod
     def _check_in_place_change(head: VersionedEntity, new: VersionedEntity) -> None:
@@ -371,6 +509,84 @@ class ProjectStore:
     def _version_path(directory: str, version: int) -> str:
         return f"{directory}/v{version:04d}.json"
 
+    @staticmethod
+    def _lifecycle_path(directory: str, version: int, token: int) -> str:
+        return f"{directory}/v{version:04d}.lifecycle.{token:08d}.json"
+
+    def _read_version_snapshot(self, cls: type[E], directory: str, version: int) -> tuple[E, int]:
+        base_relative = self._version_path(directory, version)
+        base, base_token = self._read_record(cls, base_relative)
+        if base.version != version:
+            raise _invalid(f"{base_relative} payload version does not match its filename")
+
+        earlier = [item for item in self._versions_in(directory) if item < version]
+        if earlier:
+            previous_version = earlier[-1]
+            if previous_version != version - 1:
+                raise _invalid(f"content history before {base_relative} has a version gap")
+            previous, previous_token = self._read_version_snapshot(cls, directory, previous_version)
+            try:
+                raw_base = json.loads(self._resolve(base_relative).read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise _invalid(f"cannot read content record {base_relative}: {exc}", cause=exc) from exc
+            tracked_base = "_mutation_token" in raw_base
+            expected_predecessor = (
+                raw_base.get("_predecessor_token") if tracked_base else version - 1
+            )
+            if (expected_predecessor != previous_token
+                    or base_token != previous_token + 1):
+                raise _invalid(f"{base_relative} mutation token does not continue prior content history")
+            if self._identity_of(previous) != self._identity_of(base):
+                raise _invalid(f"{base_relative} changes entity identity across content versions")
+            if base.supersedes != previous.version:
+                raise _invalid(f"{base_relative} supersedes does not name the preceding content version")
+            # Legacy stores replaced the base record with its latest lifecycle state,
+            # so those records need structural chain validation without birth-only
+            # revision guards (for example, a draft-state guard on a successor).
+            if tracked_base:
+                try:
+                    check_revision(previous, base)
+                except RevisionError as exc:
+                    raise _invalid(f"{base_relative} has inconsistent successor metadata: {exc}", cause=exc) from exc
+        token = base_token
+        snapshot = base
+        for candidate_token, relative in self._lifecycle_files(directory, version):
+            if candidate_token != token + 1:
+                raise _invalid(f"{relative} does not advance the lifecycle token exactly once")
+            lifecycle, found = self._read_record(cls, relative)
+            if found != candidate_token:
+                raise _invalid(f"{relative} mutation token does not match its filename")
+            try:
+                raw = json.loads(self._resolve(relative).read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise _invalid(f"cannot read lifecycle snapshot {relative}: {exc}", cause=exc) from exc
+            if raw.get("_predecessor_token") != token:
+                raise _invalid(f"{relative} predecessor token does not continue the lifecycle chain")
+            if (self._identity_of(lifecycle) != self._identity_of(base)
+                    or lifecycle.version != base.version
+                    or lifecycle.supersedes != base.supersedes):
+                raise _invalid(f"{relative} does not describe its base entity/content version")
+            try:
+                self._check_in_place_change(snapshot, lifecycle)
+            except (JobError, TransitionError) as exc:
+                raise _invalid(
+                    f"{relative} has an illegal lifecycle change: {exc}", cause=exc
+                ) from exc
+            snapshot = lifecycle
+            token = found
+        return snapshot, token
+
+    def _lifecycle_files(self, directory: str, version: int) -> list[tuple[int, str]]:
+        path = self._resolve(directory)
+        if not path.is_dir():
+            return []
+        found = []
+        for item in path.iterdir():
+            match = _LIFECYCLE_FILE.match(item.name)
+            if match and int(match.group(1)) == version:
+                found.append((int(match.group(2)), f"{directory}/{item.name}"))
+        return sorted(found)
+
     def _resolve(self, relative: str) -> Path:
         try:
             return self._root.resolve(relative)
@@ -405,16 +621,28 @@ class ProjectStore:
         # Also on load: a project folder can be hand-edited or arrive from an
         # export, so a stored path is untrusted input until containment says so.
         self._check_path_fields(data, cls)
-        store_version = 1
-        if not _layout_for(cls).versioned:
-            store_version = data.pop("_store_version", 1)
-            if type(store_version) is not int or store_version < 1:
-                raise _invalid(f"{relative} has no positive integer _store_version")
+        versioned = _layout_for(cls).versioned
+        metadata_name = "_mutation_token" if versioned else "_store_version"
+        legacy_default = None
+        if versioned:
+            match = _VERSION_FILE.match(Path(relative).name)
+            legacy_default = int(match.group(1)) if match else None
+        explicit_metadata = metadata_name in data
+        metadata = data.pop(metadata_name, legacy_default if versioned else 1)
+        predecessor = data.pop("_predecessor_token", None) if versioned else None
+        if type(metadata) is not int or metadata < 1:
+            raise _invalid(f"{relative} has no positive integer {metadata_name}")
+        if versioned and explicit_metadata and (
+            type(predecessor) is not int or predecessor < 0 or predecessor >= metadata
+        ):
+            raise _invalid(f"{relative} has malformed _predecessor_token")
+        if versioned and not explicit_metadata and predecessor is not None:
+            raise _invalid(f"{relative} has predecessor metadata without a mutation token")
         try:
             entity = cls.model_validate(data)
         except ValidationError as exc:
             raise _invalid(f"{relative} does not match {cls.__name__}: {exc}", cause=exc) from exc
-        return entity, entity.version if isinstance(entity, VersionedEntity) else store_version
+        return entity, metadata
 
     @staticmethod
     def _require_readable_schema(relative: str, data: Any) -> None:
@@ -434,13 +662,27 @@ class ProjectStore:
                 f"{SCHEMA_VERSION} is registered",
             )
 
-    def _write(self, relative: str, entity: Entity, *, store_version: int | None = None) -> None:
+    def _write(
+        self, relative: str, entity: Entity, *, store_version: int | None = None,
+        mutation_token: int | None = None, predecessor_token: int | None = None,
+    ) -> None:
         data = entity.model_dump(mode="json")
         if store_version is not None:
             data["_store_version"] = store_version
+        if mutation_token is not None:
+            data["_mutation_token"] = mutation_token
+            data["_predecessor_token"] = predecessor_token
         self._check_path_fields(data, type(entity))
         text = json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
         self._atomic_write(relative, text)
+
+    @staticmethod
+    def _identity_of(entity: Entity) -> tuple[Any, ...]:
+        layout = _layout_for(type(entity))
+        identity = (getattr(entity, layout.id_field),) if layout.id_field else ()
+        if layout.episode_scoped:
+            identity += (entity.episode_id,)
+        return (type(entity), *identity)
 
     def _check_path_fields(self, data: dict[str, Any], entity_type: type[Entity]) -> None:
         r"""Validate declared path fields through containment, not a local regex.

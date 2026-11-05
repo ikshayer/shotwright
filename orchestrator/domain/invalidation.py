@@ -13,7 +13,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from .base import Invalidation, ShotStatus
-from .entities import CameraProfile, Script, Shot
+from .entities import CameraProfile, Location, Script, Shot
 
 
 def field_invalidation(model: type, name: str) -> Invalidation | None:
@@ -218,3 +218,53 @@ def shots_invalidated_by_script(
         )
     ))
     return Invalidated(hits, "Script beat content or beat-to-shot mapping changed")
+
+
+def revision_impact(
+    before: Script | Location | CameraProfile | Shot,
+    after: Script | Location | CameraProfile | Shot,
+    shots: Iterable[Shot],
+) -> tuple[Shot, ...]:
+    """Return all existing Shot heads impacted by one content revision.
+
+    Unlike the historical approved-only selectors, this includes every Shot state so
+    the durable dependency fence can prevent an old Review from being reused later.
+    """
+    if type(before) is not type(after):
+        raise ValueError("revision impact requires matching entity types")
+    cls = type(before)
+    if isinstance(before, Script):
+        if before.script_id != after.script_id or before.episode_id != after.episode_id:
+            raise ValueError("cannot compare different Scripts")
+        episode_shots = tuple(shot for shot in shots if shot.episode_id == before.episode_id)
+        # Keep Script's existing selector authoritative. It is approved-only by
+        # design, so normalize temporary copies to approved and map its selected
+        # identities back to the original all-state Shot records.
+        normalized = tuple(shot.model_copy(update={"status": ShotStatus.APPROVED})
+                           for shot in episode_shots)
+        selected = shots_invalidated_by_script(before, after, normalized)
+        selected_ids = set(selected.shot_ids)
+        candidates = (shot for shot in episode_shots if shot.shot_id in selected_ids)
+    elif isinstance(before, Location):
+        if before.location_id != after.location_id:
+            raise ValueError("cannot compare different Locations")
+        if before == after:
+            return ()
+        candidates = (shot for shot in shots if before.location_id in shot.dependencies or shot.location_id == before.location_id)
+    elif isinstance(before, CameraProfile):
+        diff = diff_camera_profile(before, after)
+        if not diff.requires_rebuild:
+            return ()
+        candidates = (shot for shot in shots if shot.camera_id == before.camera_id)
+    elif isinstance(before, Shot):
+        if before.shot_id != after.shot_id or before.episode_id != after.episode_id:
+            raise ValueError("cannot compare different Shots")
+        if before == after:
+            return ()
+        candidates = (shot for shot in shots if shot.episode_id == before.episode_id and shot.shot_id == before.shot_id)
+    else:
+        raise TypeError(f"unsupported revision impact type: {cls.__name__}")
+    unique: dict[tuple[str, str], Shot] = {}
+    for shot in candidates:
+        unique.setdefault((shot.episode_id, shot.shot_id), shot)
+    return tuple(unique.values())

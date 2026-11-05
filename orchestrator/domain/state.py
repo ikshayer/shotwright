@@ -15,10 +15,11 @@ enforced here rather than left to callers:
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
-from .base import FramingStatus, ShotStatus
-from .entities import Review
+from .base import FramingStatus, ShotStatus, VersionedEntity
+from .entities import CameraProfile, Location, Review, Script, Shot, StyleBible
 
 S = ShotStatus
 
@@ -141,3 +142,60 @@ def check_review_approval(
             f"Review {review.review_id!r} records {review.approval_state.value}, "
             "not approval"
         )
+
+
+class RevisionError(ValueError):
+    """A proposed successor violates identity, version, or approval rules."""
+
+
+def check_revision(before: VersionedEntity, after: VersionedEntity) -> None:
+    """Validate a versioned successor without consulting storage or mutating it."""
+    if type(before) is not type(after):
+        raise RevisionError("a revision must keep the same concrete entity type")
+    identity_fields = {
+        Script: ("script_id", "episode_id"),
+        Location: ("location_id",),
+        CameraProfile: ("camera_id",),
+        Shot: ("shot_id", "episode_id"),
+        StyleBible: ("project_id",),
+    }
+    fields = identity_fields.get(type(before))
+    if fields is None:
+        raise RevisionError(f"{type(before).__name__} is not a revisable entity")
+    if any(getattr(before, field) != getattr(after, field) for field in fields):
+        raise RevisionError("a revision must keep the same entity identity")
+    if after.version != before.version + 1 or after.supersedes != before.version:
+        raise RevisionError(
+            f"a revision of version {before.version} must be version {before.version + 1} "
+            f"with supersedes={before.version}"
+        )
+    if getattr(after, "approval_review_id", None) is not None:
+        raise RevisionError("a revision never inherits approval")
+    if isinstance(after, Shot) and after.status is not ShotStatus.DRAFT:
+        raise RevisionError("a revised Shot must be draft")
+
+
+def check_dependency_freshness(
+    shot: Shot, *, invalidated: Iterable[tuple[str, str, int]],
+) -> None:
+    """Reject approval when this exact content version has an invalidation fence."""
+    try:
+        matches = (shot.episode_id, shot.shot_id, shot.version) in invalidated
+    except TypeError as exc:
+        raise TypeError("invalidated must be an iterable of (episode_id, shot_id, version)") from exc
+    if matches:
+        raise ReviewApprovalError(
+            f"Shot {shot.shot_id}@{shot.version} has an upstream invalidation; "
+            "create a fresh successor and obtain its Review"
+        )
+
+
+def check_cut_approval(*, pending: bool, shots: Iterable[Shot]) -> None:
+    """Reject cut approval while recovery is pending or any current Shot is stale/draft."""
+    if pending:
+        raise ReviewApprovalError("cut approval is blocked while dependency recovery is pending")
+    for shot in shots:
+        if shot.status in {ShotStatus.STALE, ShotStatus.DRAFT}:
+            raise ReviewApprovalError(
+                f"cut approval is blocked by current Shot {shot.shot_id} in {shot.status.value} state"
+            )

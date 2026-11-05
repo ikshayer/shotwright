@@ -37,14 +37,13 @@ def approved_shot(store, shot_id, *, episode_id="ep1", camera_id="cam1", depende
         if status is ShotStatus.BUILDING:
             update["framing_status"] = FramingStatus.APPROVED
         shot = shot.model_copy(update=update)
-        store.update(shot, expected_version=shot.version)
+        store.update(shot, expected_version=store.load_with_version(Shot, shot.shot_id, episode_id=shot.episode_id)[1])
     review = Review(
         review_id=f"review-{shot_id}", target_id=shot_id, target_version=1,
         created_at=datetime.now(UTC), approval_state=ShotStatus.APPROVED,
     )
-    # Approval pointer setup is a lifecycle update; the actual Review persistence is
-    # exercised in approval tests through the store's Review reader seam.
-    store.update(shot.model_copy(update={"status": ShotStatus.APPROVED, "approval_review_id": review.review_id}), expected_version=1)
+    store.save(review, expected_version=0)
+    store.update(shot.model_copy(update={"status": ShotStatus.APPROVED, "approval_review_id": review.review_id}), expected_version=store.load_with_version(Shot, shot_id, episode_id=episode_id)[1])
 
 
 def test_post_only_profile_change_invalidates_nothing(tmp_path):
@@ -90,10 +89,10 @@ def test_rejected_shot_successor_draft_revokes_gate_c(tmp_path):
         if status is ShotStatus.BUILDING:
             update["framing_status"] = FramingStatus.APPROVED
         rejected = rejected.model_copy(update=update)
-        store.update(rejected, expected_version=rejected.version)
+        store.update(rejected, expected_version=store.load_with_version(Shot, rejected.shot_id, episode_id=rejected.episode_id)[1])
     successor = rejected.model_copy(update={**rejected.next_version(), "status": ShotStatus.DRAFT})
 
-    revise_shot(store, successor, expected_version=1)
+    revise_shot(store, successor, expected_version=store.load_with_version(Shot, "s1", episode_id="ep1")[1])
 
     after = store.load(Episode, "ep1")
     assert after.approved_cut_version is None

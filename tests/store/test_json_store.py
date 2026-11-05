@@ -45,6 +45,15 @@ def make_shot(**overrides) -> Shot:
     return Shot(**fields)
 
 
+def current_token(store, entity=None):
+    entity = make_shot() if entity is None else entity
+    record_id = next(getattr(entity, name) for name in (
+        "shot_id", "script_id", "location_id", "camera_id", "project_id"
+    ) if hasattr(entity, name))
+    return store.load_with_version(type(entity), record_id,
+                                   episode_id=getattr(entity, "episode_id", None))[1]
+
+
 def shot_dir(root: ProjectRoot) -> Path:
     return root.path / "episodes" / "ep01" / "shots" / "EP01-S03"
 
@@ -136,16 +145,16 @@ def approve(store: ProjectStore) -> None:
     for status in (ShotStatus.PLANNED, ShotStatus.BLOCKING, ShotStatus.BUILDING,
                    ShotStatus.REVIEW):
         store.update(make_shot(status=status, framing_status=FramingStatus.APPROVED),
-                     expected_version=1)
+                     expected_version=current_token(store))
     store.update(make_shot(status=ShotStatus.APPROVED, approval_review_id="r1"),
-                 expected_version=1)
+                 expected_version=current_token(store))
 
 
 def test_approved_version_is_immutable_in_place(store):
     approve(store)
     with pytest.raises(JobError) as err:
         store.update(make_shot(status=ShotStatus.APPROVED, approval_review_id="r1",
-                               narrative_beat="sneaky"), expected_version=1)
+                               narrative_beat="sneaky"), expected_version=current_token(store))
     assert err.value.kind is JobErrorKind.INVALID_MANIFEST
     assert store.load(Shot, "EP01-S03", episode_id="ep01").narrative_beat == ""
 
@@ -153,7 +162,7 @@ def test_approved_version_is_immutable_in_place(store):
 def test_approved_shot_can_go_stale_and_artifacts_stay(store, root):
     approve(store)
     artifact = shot_dir(root) / "v0001.json"
-    store.update(make_shot(status=ShotStatus.STALE, approval_review_id="r1"), expected_version=1)
+    store.update(make_shot(status=ShotStatus.STALE, approval_review_id="r1"), expected_version=current_token(store))
     assert artifact.is_file()
     assert store.load(Shot, "EP01-S03", episode_id="ep01").status is ShotStatus.STALE
 
@@ -162,15 +171,15 @@ def test_approved_shot_stale_move_cannot_smuggle_other_changes(store):
     approve(store)
     with pytest.raises(JobError):
         store.update(make_shot(status=ShotStatus.STALE, approval_review_id="r1",
-                               narrative_beat="sneaky"), expected_version=1)
+                               narrative_beat="sneaky"), expected_version=current_token(store))
 
 
 def test_approval_pointer_on_unstated_entity_makes_it_immutable(store):
     store.create(Location(location_id="hall"))
-    store.update(Location(location_id="hall", approval_review_id="r1"), expected_version=1)
+    store.update(Location(location_id="hall", approval_review_id="r1"), expected_version=current_token(store, Location(location_id="hall")))
     with pytest.raises(JobError):
         store.update(Location(location_id="hall", approval_review_id="r1",
-                              geometry_provenance="changed"), expected_version=1)
+                              geometry_provenance="changed"), expected_version=current_token(store, Location(location_id="hall")))
 
 
 def test_missing_record_raises_not_found(store):
@@ -212,7 +221,10 @@ def test_stray_temp_files_are_invisible_to_readers(store, root):
 def test_successful_write_leaves_no_temp_file(store, root):
     store.create(make_shot())
     store.update(make_shot(status=ShotStatus.PLANNED), expected_version=1)
-    assert [p.name for p in shot_dir(root).iterdir()] == ["v0001.json"]
+    assert (shot_dir(root) / "v0001.json").is_file()
+    snapshots = list(shot_dir(root).rglob("*.json"))
+    assert len(snapshots) >= 2  # retained base and immutable lifecycle snapshot
+    assert not list(root.path.rglob("*.tmp"))
 
 
 def test_disk_full_maps_to_disk_exhausted(store, root, monkeypatch):
@@ -361,9 +373,9 @@ def test_update_allows_unapproved_lifecycle_fields(store):
 def test_stale_approved_version_remains_immutable(store, changes):
     approve(store)
     stale = make_shot(status=ShotStatus.STALE, approval_review_id="r1")
-    store.update(stale, expected_version=1)
+    store.update(stale, expected_version=current_token(store))
     with pytest.raises(JobError):
-        store.update(stale.model_copy(update=changes), expected_version=1)
+        store.update(stale.model_copy(update=changes), expected_version=current_token(store))
     assert store.load(Shot, stale.shot_id, episode_id=stale.episode_id) == stale
 
 
@@ -384,13 +396,13 @@ def test_revision_rejects_approval_pointer_on_every_type_that_has_one(store, ent
     if isinstance(entity, Shot):
         changes["status"] = ShotStatus.DRAFT
     with pytest.raises(JobError, match="never inherits approval"):
-        store.revise(entity.model_copy(update=changes), expected_version=1)
+        store.revise(entity.model_copy(update=changes), expected_version=current_token(store, entity))
     # A fresh pointer also cannot pre-approve a successor.
     with pytest.raises(JobError, match="never inherits approval"):
         store.revise(entity.model_copy(update={**changes, "approval_review_id": "r2"}),
-                     expected_version=1)
+                     expected_version=current_token(store, entity))
     changes["approval_review_id"] = None
-    store.revise(entity.model_copy(update=changes), expected_version=1)
+    store.revise(entity.model_copy(update=changes), expected_version=current_token(store, entity))
 
 
 @pytest.mark.parametrize(("field", "value"), [

@@ -32,7 +32,7 @@ def reviewable_shot(store, shot_id="s1", **overrides):
         if status is ShotStatus.BUILDING:
             update["framing_status"] = FramingStatus.APPROVED
         record = record.model_copy(update=update)
-        store.update(record, expected_version=record.version)
+        store.update(record, expected_version=store.load_with_version(Shot, record.shot_id, episode_id=record.episode_id)[1])
     return record
 
 
@@ -40,7 +40,7 @@ def approve_record(store, record):
     review_id = f"r-{record.shot_id}"
     persist_review(store, review_id, record.shot_id, version=record.version)
     return approve_shot(store, record.shot_id, episode_id=record.episode_id,
-                        review_id=review_id, expected_version=record.version)
+                        review_id=review_id, expected_version=store.load_with_version(Shot, record.shot_id, episode_id=record.episode_id)[1])
 
 
 def add_episode(store):
@@ -86,7 +86,7 @@ def test_invalid_persisted_review_does_not_mutate_shot(store, case):
                        version=2 if case == "wrong-version" else 1,
                        state=ShotStatus.REJECTED if case == "rejected" else ShotStatus.APPROVED)
     with pytest.raises(JobError) as caught:
-        approve_shot(store, "s1", episode_id="ep1", review_id="invalid", expected_version=1)
+        approve_shot(store, "s1", episode_id="ep1", review_id="invalid", expected_version=store.load_with_version(Shot, "s1", episode_id="ep1")[1])
     assert caught.value.kind is JobErrorKind.INVALID_MANIFEST
     assert caught.value.__cause__ is not None
     assert store.load(Shot, "s1", episode_id="ep1") == before
