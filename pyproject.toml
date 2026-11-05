@@ -13,6 +13,7 @@ dependencies = [
     "python-multipart>=0.0.9",
     "nvidia-ml-py>=12",
     "psutil>=5.9",
+    "Pillow>=10.0",
 ]
 
 [project.scripts]
