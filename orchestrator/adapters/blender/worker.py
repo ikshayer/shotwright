@@ -354,6 +354,11 @@ def _run(plan_path: str) -> None:
                 background.inputs["Color"].default_value = (0.08, 0.082, 0.09, 1.0)
                 background.inputs["Strength"].default_value = 1.6
             scene.world = world
+        if plan["mode"] == "master" and scene_data.get("world_strength") is not None:
+            background = scene.world.node_tree.nodes.get("Background") if scene.world and scene.world.use_nodes else None
+            if background is None:
+                raise RuntimeError("scene world has no Background node for configured world_strength")
+            background.inputs["Strength"].default_value = float(scene_data["world_strength"])
         if plan["mode"] == "master":
             textured = {
                 spec["name"]
@@ -542,8 +547,8 @@ def _configure_material_surface(material: object, spec: dict[str, object]) -> No
     surface = str(spec.get("surface", "plain"))
     noise = tree.nodes.new("ShaderNodeTexNoise")
     noise.noise_dimensions = "3D"
-    noise.inputs["Scale"].default_value = {"wood": 1.6, "fabric": 1.5, "rug": 1.8, "plaster": 1.0}.get(surface, 3.0)
-    noise.inputs["Detail"].default_value = {"wood": 2.0, "fabric": 2.0, "rug": 3.0, "plaster": 2.0}.get(surface, 3.0)
+    noise.inputs["Scale"].default_value = {"wood": 1.6, "wood_panel": 1.1, "fabric": 1.5, "rug": 1.8, "plaster": 1.0}.get(surface, 3.0)
+    noise.inputs["Detail"].default_value = {"wood": 2.0, "wood_panel": 4.0, "fabric": 2.0, "rug": 3.0, "plaster": 2.0}.get(surface, 3.0)
     noise.inputs["Roughness"].default_value = 0.65
     tree.links.new(mapping.outputs["Vector"], noise.inputs["Vector"])
     base = tuple(spec["color"])
@@ -552,9 +557,54 @@ def _configure_material_surface(material: object, spec: dict[str, object]) -> No
     ramp.color_ramp.elements[0].color = tuple(max(0, c * (1 - var)) for c in base[:3]) + (base[3],)
     ramp.color_ramp.elements[1].color = tuple(min(1, c * (1 + var)) for c in base[:3]) + (base[3],)
     tree.links.new(noise.outputs["Fac"], ramp.inputs["Fac"])
-    tree.links.new(ramp.outputs["Color"], shader.inputs["Base Color"])
+    if surface == "wood_panel":
+        # World-space coordinates keep board width in meters after object transforms.
+        geometry = tree.nodes.new("ShaderNodeNewGeometry")
+        pos = tree.nodes.new("ShaderNodeSeparateXYZ")
+        normal = tree.nodes.new("ShaderNodeSeparateXYZ")
+        tree.links.new(geometry.outputs["Position"], pos.inputs[0])
+        tree.links.new(geometry.outputs["Normal"], normal.inputs[0])
+        abs_nx = tree.nodes.new("ShaderNodeMath")
+        abs_nx.operation = "ABSOLUTE"
+        tree.links.new(normal.outputs["X"], abs_nx.inputs[0])
+        choose_x = tree.nodes.new("ShaderNodeMath")
+        choose_x.operation = "LESS_THAN"
+        choose_x.inputs[1].default_value = 0.5
+        tree.links.new(abs_nx.outputs[0], choose_x.inputs[0])
+        x_part = tree.nodes.new("ShaderNodeMath")
+        x_part.operation = "MULTIPLY"
+        tree.links.new(pos.outputs["X"], x_part.inputs[0])
+        tree.links.new(choose_x.outputs[0], x_part.inputs[1])
+        y_factor = tree.nodes.new("ShaderNodeMath")
+        y_factor.operation = "SUBTRACT"
+        y_factor.inputs[0].default_value = 1.0
+        tree.links.new(choose_x.outputs[0], y_factor.inputs[1])
+        y_part = tree.nodes.new("ShaderNodeMath")
+        y_part.operation = "MULTIPLY"
+        tree.links.new(pos.outputs["Y"], y_part.inputs[0])
+        tree.links.new(y_factor.outputs[0], y_part.inputs[1])
+        axis_pos = tree.nodes.new("ShaderNodeMath")
+        axis_pos.operation = "ADD"
+        tree.links.new(x_part.outputs[0], axis_pos.inputs[0])
+        tree.links.new(y_part.outputs[0], axis_pos.inputs[1])
+        phase = tree.nodes.new("ShaderNodeMath")
+        phase.operation = "PINGPONG"
+        phase.inputs[1].default_value = float(spec.get("panel_width", 0.18)) / 2
+        tree.links.new(axis_pos.outputs[0], phase.inputs[0])
+        seam = tree.nodes.new("ShaderNodeMath")
+        seam.operation = "LESS_THAN"
+        seam.inputs[1].default_value = float(spec.get("seam_width", 0.003)) / 2
+        tree.links.new(phase.outputs[0], seam.inputs[0])
+        mix = tree.nodes.new("ShaderNodeMixRGB")
+        mix.blend_type = "MIX"
+        mix.inputs[2].default_value = tuple(max(0.0, c * 0.34) for c in base[:3]) + (base[3],)
+        tree.links.new(seam.outputs[0], mix.inputs[0])
+        tree.links.new(ramp.outputs["Color"], mix.inputs[1])
+        tree.links.new(mix.outputs[0], shader.inputs["Base Color"])
+    else:
+        tree.links.new(ramp.outputs["Color"], shader.inputs["Base Color"])
     rough = tree.nodes.new("ShaderNodeMapRange")
-    roughness_delta = {"wood": 0.08, "fabric": 0.04, "rug": 0.025, "plaster": 0.015}.get(surface, 0.06)
+    roughness_delta = {"wood": 0.08, "wood_panel": 0.06, "fabric": 0.04, "rug": 0.025, "plaster": 0.015}.get(surface, 0.06)
     rough.inputs["To Min"].default_value = max(0, float(spec["roughness"]) - roughness_delta)
     rough.inputs["To Max"].default_value = min(1, float(spec["roughness"]) + roughness_delta)
     tree.links.new(noise.outputs["Fac"], rough.inputs["Value"])

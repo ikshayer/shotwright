@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "version": 1,
+  "supersedes": null,
+  "camera_id": "living-room-cctv",
+  "profile_name": "Spike 09 shared CCTV camera",
+  "field_of_view_mm": 20.0,
+  "barrel_distortion": 0.0,
+  "exposure_ev": 0.0,
+  "practical_light_color_k": 6500,
+  "practical_light_intensity": 1.0,
+  "monochrome_night": true,
+  "camera_position": null,
+  "camera_mount": "fixed corner mount below ceiling",
+  "depth_of_field": null,
+  "codec": "libx264",
+  "bitrate_kbps": 800,
+  "storage_resolution": [
+    640,
+    480
+  ],
+  "display_aspect_ratio": "4:3",
+  "fps": 12.0,
+  "decimation_pattern": null,
+  "noise_model": {},
+  "chroma_smearing": 0.0,
+  "block_artifacts": 0.0,
+  "sharpening": 0.0,
+  "grade_white_balance": {},
+  "overlay_model": {},
+  "analog_artifacts": {},
+  "frame_drop_schedule": []
+}

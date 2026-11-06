@@ -34,7 +34,9 @@ class MaterialSpec(_FrozenModel):
     name: str
     color: tuple[float, float, float, float]
     roughness: float = Field(default=0.7, ge=0, le=1)
-    surface: Literal["plain", "wood", "fabric", "plaster", "rug"] = "plain"
+    surface: Literal["plain", "wood", "fabric", "plaster", "rug", "wood_panel"] = "plain"
+    panel_width: float = Field(default=0.18, gt=0)
+    seam_width: float = Field(default=0.003, gt=0)
     texture_scale: Vec3 = (1.0, 1.0, 1.0)
     variation: float = Field(default=0.0, ge=0, le=1)
     bump_strength: float = Field(default=0.0, ge=0, le=1)
@@ -169,6 +171,7 @@ class SceneSpec(_FrozenModel):
     camera_location: Vec3
     camera_target: Vec3
     camera_keyframes: tuple[CameraKeyframeSpec, ...] = ()
+    world_strength: float | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def validate_scene(self) -> SceneSpec:
@@ -345,9 +348,13 @@ def _scene_payload(request: RenderRequest, camera: dict[str, object]) -> dict[st
             "bump_strength": 0.0,
             "emission_strength": 0.0,
             "metallic": 0.0,
+            "panel_width": 0.18,
+            "seam_width": 0.003,
         }.items():
-            if item.get(key) == default:
+            if item.get(key) == default and not (item.get("surface") == "wood_panel" and key in {"panel_width", "seam_width"}):
                 item.pop(key, None)
+    if scene.world_strength is None:
+        payload.pop("world_strength", None)
     return payload
 
 
@@ -866,8 +873,11 @@ def synthetic_interior() -> SceneSpec:
                      camera_location=cam, camera_target=(0.3, 0.2, 1.15))
 
 
-def american_living_room() -> SceneSpec:
+def american_living_room(*, look: Literal["bright", "low_key"] = "bright") -> SceneSpec:
     """Deterministic 5.4 x 4.2 m American timber-house living room."""
+    if look not in ("bright", "low_key"):
+        raise ValueError(f"unsupported living-room look {look!r}")
+    low_key = look == "low_key"
     mats = (
         MaterialSpec(
             name="Warm drywall",
@@ -913,7 +923,7 @@ def american_living_room() -> SceneSpec:
         ),
         MaterialSpec(
             name="Sofa fabric",
-            color=(0.31, 0.32, 0.29, 1),
+            color=(0.12, 0.12, 0.12, 1) if low_key else (0.31, 0.32, 0.29, 1),
             roughness=0.93,
             surface="fabric",
             texture_scale=(55, 55, 55),
@@ -947,12 +957,21 @@ def american_living_room() -> SceneSpec:
             bump_strength=0.015,
         ),
         MaterialSpec(
-            name="Lamp shade", color=(1.0, 0.92, 0.8, 1), roughness=0.8, emission_strength=0.65
+            name="Lamp shade",
+            color=(0.065, 0.055, 0.045, 1) if low_key else (1.0, 0.92, 0.8, 1),
+            roughness=0.86 if low_key else 0.8,
+            emission_strength=0.0 if low_key else 0.65,
         ),
-        MaterialSpec(name="Window glass", color=(0.35, 0.6, 0.82, 1), roughness=0.2),
+        MaterialSpec(name="Window glass", color=(0.12, 0.12, 0.12, 1) if low_key else (0.35, 0.6, 0.82, 1), roughness=1.0 if low_key else 0.2),
         MaterialSpec(name="TV screen", color=(0.008, 0.009, 0.012, 1), roughness=0.22),
         MaterialSpec(name="Ceramic", color=(0.42, 0.38, 0.32, 1), roughness=0.3),
     )
+    if low_key:
+        mats += (
+            MaterialSpec(name="Lamp bulb", color=(1.0, 0.92, 0.8, 1), roughness=0.25, emission_strength=4.0),
+            MaterialSpec(name="Dark wood panel", color=(0.16, 0.14, 0.12, 1), roughness=0.82, surface="wood_panel", panel_width=0.18, seam_width=0.003, texture_scale=(10.0, 10.0, 0.3), variation=0.12, bump_strength=0.025),
+            MaterialSpec(name="Silhouette", color=(0.002, 0.002, 0.002, 1), roughness=1.0),
+        )
     o = []
     names = {}
 
@@ -1088,7 +1107,7 @@ def american_living_room() -> SceneSpec:
             material="Lamp shade",
         )
     )
-    o.append(ObjectSpec(name=unique("Lamp bulb"), kind="sphere", location=(0.17, 1.05, 0.99), dimensions=(0.085, 0.085, 0.085), material="Lamp shade"))
+    o.append(ObjectSpec(name=unique("Lamp bulb"), kind="sphere", location=(0.17, 1.05, 0.99), dimensions=(0.055, 0.055, 0.055) if low_key else (0.085, 0.085, 0.085), material="Lamp bulb" if low_key else "Lamp shade"))
     # Open-backed bookcase faces into the room from the rear-right wall.
     for x in (1.35, 2.45):
         b("Bookcase side panel", (x, 1.76, 1.01), (0.055, 0.36, 2.02), "Honey oak", 0.012)
@@ -1127,10 +1146,46 @@ def american_living_room() -> SceneSpec:
             target=(0, -0.3, 0.9),
         ),
     )
+    if low_key:
+        # Refinish the room-facing shell as boards. The same material evaluates its
+        # board axis from the surface normal, so the rear and side walls both run vertically.
+        panel_names = {"Rear wall left", "Rear wall between openings", "Rear wall right", "Wall below window", "Wall above window", "Hallway header", "Left wall", "Right wall", "Hall left return", "Hall right return", "Hall end wall"}
+        o = [item.model_copy(update={"material": "Dark wood panel"}) if item.name in panel_names else item for item in o]
+        # Hang the existing table lamp over the coffee table, where the bulb and pool
+        # are inside the camera's room-facing view. Remove both old fixture assemblies.
+        fixture_parts = {"Lamp base", "Lamp stem", "Ceiling light canopy", "Ceiling light stem", "Ceiling light diffuser"}
+        adjusted = []
+        for item in o:
+            if item.name in fixture_parts:
+                continue
+            if item.name == "Lamp shade":
+                item = item.model_copy(update={"location": (-0.55, 0.6, 1.85), "dimensions": (0.38, 0.38, 0.28)})
+            elif item.name == "Lamp bulb":
+                item = item.model_copy(update={"location": (-0.55, 0.6, 1.65)})
+            adjusted.append(item)
+        adjusted.extend((
+            ObjectSpec(name="Pendant canopy", kind="cylinder", location=(-0.55, 0.6, 2.37), dimensions=(0.16, 0.16, 0.03), material="Walnut"),
+            ObjectSpec(name="Pendant cord", kind="cylinder", location=(-0.55, 0.6, 2.1725), dimensions=(0.018, 0.018, 0.365), material="Walnut"),
+            ObjectSpec(name="Pendant bulb socket", kind="cylinder", location=(-0.55, 0.6, 1.735), dimensions=(0.022, 0.022, 0.16), material="Walnut"),
+        ))
+        o = adjusted
+        # A partial hunched figure stands inside the hall opening, just behind its right jamb.
+        o.extend((
+            ObjectSpec(name="Hall silhouette torso", kind="sphere", location=(0.93, 2.45, 1.22), dimensions=(0.28, 0.20, 0.80), material="Silhouette", rotation=(0, 0, -0.04)),
+            ObjectSpec(name="Hall silhouette head", kind="sphere", location=(0.94, 2.45, 1.72), dimensions=(0.22, 0.22, 0.22), material="Silhouette"),
+            ObjectSpec(name="Hall silhouette left arm", kind="box", location=(0.78, 2.45, 1.20), dimensions=(0.10, 0.18, 0.62), material="Silhouette", rotation=(0, 0, -0.10)),
+            ObjectSpec(name="Hall silhouette right arm", kind="box", location=(1.05, 2.45, 1.20), dimensions=(0.10, 0.18, 0.62), material="Silhouette", rotation=(0, 0, 0.12)),
+            ObjectSpec(name="Hall silhouette left leg", kind="box", location=(0.87, 2.45, 0.45), dimensions=(0.11, 0.18, 0.84), material="Silhouette"),
+            ObjectSpec(name="Hall silhouette right leg", kind="box", location=(0.98, 2.45, 0.45), dimensions=(0.11, 0.18, 0.84), material="Silhouette"),
+            ObjectSpec(name="Hall silhouette left foot", kind="box", location=(0.87, 2.34, 0.06), dimensions=(0.16, 0.32, 0.06), material="Silhouette"),
+            ObjectSpec(name="Hall silhouette right foot", kind="box", location=(0.98, 2.34, 0.06), dimensions=(0.16, 0.32, 0.06), material="Silhouette"),
+        ))
+        lights = (LightSpec(name="Panel0", location=(-0.50, 0.6, 1.65), energy=145, color=(1.0, 0.92, 0.8), size=0.025, kind="point"),)
     return SceneSpec(
         materials=mats,
         objects=tuple(o),
         lights=lights,
-        camera_location=(-2.48, -1.85, 2.25),
-        camera_target=(0.2, 0.5, 0.2),
+        camera_location=(-1.8, -1.85, 1.95) if low_key else (-2.48, -1.85, 2.25),
+        camera_target=(0.15, 1.4, 1.0) if low_key else (0.2, 0.5, 0.2),
+        world_strength=0.0 if low_key else None,
     )
