@@ -24,6 +24,7 @@ from typing import Literal
 
 from pydantic import Field, StrictInt, field_serializer, field_validator, model_validator
 
+from .anomaly import AnomalySpec
 from .base import (
     Entity,
     EvidenceTier,
@@ -121,6 +122,7 @@ class Shot(VersionedEntity):
     fallback_method: ProductionMethod | None = None
     routing_rationale: str = ""
     figure_params: dict[str, float | str | bool] = Field(default_factory=dict)
+    anomaly: AnomalySpec | None = None
     asset_ids: list[str] = Field(default_factory=list)
     audio_refs: list[str] = Field(default_factory=list)
     degrade_seed: int = Field(0, ge=0)
@@ -142,6 +144,8 @@ class Shot(VersionedEntity):
             raise ValueError(
                 f"event_sec {self.event_sec} falls outside duration_sec {self.duration_sec}"
             )
+        if self.anomaly is not None and self.event_sec is None:
+            raise ValueError("Shot.event_sec is required when anomaly is specified")
         return self
 
 
