@@ -1,0 +1,157 @@
+"""Composition tests from COMPOSITION_CONTRACT.md.
+
+These tests treat the service composer as a pure adapter between the project-local
+JSON store and typed adapter requests. The composition API is not named in the
+contract, so the tests assume ``compose_render_request(store, episode_id, shot_id,
+mode=...)`` and ``compose_postprofile_spec(store)``.
+
+The bound Phase 1 scene is the measured ``synthetic_interior()`` fixture. It is
+not FR-04's future procedural hallway builder driven by a text brief.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
+
+from orchestrator.adapters.blender.scene import RenderRequest, SceneSpec, synthetic_interior
+from orchestrator.adapters.postprofile.profile import PostProfileSpec
+from orchestrator.domain.entities import CameraProfile, Episode, Project, Shot
+from orchestrator.platform.containment import ProjectRoot
+from orchestrator.store.json_store import ProjectStore
+
+
+def _store_with_shot(
+    root: Path,
+    *,
+    camera_profile: str = "cam-profile-1",
+    create_camera_profile: bool = True,
+) -> tuple[ProjectStore, Shot, int]:
+    store = ProjectStore(ProjectRoot(root))
+    store.save(Project(project_id="p1", title="Composition fixture"), expected_version=0)
+    store.save(
+        Episode(episode_id="ep1", project_id="p1", number=1, duration_target_sec=30),
+        expected_version=0,
+    )
+    if create_camera_profile:
+        store.create(CameraProfile(
+            camera_id=camera_profile,
+            profile_name="Fixture CCTV",
+            field_of_view_mm=21.25,
+        ))
+
+    original = Shot(
+        shot_id="shot-1",
+        episode_id="ep1",
+        camera_profile=camera_profile,
+        duration_sec=4.0,
+        degrade_seed=11,
+    )
+    store.create(original)
+
+    # Advance only the mutation token once with an allowed lifecycle-only edit,
+    # then add a content successor. The resulting content version is 2 while the
+    # store mutation token is 3, so a composer cannot accidentally pass by using
+    # one number for both contracts.
+    store.update(
+        original.model_copy(update={"approval_notes": "mutation-token-only edit"}),
+        expected_version=1,
+    )
+    current = store.load(Shot, original.shot_id, episode_id=original.episode_id)
+    successor = current.model_copy(
+        update={
+            **current.next_version(),
+            "duration_sec": 7.375,
+            "degrade_seed": 918273,
+        }
+    )
+    store.revise(successor, expected_version=2)
+    shot, mutation_token = store.load_with_version(
+        Shot, original.shot_id, episode_id=original.episode_id,
+    )
+    return store, shot, mutation_token
+
+
+def _compose_render(store: ProjectStore, shot: Shot, *, mode: str = "master") -> RenderRequest:
+    from orchestrator.service.compose import compose_render_request
+
+    return compose_render_request(store, shot.episode_id, shot.shot_id, mode=mode)
+
+
+def _tree_snapshot(root: Path) -> tuple[tuple[str, str, bytes | None], ...]:
+    """Capture directories and file bytes so new empty dirs also count as writes."""
+    items: list[tuple[str, str, bytes | None]] = []
+    for path in root.rglob("*"):
+        relative = path.relative_to(root).as_posix()
+        if path.is_dir():
+            items.append((relative, "directory", None))
+        elif path.is_file():
+            items.append((relative, "file", path.read_bytes()))
+    return tuple(sorted(items))
+
+
+def test_render_composition_uses_shot_values_and_content_version(tmp_path: Path) -> None:
+    store, shot, mutation_token = _store_with_shot(tmp_path)
+
+    assert shot.version == 2
+    assert mutation_token == 3
+    assert shot.version != mutation_token
+
+    request = _compose_render(store, shot)
+
+    assert isinstance(request, RenderRequest)
+    assert request.shot_id == shot.shot_id
+    assert request.shot_version == shot.version
+    assert request.shot_version != mutation_token
+    assert request.degrade_seed == 918273
+    assert request.duration_sec == 7.375
+    assert request.camera_profile == store.load(CameraProfile, shot.camera_profile)
+    assert request.camera_profile.field_of_view_mm == 21.25
+    assert isinstance(request.scene, SceneSpec)
+    assert request.scene == synthetic_interior()
+    assert request.engine == "eevee"
+
+
+def test_render_composition_is_deterministic_except_for_run_id(tmp_path: Path) -> None:
+    store, shot, _ = _store_with_shot(tmp_path)
+
+    first = _compose_render(store, shot)
+    second = _compose_render(store, shot)
+
+    first_values = first.model_dump(mode="json")
+    second_values = second.model_dump(mode="json")
+    first_run_id = first_values.pop("run_id")
+    second_run_id = second_values.pop("run_id")
+    assert first_run_id
+    assert second_run_id
+    assert first_values == second_values
+
+    round_tripped = RenderRequest.model_validate(first.model_dump(mode="python"))
+    assert round_tripped == first
+
+
+def test_render_preview_and_master_compose_different_modes(tmp_path: Path) -> None:
+    store, shot, _ = _store_with_shot(tmp_path)
+
+    master = _compose_render(store, shot, mode="master")
+    preview = _compose_render(store, shot, mode="preview")
+
+    assert master.mode == "master"
+    assert preview.mode == "preview"
+
+
+def test_missing_camera_profile_names_the_missing_record(tmp_path: Path) -> None:
+    store, shot, _ = _store_with_shot(
+        tmp_path,
+        camera_profile="missing-camera-profile",
+        create_camera_profile=False,
+    )
+
+    with pytest.raises(Exception) as caught:
+        _compose_render(store, shot)
+
+    assert "missing-camera-profile" in str(caught.value)
+    assert not isinstance(caught.value, ValidationError)
+    assert "validation errors for RenderRequest" not in str(caught.value)
