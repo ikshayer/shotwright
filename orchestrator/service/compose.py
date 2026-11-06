@@ -194,9 +194,16 @@ def compose_degrade_request(
     profile = compose_post_profile_spec(store)
     overlay = profile.identity.overlay
     if overlay is None or not overlay.font_relative:
+        repair = (
+            "add the overlay with its intended settings and set font_relative"
+            if overlay is None else "set overlay.font_relative"
+        )
         raise ValueError(
             f"PostProfile {profile.identity.name!r} cannot be composed; missing persisted field: "
-            "overlay.font_relative"
+            "overlay.font_relative. No profile migration is registered. "
+            f"To repair it, {repair} to \"assets/fonts/overlay.ttf\" in "
+            f"post_profiles/{profile.identity.name}.json, then place a font you are licensed "
+            "to use at assets/fonts/overlay.ttf."
         )
     return DegradeRequest(
         shot_id=shot.shot_id,

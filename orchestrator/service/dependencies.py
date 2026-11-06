@@ -312,6 +312,7 @@ def _measured_dvr_2005_defaults() -> tuple[CameraProfile, PostProfile]:
             overlay = PostProfileOverlay.model_validate({
                 **params,
                 "placement": "in_recording",
+                "font_relative": "assets/fonts/overlay.ttf",
             })
         stages.append(PostStage(
             name=source["name"],
@@ -367,6 +368,7 @@ def create_project(store: ProjectStore, project: Project) -> Project:
         store.save(project, expected_version=0)
         store.create(camera_profile)
         store.save(post_profile, expected_version=0)
+        store._root.make_dir("assets/fonts")
         return project
 
 

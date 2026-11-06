@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 import orchestrator.service.compose as compose_module
-from orchestrator.adapters.postprofile.runner import DegradeRequest
+from orchestrator.adapters.postprofile.runner import DegradeRequest, PostProfileAdapter
 from orchestrator.domain.entities import (
     CameraProfile,
     Episode,
@@ -28,6 +28,8 @@ from orchestrator.domain.entities import (
 )
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.errors import JobError, JobErrorKind
+from orchestrator.platform.settings import Settings
+from orchestrator.service.dependencies import create_project
 from orchestrator.store.json_store import ProjectStore
 
 _FONT_RELATIVE = "assets/fonts/fixture.ttf"
@@ -220,6 +222,59 @@ def test_degrade_composition_rejects_a_profile_without_its_font(
         f"fontless profile error must name profile 'dvr-2005' and missing field "
         f"'font_relative', observed {message!r}"
     )
+    assert (
+        'No profile migration is registered. To repair it, set overlay.font_relative to '
+        '"assets/fonts/overlay.ttf" in post_profiles/dvr-2005.json, then place a font you '
+        'are licensed to use at assets/fonts/overlay.ttf.'
+    ) in message, f"fontless profile error omitted the explicit repair: {message!r}"
+
+
+def test_new_project_reaches_adapter_missing_its_creator_supplied_font(tmp_path: Path) -> None:
+    root = ProjectRoot(tmp_path)
+    store = ProjectStore(root)
+    project = create_project(store, Project(project_id="p1", title="New project"))
+    store.save(
+        Episode(episode_id="ep1", project_id=project.project_id, number=1, duration_target_sec=30),
+        expected_version=0,
+    )
+    shot = Shot(shot_id="s1", episode_id="ep1", duration_sec=5)
+    store.create(shot)
+    master_relative = "renders/s1/v0001/seed/master.mkv"
+    master_bytes = b"fixture current master"
+    root.write_bytes(master_relative, master_bytes)
+    store.append_shot_output(
+        ShotOutput(
+            output_id="seed-master",
+            episode_id="ep1",
+            shot_id="s1",
+            record_version=shot.version,
+            kind=ShotOutputKind.MASTER,
+            relative_path=master_relative,
+            content_sha256=hashlib.sha256(master_bytes).hexdigest(),
+            engine_id="BLENDER_EEVEE",
+            engine_build="fixture-build",
+        ),
+        expected_version=0,
+    )
+
+    font_relative = "assets/fonts/overlay.ttf"
+    profile = store.load(PostProfile, "dvr-2005")
+    assert profile.overlay is not None
+    assert profile.overlay.font_relative == font_relative
+    assert root.resolve("assets/fonts").is_dir()
+    assert not root.resolve(font_relative).exists()
+
+    request = _compose(store, shot)
+    assert isinstance(request, DegradeRequest), (
+        f"new project's font path was rejected during composition: {request!r}"
+    )
+    assert request.font_relative == font_relative
+
+    with pytest.raises(JobError) as caught:
+        PostProfileAdapter(root, Settings(project_root=root.path)).degrade(request)
+
+    assert caught.value.kind is JobErrorKind.MISSING_MODEL_ARTIFACT
+    assert str(caught.value) == f"overlay font is missing: {font_relative}"
 
 
 def test_project_store_rejects_font_paths_outside_the_project_on_save_and_load(
