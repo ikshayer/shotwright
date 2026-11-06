@@ -31,6 +31,7 @@ POST_ONLY_CHANGES = {
     "frame_drop_schedule": [{"type": "drop", "start_frame": 3, "count": 2}],
 }
 REBUILD_CHANGES = {
+    "camera_mode": "handheld",
     "field_of_view_mm": 24.0,
     "barrel_distortion": 0.2,
     "exposure_ev": -1.0,

@@ -353,6 +353,7 @@ def _measured_dvr_2005_defaults() -> tuple[CameraProfile, PostProfile]:
     camera_profile = CameraProfile(
         camera_id=measured["profile_id"],
         profile_name=measured["profile_id"],
+        camera_mode="cctv",
         codec=encode.codec,
         storage_resolution=tuple(measured["storage_resolution"]),
         display_aspect_ratio=measured["display_aspect_ratio"],
@@ -458,6 +459,7 @@ def _unmeasured_low_light_bw_defaults(*, ffmpeg_identity: str) -> tuple[CameraPr
     camera_profile = CameraProfile(
         camera_id=profile_id,
         profile_name=profile_id,
+        camera_mode="cctv",
         monochrome_night=True,
         codec=encode.codec,
         storage_resolution=storage_resolution,
@@ -521,14 +523,19 @@ def _unmeasured_consumer_2002_defaults(*, ffmpeg_identity: str) -> tuple[CameraP
             "noise_model={}, chroma_smearing=0, block_artifacts=0, sharpening=0, "
             "grade_white_balance={}, overlay_model={}, decimation_pattern=None, and "
             "frame_drop_schedule=[] are inherited/empty defaults and are also "
-            "UNMEASURED PLACEHOLDERS. The camera_mount value 'handheld' encodes the "
-            "specification's intended mode; scene motion is not implemented by this profile. "
+            "UNMEASURED PLACEHOLDERS. camera_mode='handheld' enables deterministic, "
+            "profile-derived camera sway; camera_mount='handheld' remains descriptive and "
+            "does not drive motion. Motion bounds: maximum positional drift=0.025 m, "
+            "yaw=±0.35 degrees, pitch=±0.25 degrees, keyframe interval=2.0-4.0 seconds. "
+            "These deliberately small bounds represent a standing operator and have not "
+            "been measured against reference footage. "
             "No profile-specific image, motion, noise, or encoding result has been measured."
         ),
     )
     camera_profile = CameraProfile(
         camera_id=profile_id,
         profile_name=profile_id,
+        camera_mode="handheld",
         camera_mount="handheld",
         codec=encode.codec,
         storage_resolution=storage_resolution,

@@ -39,6 +39,9 @@ from .base import (
     rebuild_triggering,
 )
 
+CameraMode = Literal["cctv", "handheld"]
+CAMERA_MOTION_MODEL_SEMVER = "0.1.0"
+
 # --------------------------------------------------------------------------
 # narrative
 # --------------------------------------------------------------------------
@@ -130,6 +133,8 @@ class Shot(VersionedEntity):
     asset_ids: list[str] = Field(default_factory=list)
     audio_refs: list[str] = Field(default_factory=list)
     degrade_seed: int = Field(0, ge=0)
+    motion_seed: int = Field(0, ge=0)
+    motion_model_semver: str = CAMERA_MOTION_MODEL_SEMVER
     artifact_schedule: list[ArtifactScheduleEntry] = Field(default_factory=list)
     degradation_level: int = Field(0, ge=0)
     dependencies: list[str] = Field(default_factory=list)
@@ -151,6 +156,16 @@ class Shot(VersionedEntity):
         if self.anomaly is not None and self.event_sec is None:
             raise ValueError("Shot.event_sec is required when anomaly is specified")
         return self
+
+    @field_validator("motion_model_semver")
+    @classmethod
+    def _motion_model_semver_shape(cls, value: str) -> str:
+        parts = value.split(".")
+        if len(parts) != 3 or not all(part.isdigit() for part in parts):
+            raise ValueError(
+                f"motion_model_semver must be MAJOR.MINOR.PATCH, got {value!r}"
+            )
+        return value
 
 
     @model_validator(mode="after")
@@ -277,6 +292,7 @@ class CameraProfile(VersionedEntity):
 
     camera_id: str
     profile_name: str
+    camera_mode: CameraMode = rebuild_triggering("cctv")
 
     # --- rebuild-triggering: requires a Blender re-render ---
     field_of_view_mm: float = rebuild_triggering(12.0, gt=0)
@@ -625,7 +641,7 @@ def _assert_camera_profile_fully_tagged() -> None:
 _assert_camera_profile_fully_tagged()
 
 __all__ = [
-    "ArtifactScheduleEntry", "Asset", "Attestation", "Beat", "CameraProfile",
+    "ArtifactScheduleEntry", "Asset", "Attestation", "Beat", "CameraMode", "CameraProfile",
     "Episode", "Export", "GenerationRun", "Invalidation", "Job", "Location",
     "PostProfile", "PostProfileEncode", "PostProfileOverlay", "PostStage", "Project",
     "Reference", "Review", "RubricScores",

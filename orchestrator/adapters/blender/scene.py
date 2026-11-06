@@ -19,8 +19,8 @@ from orchestrator.domain.anomaly import (
     StaticSilhouette,
 )
 from orchestrator.domain.base import Invalidation
-from orchestrator.domain.entities import CameraProfile
-from orchestrator.domain.seeds import INT32_MAX, derive_seed
+from orchestrator.domain.entities import CAMERA_MOTION_MODEL_SEMVER, CameraProfile
+from orchestrator.domain.seeds import INT32_MAX, derive_seed, jitter
 
 Vec3 = tuple[float, float, float]
 RGB = tuple[float, float, float]
@@ -200,6 +200,8 @@ class RenderRequest(_FrozenModel):
     shot_version: int = Field(ge=1)
     run_id: str
     degrade_seed: int = Field(ge=0)
+    motion_seed: int = Field(default=0, ge=0)
+    motion_model_semver: str = CAMERA_MOTION_MODEL_SEMVER
     duration_sec: float = Field(gt=0)
     master_resolution: tuple[StrictInt, StrictInt] = (1280, 960)
     camera_profile: CameraProfile
@@ -233,6 +235,14 @@ class RenderRequest(_FrozenModel):
             raise ValueError("gpu_device must not be empty")
         return value
 
+    @field_validator("motion_model_semver")
+    @classmethod
+    def valid_motion_model_semver(cls, value: str) -> str:
+        parts = value.split(".")
+        if len(parts) != 3 or not all(part.isdigit() for part in parts):
+            raise ValueError("motion_model_semver must be MAJOR.MINOR.PATCH")
+        return value
+
     @field_validator("master_resolution")
     @classmethod
     def valid_master_resolution(cls, value: tuple[int, int]) -> tuple[int, int]:
@@ -264,10 +274,24 @@ class RenderRequest(_FrozenModel):
 
 _CAMERA_SENSOR_WIDTH_MM = 36.0
 
+# UNMEASURED PLACEHOLDERS: small bounds for a standing handheld operator.
+_HANDHELD_MAX_POSITIONAL_DRIFT_M = 0.025
+_HANDHELD_MAX_YAW_DEGREES = 0.35
+_HANDHELD_MAX_PITCH_DEGREES = 0.25
+_HANDHELD_KEYFRAME_INTERVAL_SECONDS = (2.0, 4.0)
+
 
 def build_scene_plan(request: RenderRequest) -> dict[str, object]:
     """Build one deterministic worker payload; animation is expressed as keyframes."""
     profile = request.camera_profile
+    if profile.camera_mode not in ("cctv", "handheld"):
+        raise ValueError(f"unsupported camera_mode: {profile.camera_mode!r}")
+    if request.scene.camera_keyframes:
+        if profile.camera_mode == "cctv":
+            raise ValueError("CCTV camera profiles cannot receive camera motion keyframes")
+        raise ValueError(
+            "handheld camera keyframes are profile-derived; caller-supplied camera keyframes are unsupported"
+        )
     width, height = (640, 480) if request.mode == "preview" else request.master_resolution
     camera = _rebuild_camera_fields(profile)
     if (
@@ -277,6 +301,11 @@ def build_scene_plan(request: RenderRequest) -> dict[str, object]:
         raise ValueError("camera_position override must not coincide with scene camera target")
     frame_end = 1 if request.mode == "preview" else max(1, math.ceil(request.duration_sec * 60))
     scene_data = _scene_payload(request, camera)
+    if profile.camera_mode == "handheld":
+        scene_data["camera_keyframes"] = [
+            keyframe.model_dump(mode="json")
+            for keyframe in _handheld_camera_keyframes(request, camera, frame_end)
+        ]
     plan: dict[str, object] = {
         "schema_version": 1,
         "shot_id": request.shot_id,
@@ -309,6 +338,85 @@ def build_scene_plan(request: RenderRequest) -> dict[str, object]:
         plan["event_sec"] = request.event_sec
         plan["anomaly"] = request.anomaly.model_dump(mode="json")
     return plan
+
+
+def _handheld_camera_keyframes(
+    request: RenderRequest,
+    camera: dict[str, object],
+    frame_end: int,
+) -> tuple[CameraKeyframeSpec, ...]:
+    """Create seeded, low-amplitude standing sway for the handheld profile."""
+    override = camera["camera_position"]
+    base_position = tuple(override) if override is not None else request.scene.camera_location
+    base_target = request.scene.camera_target
+    base_forward, base_right, base_up = _camera_basis(base_position, base_target)
+    target_distance = math.dist(base_position, base_target)
+    interval_low, interval_high = _HANDHELD_KEYFRAME_INTERVAL_SECONDS
+
+    def seeded(low: float, high: float, key: str) -> float:
+        stage = f"handheld_camera_{request.motion_model_semver}:{key}"
+        return jitter(request.shot_id, request.motion_seed, stage, low, high)
+
+    keyframes: list[CameraKeyframeSpec] = []
+    frame = 1
+    keyframe_index = 0
+    while True:
+        local_offset = (
+            seeded(-1.0, 1.0, f"{keyframe_index}:drift_forward"),
+            seeded(-1.0, 1.0, f"{keyframe_index}:drift_right"),
+            seeded(-1.0, 1.0, f"{keyframe_index}:drift_up"),
+        )
+        offset_length = _length(local_offset)
+        if offset_length > 1.0:
+            local_offset = tuple(component / offset_length for component in local_offset)
+        location = tuple(
+            base_position[axis]
+            + _HANDHELD_MAX_POSITIONAL_DRIFT_M
+            * (
+                base_forward[axis] * local_offset[0]
+                + base_right[axis] * local_offset[1]
+                + base_up[axis] * local_offset[2]
+            )
+            for axis in range(3)
+        )
+        yaw = math.radians(
+            seeded(
+                -_HANDHELD_MAX_YAW_DEGREES,
+                _HANDHELD_MAX_YAW_DEGREES,
+                f"{keyframe_index}:yaw_degrees",
+            )
+        )
+        pitch = math.radians(
+            seeded(
+                -_HANDHELD_MAX_PITCH_DEGREES,
+                _HANDHELD_MAX_PITCH_DEGREES,
+                f"{keyframe_index}:pitch_degrees",
+            )
+        )
+        direction = _unit(
+            tuple(
+                base_forward[axis]
+                + math.tan(yaw) * base_right[axis]
+                + math.tan(pitch) * base_up[axis]
+                for axis in range(3)
+            )
+        )
+        target = tuple(
+            location[axis] + target_distance * direction[axis] for axis in range(3)
+        )
+        keyframes.append(
+            CameraKeyframeSpec(frame=frame, location=location, target=target)
+        )
+        if frame >= frame_end:
+            return tuple(keyframes)
+
+        interval = seeded(
+            interval_low,
+            interval_high,
+            f"{keyframe_index}:interval_seconds",
+        )
+        frame = min(frame_end, frame + max(1, round(interval * 60)))
+        keyframe_index += 1
 
 
 def _scene_payload(request: RenderRequest, camera: dict[str, object]) -> dict[str, object]:
@@ -783,6 +891,10 @@ def _unit(vector: tuple[float, float, float]) -> Vec3:
 def _rebuild_camera_fields(profile: CameraProfile) -> dict[str, object]:
     result: dict[str, object] = {}
     for name, field in CameraProfile.model_fields.items():
+        # Mode changes the motion model, not the static Blender camera settings.
+        # Keep it out of the worker payload so existing locked-off plan hashes stay stable.
+        if name == "camera_mode":
+            continue
         if (
             field.json_schema_extra
             and field.json_schema_extra.get("invalidation") == Invalidation.REBUILD.value

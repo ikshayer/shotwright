@@ -23,11 +23,13 @@ spike 04 consumes the same greybox geometry. Do not modify spikes, API, service 
   Validate material references, globally unique object/light names, noncoincident
   target and camera. Geometry explicit, editable and serializable.
 - `RenderRequest(shot_id: str, shot_version: int, run_id: str, degrade_seed: int,
+  motion_seed: int=0, motion_model_semver: str='0.1.0',
   duration_sec: float, camera_profile: CameraProfile, scene: SceneSpec,
   mode: Literal['master','preview']='master', engine: Literal['eevee','cycles']='eevee',
   samples: int=32, gpu_device: str='NVIDIA GeForce RTX 5070 Ti Laptop GPU',
   master_resolution: tuple[int,int]=(1280,960))`.
-  IDs match [A-Za-z0-9_-]+, version >=1, seed >=0, duration finite >0,
+  IDs match [A-Za-z0-9_-]+, version >=1, both seeds >=0, motion model semver is
+  MAJOR.MINOR.PATCH, duration finite >0,
   samples >=1, GPU name nonempty. Master resolution positive integer 4:3, at least
   1280x960, independent of CameraProfile. Preview is always Eevee and one frame.
 - `build_scene_plan(request: RenderRequest) -> dict[str, object]`: deterministic JSON

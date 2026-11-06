@@ -72,6 +72,8 @@ def compose_render_request(
         shot_version=shot.version,
         run_id=run_id,
         degrade_seed=shot.degrade_seed,
+        motion_seed=shot.motion_seed,
+        motion_model_semver=shot.motion_model_semver,
         duration_sec=shot.duration_sec,
         camera_profile=camera_profile,
         scene=scene,
