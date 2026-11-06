@@ -73,6 +73,8 @@ class DegradeResult:
     frame_count: int
     pts_delta_distribution: dict[str, int]
     ffmpeg_identity: str
+    profile_semver: str
+    pinned_binaries: dict[str, str]
 
 
 def build_command(
@@ -257,9 +259,20 @@ class PostProfileAdapter:
             self._raise_os_error(exc, request)
         metadata.update(status="completed", output_probe=output_probe, output_sha256=digest)
         self._write_json(metadata_rel, metadata, request)
-        return DegradeResult(output_rel, log_rel, metadata_rel, validated.schedule, graph,
-                             metadata["filter_graph_hash"], digest,
-                             output_probe["frame_count"], output_probe["pts_delta_distribution"], identity)
+        return DegradeResult(
+            output_path=output_rel,
+            log_path=log_rel,
+            metadata_path=metadata_rel,
+            artifact_schedule=validated.schedule,
+            filter_graph=graph,
+            filter_graph_hash=metadata["filter_graph_hash"],
+            output_sha256=digest,
+            frame_count=output_probe["frame_count"],
+            pts_delta_distribution=output_probe["pts_delta_distribution"],
+            ffmpeg_identity=identity,
+            profile_semver=request.profile.identity.semver,
+            pinned_binaries={"ffmpeg": identity},
+        )
 
     def _capture(self, argv: list[str], request: DegradeRequest,
                  *, nonzero_kind: JobErrorKind = JobErrorKind.WORKER_UNREACHABLE) -> str:
