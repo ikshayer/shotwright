@@ -77,8 +77,18 @@ def test_append_seals_truncated_tail_and_keeps_both_resumed_transitions(
     except Exception as exc:  # noqa: BLE001 - report the concrete recovery failure
         pytest.fail(f"reader raised after a torn tail and two later appends: {type(exc).__name__}: {exc}")
     assert resolved is not None, "reader returned no snapshot after two successful resumed appends"
-    assert resolved["state"] == "completed", (
-        f"first terminal transition should resolve as completed, observed {resolved['state']!r}"
+    # This test's subject is the SEAL -- that a torn tail is sealed as its own line and the
+    # two resumed appends survive it, which the assertions above pin. The resolved state is
+    # a bystander here: `completed` then `failed` now reports the failure, because only a
+    # completion claims an artifact and a later failure says there is none. The point
+    # retained from the original assertion is that resolution still works at all after a
+    # torn tail, and resolves to one of the two complete terminal entries.
+    assert resolved["state"] == "failed", (
+        "a completion falsified by a later failure must report the failure, even when a "
+        f"sealed fragment sits between them; observed {resolved['state']!r}"
+    )
+    assert resolved["attempts"] == 3, (
+        f"the reported record is not the failing snapshot: {resolved!r}"
     )
 
 

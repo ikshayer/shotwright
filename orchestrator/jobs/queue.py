@@ -186,6 +186,10 @@ class JobQueue:
                 break
             self.lease.acquire(timeout_seconds=max(0.0, deadline - self.clock()))
             acquired_here = True
+            # Recorded the moment the lease is held, not after preflight: a preflight that
+            # fails while the release then also fails left a terminal record claiming no
+            # holder for a lease that was genuinely still held.
+            job.lease_holder_pid = self.lease.worker.pid()
             release_failed = False
             start = self.clock()
             try:
@@ -195,7 +199,6 @@ class JobQueue:
                 job.attempts += 1
                 self._persist(job)
                 self.preflight(job)
-                job.lease_holder_pid = self.lease.worker.pid()
                 self._transition(job, "running")
                 try:
                     self._watch_context.startup_allowance_seconds = startup_allowance
@@ -212,9 +215,8 @@ class JobQueue:
                         break
                     self._charge_budget(job, budget_key, self.clock() - start)
                     try:
-                        self.lease.release(
-                            self.settings.resources.vram_floor_mb,
-                            self.settings.resources.vram_release_timeout_seconds,
+                        self._release_lease(
+                            job,
                             after_cuda_error=(last_error.kind is JobErrorKind.OUT_OF_MEMORY
                                               or "cuda error" in last_error.message.lower()),
                         )
@@ -238,8 +240,7 @@ class JobQueue:
                 else:
                     self._charge_budget(job, budget_key, self.clock() - start)
                     try:
-                        self.lease.release(self.settings.resources.vram_floor_mb,
-                                           self.settings.resources.vram_release_timeout_seconds)
+                        self._release_lease(job)
                     except Exception:
                         release_failed = True
                         raise
@@ -258,10 +259,11 @@ class JobQueue:
                 if acquired_here and not release_failed:
                     # Do not discard a lease when measured release fails; it remains held.
                     try:
-                        self.lease.release(self.settings.resources.vram_floor_mb,
-                                           self.settings.resources.vram_release_timeout_seconds,
-                                           after_cuda_error=(last_error.kind is JobErrorKind.OUT_OF_MEMORY
-                                                             or "cuda error" in last_error.message.lower()))
+                        self._release_lease(
+                            job,
+                            after_cuda_error=(last_error.kind is JobErrorKind.OUT_OF_MEMORY
+                                              or "cuda error" in last_error.message.lower()),
+                        )
                         acquired_here = False
                     except Exception as release_error:  # noqa: BLE001 - keep release failure as the terminal cause.
                         last_error = JobError.from_exception(release_error, job_id=job.job_id,
@@ -281,7 +283,10 @@ class JobQueue:
                     time.sleep(retry_policy.delay_before_retry(job.attempts))
                 self._transition(job, "queued", error=last_error)
         assert last_error is not None
-        job.lease_holder_pid = None
+        # The pid is NOT cleared here. `_release_lease` clears it exactly when a release
+        # succeeds, so a terminal record still naming a pid means the lease is genuinely
+        # still held by it — which is precisely the case an operator has to clean up.
+        # Clearing unconditionally here erased that, in the one record that reports it.
         if last_error.kind is JobErrorKind.CANCELLED:
             try:
                 self.quarantine.quarantine(partial_artifacts)
@@ -290,6 +295,24 @@ class JobQueue:
         else:
             self._transition(job, "failed", error=last_error)
         raise last_error
+
+    def _release_lease(self, job: Job, *, after_cuda_error: bool = False) -> None:
+        """Release the lease and clear the pid together, so the field cannot go stale.
+
+        `lease_holder_pid` means "the pid holding the lease now". It was set beside the
+        acquisition but cleared at only one of three exits, so a completed record — and a
+        re-queued one between attempts — kept naming a pid that had already let go.
+        Pairing the two here is what keeps them from drifting apart again.
+
+        If the release raises, the pid is deliberately left in place: a measured release
+        failure means the lease is still held, and the record should still say by whom.
+        """
+        self.lease.release(
+            self.settings.resources.vram_floor_mb,
+            self.settings.resources.vram_release_timeout_seconds,
+            after_cuda_error=after_cuda_error,
+        )
+        job.lease_holder_pid = None
 
     def _watch(self, worker_fn: Callable[[Job], T], job: Job, deadline: float) -> T:
         """Run work in a managed thread; detect stalls and require confirmed worker stop."""

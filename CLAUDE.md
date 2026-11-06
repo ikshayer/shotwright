@@ -61,9 +61,19 @@ context7).
 inherits `high` — which is not what implementation work should get, and which hides the
 setting from anyone reading the command. Being explicit also survives a config change.
 
-**Long prompts must be passed from a file** (`Get-Content -Raw` into a variable), not as
-a here-string — embedded here-strings have been mangled in transit and Codex then
-rejects the arguments.
+**Long prompts must be piped in on stdin**, which `codex exec` reads when the prompt
+argument is `-`:
+
+```powershell
+Get-Content -Raw <promptfile> | codex exec -m <model> -c model_reasoning_effort="<effort>" `
+  --sandbox read-only -C <dir> -o <outfile> -
+```
+
+Neither a here-string nor `Get-Content -Raw` into a variable passed as an argument
+survives: PowerShell 5.1 word-splits a multi-line string containing an apostrophe when
+handing it to a native command, and Codex then rejects the fragments — `AGENTS.md`'s own
+"Measure, don't assume" was enough to produce `error: unexpected argument 'don't' found`.
+Piping avoids argument parsing altogether.
 
 ## Tooling note
 

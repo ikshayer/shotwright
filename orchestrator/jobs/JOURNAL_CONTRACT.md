@@ -218,3 +218,68 @@ The journal work therefore covers `JobQueue` and `report_jobs` but **not** the c
 that produced the defect. Completing it means applying this journal on top of `e73438c`,
 where `runner.py` lives, so the fix and the code it fixes land together. The integration
 branch is parked solely on this defect, so they belong in one merge.
+
+## Amendment 2 — a recorded failure is reported over a completion or a cancel
+
+This amends the ratified precedence rule above. It was found by reading the records of a
+real pipeline run, not by a test.
+
+### What was wrong
+
+First-terminal-wins reported `completed` for a journal holding `completed` then `failed`. A
+run that rendered and then failed reported success. Two things made that worse than it
+sounds: the Phase 1 acceptance shot is judged by these records, and the suppressed entry is
+the only one carrying a diagnosis.
+
+### The rule now
+
+> Replay the entries in order and resolve the first terminal state as before. **Then, if any
+> entry is `failed`, report the first `failed` snapshot instead.** Later non-terminal entries
+> still never resurrect a terminal job.
+
+The failing **snapshot** is reported, not merely its state, so the record keeps the error
+kind, message, origin and traceback.
+
+### Why this does not reopen the race the original rule settled
+
+The ratified reason for first-terminal-wins is a **cancel racing a completion**, where
+either answer is legitimate because the operator cancelled as the work finished. That
+argument covers `cancelled` against `completed` and is untouched: **`completed` then
+`cancelled` still reports `completed`**, and `cancelled` then `completed` still reports
+`cancelled`. This is deliberately *not* a severity ordering, which the contract forbids.
+
+The argument never covered a failure. Nothing concurrent produces a failure that is safe to
+discard, and the two suppressed cases are both ones an operator has to see:
+
+- **`completed` then `failed`** — the success claim no longer holds.
+- **`cancelled` then `failed`** — teardown after the cancel failed, in practice a lease that
+  could not be released. This was the worst case: the GPU stays held with nothing in the
+  record saying so. An independent review found it; the first version of this amendment
+  covered only `completed`, on the argument that only `completed` promises an artifact.
+  That argument was too narrow — `cancelled` implies an orderly teardown, which is also
+  falsifiable.
+
+A failure *caused* by a cancel is reported by the queue as `cancelled`, not `failed`, so a
+`failed` entry after a cancel is new information rather than an echo of the cancel.
+
+**Determinism is preserved:** the *first* `failed` entry is chosen, so resolution remains a
+function of the journal's bytes however many failures it holds, which is what the contract
+actually requires.
+
+### One claim corrected
+
+The first version of this reasoning said a job that completed and then failed "has no
+output". That is not always true: result registration can fail after a valid artifact was
+written. The accurate statement is narrower — **the job did not succeed as a whole**, and an
+artifact may exist but be unregistered. The reported state must not claim success either way.
+
+### Known limitation, not fixed here
+
+Resolution picks **one snapshot**, and a snapshot is a point-in-time record. `JobRunner.cancel`
+appends a `cancelled` entry while the worker is still running, built from the last record it
+read, so that entry wins and its `lease_holder_pid` keeps naming a holder the queue has since
+released. Reporting `state` from one snapshot and other fields from another would be a
+different contract — a merge rather than a selection — and is not attempted here.
+
+**Consequence to be aware of when reading records: on a cancelled job, trust `state`, and
+treat `lease_holder_pid` as of the moment of cancellation rather than as current.**

@@ -61,7 +61,53 @@ def read_job(root: ProjectRoot, job_id: str) -> dict[str, Any] | None:
         if resolved_snapshot is not None and resolved_snapshot["state"] in TERMINAL_STATES:
             break
         resolved_snapshot = snapshot
-    return resolved_snapshot.copy() if resolved_snapshot is not None else None
+    if resolved_snapshot is None:
+        return None
+    return _resolve_recorded_failure(resolved_snapshot, snapshots, job_id).copy()
+
+
+def _resolve_recorded_failure(
+    resolved: dict[str, Any], snapshots: list[dict[str, Any]], job_id: str
+) -> dict[str, Any]:
+    """A recorded ``failed`` entry is reported over ``completed`` or ``cancelled``.
+
+    First-terminal-wins exists to make a *cancel racing a completion* deterministic, where
+    either answer is legitimate because the operator cancelled as the work finished. That
+    argument never covered a **failure**. Nothing concurrent produces a failure that is safe
+    to discard, and the two cases it hid are both ones an operator must see:
+
+    - `completed` then `failed` — the job reported an artifact and then failed, so the
+      success claim no longer holds.
+    - `cancelled` then `failed` — teardown after the cancel failed, typically a lease that
+      could not be released. Suppressing it strands the GPU with nothing in the record
+      saying so, which is the worst of the three outcomes.
+
+    A failure *caused* by a cancel is reported by the queue as `cancelled`, not `failed`, so
+    a `failed` entry following a cancel is genuinely new information rather than an echo.
+
+    The failing snapshot itself is returned, not merely its state, so the record carries the
+    error kind, message and traceback. The first `failed` entry is chosen, so resolution
+    stays deterministic for a fixed journal however many there are. This is NOT a severity
+    ordering — `completed` then `cancelled` still reports `completed`, as ratified.
+
+    Note what this does not fix: resolution picks one snapshot, and a snapshot is a
+    point-in-time record. A `cancelled` entry written by `JobRunner.cancel` while the worker
+    is still running is reported thereafter, so its `lease_holder_pid` keeps naming a holder
+    the queue has since released. Reporting `state` from one snapshot and other fields from
+    another would be a different contract; see JOURNAL_CONTRACT.md.
+    """
+    if resolved["state"] not in {"completed", "cancelled"}:
+        return resolved
+    failure = next((snapshot for snapshot in snapshots if snapshot["state"] == "failed"), None)
+    if failure is None:
+        return resolved
+    _LOGGER.warning(
+        "job %r journal records state %s and a later failure; reporting the failure: %s",
+        job_id,
+        resolved["state"],
+        failure.get("error_message") or failure.get("error_kind") or "no cause recorded",
+    )
+    return failure
 
 
 def _read_legacy(
