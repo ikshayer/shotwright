@@ -28,12 +28,16 @@ from orchestrator.domain.entities import (
     PostProfile,
     PostStage,
     Shot,
+    ShotOutput,
+    ShotOutputKind,
 )
 from orchestrator.domain.invalidation import revision_impact
 from orchestrator.domain.seeds import INT32_MAX, derive_seed
 from orchestrator.platform.containment import ContainmentError, ProjectRoot
 from orchestrator.platform.errors import JobError, JobErrorKind
+from orchestrator.platform.ffmpeg_identity import normalize_ffmpeg_identity
 from orchestrator.platform.settings import Settings
+from orchestrator.service.runner import _provenance
 
 FFMPEG_VERSION = 'ffmpeg version 8.1.1-full_build-www.gyan.dev Copyright (c) 2000-2026 the FFmpeg developers\r\nbuilt with gcc 15.2.0 (Rev13, Built by MSYS2 project)\r\nconfiguration: --enable-gpl --enable-version3 --enable-static --disable-w32threads --disable-autodetect --enable-cairo --enable-fontconfig --enable-iconv --enable-gnutls --enable-lcms2 --enable-libxml2 --enable-gmp --enable-bzlib --enable-lzma --enable-libsnappy --enable-zlib --enable-librist --enable-libsrt --enable-libssh --enable-libzmq --enable-avisynth --enable-libbluray --enable-libcaca --enable-libdvdnav --enable-libdvdread --enable-sdl2 --enable-libaribb24 --enable-libaribcaption --enable-libdav1d --enable-libdavs2 --enable-libopenjpeg --enable-libquirc --enable-libuavs3d --enable-libxevd --enable-libzvbi --enable-liboapv --enable-libqrencode --enable-librav1e --enable-libsvtav1 --enable-libvvenc --enable-libwebp --enable-libx264 --enable-libx265 --enable-libxavs2 --enable-libxeve --enable-libxvid --enable-libaom --enable-libjxl --enable-libsvtjpegxs --enable-libvpx --enable-mediafoundation --enable-libass --enable-frei0r --enable-libfreetype --enable-libfribidi --enable-libharfbuzz --enable-liblensfun --enable-libvidstab --enable-libvmaf --enable-libzimg --enable-amf --enable-cuda-llvm --enable-cuvid --enable-dxva2 --enable-d3d11va --enable-d3d12va --enable-ffnvcodec --enable-libvpl --enable-nvdec --enable-nvenc --enable-vaapi --enable-libshaderc --enable-vulkan --enable-libplacebo --enable-opencl --enable-libcdio --enable-openal --enable-libgme --enable-libmodplug --enable-libopenmpt --enable-libopencore-amrwb --enable-libmp3lame --enable-libshine --enable-libtheora --enable-libtwolame --enable-libvo-amrwbenc --enable-libcodec2 --enable-libilbc --enable-libgsm --enable-liblc3 --enable-libopencore-amrnb --enable-libopus --enable-libspeex --enable-libvorbis --enable-ladspa --enable-libbs2b --enable-libflite --enable-libmysofa --enable-librubberband --enable-libsoxr --enable-chromaprint --enable-whisper\r\nlibavutil      60. 26.101 / 60. 26.101\r\nlibavcodec     62. 28.101 / 62. 28.101\r\nlibavformat    62. 12.101 / 62. 12.101\r\nlibavdevice    62.  3.101 / 62.  3.101\r\nlibavfilter    11. 14.101 / 11. 14.101\r\nlibswscale      9.  5.101 /  9.  5.101\r\nlibswresample   6.  3.101 /  6.  3.101\r\n\r\nExiting with exit code 0'
 
@@ -450,6 +454,35 @@ def test_adapter_fake_process_success_records_contained_artifacts_and_metadata(t
     assert root.resolve(result.output_path).is_file()
     assert root.resolve(result.metadata_path).is_file()
     assert root.resolve(result.log_path).is_file()
+
+
+def test_successful_degrade_result_projects_valid_shot_output_receipt(tmp_path):
+    root_path = tmp_path / "project"
+    root_path.mkdir()
+    root = ProjectRoot(root_path)
+    request = _run(root_path)
+    result = PostProfileAdapter(
+        root, Settings(project_root=root.path), popen=_fake_popen_factory(),
+    ).degrade(request)
+
+    output = ShotOutput(
+        output_id="degraded-v1",
+        episode_id="ep1",
+        shot_id=request.shot_id,
+        record_version=request.shot_version,
+        kind=ShotOutputKind.DEGRADED,
+        relative_path=result.output_path,
+        content_sha256=result.output_sha256,
+        **_provenance(ShotOutputKind.DEGRADED, result),
+    )
+
+    assert output.profile_semver == request.profile.identity.semver
+    assert output.pinned_binaries == {
+        "ffmpeg": normalize_ffmpeg_identity(result.ffmpeg_identity),
+    }
+    assert output.filter_graph_hash == result.filter_graph_hash
+    assert output.engine_id is None
+    assert output.engine_build is None
 
 
 def test_adapter_rejects_run_collision_without_overwriting_previous_artifacts(tmp_path):
