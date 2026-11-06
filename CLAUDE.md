@@ -40,12 +40,26 @@ set `CODEX_HOME`; the PowerShell tool runs `-NoProfile`, so set it directly:
 
 ```powershell
 $env:CODEX_HOME = "$HOME\.codex-alt"    # or $HOME\.codex
-codex exec -m <model> --sandbox read-only|workspace-write -C <dir> -o <outfile> "<prompt>"
+codex exec -m <model> -c model_reasoning_effort="<effort>" `
+  --sandbox read-only|workspace-write -C <dir> -o <outfile> "<prompt>"
 ```
 
 `-o` writes only the final message, so a whole-repo review costs a few lines of context.
-Models: `gpt-6-luna` for implementation, `gpt-6.1-sol` for review. `codex-alt` carries
-the richer tool surface (Playwright, Chrome DevTools, Blender, context7).
+`codex-alt` carries the richer tool surface (Playwright, Chrome DevTools, Blender,
+context7).
+
+**Models and effort — set both explicitly:**
+
+| Role | Model | Effort |
+|---|---|---|
+| Implementation, test authoring | `gpt-6-luna` | **`max`** |
+| Review | `gpt-6.1-sol` | **`high`** |
+
+**Always pass `-c model_reasoning_effort=` rather than relying on the config.**
+`~/.codex-alt/config.toml` sets `model = "gpt-6.1-sol"` and
+`model_reasoning_effort = "high"` globally, so a `-m gpt-6-luna` dispatch silently
+inherits `high` — which is not what implementation work should get, and which hides the
+setting from anyone reading the command. Being explicit also survives a config change.
 
 **Long prompts must be passed from a file** (`Get-Content -Raw` into a variable), not as
 a here-string — embedded here-strings have been mangled in transit and Codex then
