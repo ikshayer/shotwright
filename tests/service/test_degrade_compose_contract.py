@@ -1,14 +1,13 @@
 """Regressions for composing a post-profile request from project records.
 
-Assumed API: ``compose_degrade_request(store, *, shot_id, episode_id, run_id,
-font_relative)``. The assembly contract names the function but leaves its signature and
-the source of the overlay font unspecified. This test passes the project-relative font
-as an explicit input instead of inventing a project font registry.
+The overlay font belongs to the persisted PostProfile, so composition takes no font
+argument and resolves the project-relative font path from that profile.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -28,11 +27,13 @@ from orchestrator.domain.entities import (
     ShotOutputKind,
 )
 from orchestrator.platform.containment import ProjectRoot
-from orchestrator.platform.errors import JobError
+from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.store.json_store import ProjectStore
 
+_FONT_RELATIVE = "assets/fonts/fixture.ttf"
 
-def _post_profile() -> PostProfile:
+
+def _post_profile(*, font_relative: str | None = _FONT_RELATIVE) -> PostProfile:
     return PostProfile(
         name="dvr-2005",
         semver="0.2.0",
@@ -41,7 +42,7 @@ def _post_profile() -> PostProfile:
         sample_aspect_ratio="1/1",
         overlay=PostProfileOverlay(
             camera_id="CAM 03", clock_epoch=1131984000, fontsize=16,
-            x=8, y="h-24", placement="in_recording",
+            x=8, y="h-24", placement="in_recording", font_relative=font_relative,
         ),
         encode=PostProfileEncode(
             codec="libx264", preset="medium", crf=30,
@@ -51,7 +52,12 @@ def _post_profile() -> PostProfile:
     )
 
 
-def _store_with_shot(root_path: Path, *, current_master: bool) -> tuple[ProjectRoot, ProjectStore, Shot]:
+def _store_with_shot(
+    root_path: Path,
+    *,
+    current_master: bool,
+    font_relative: str | None = _FONT_RELATIVE,
+) -> tuple[ProjectRoot, ProjectStore, Shot]:
     root = ProjectRoot(root_path)
     store = ProjectStore(root)
     store.save(Project(project_id="p1", title="Degrade composition", output_profile="dvr-2005"),
@@ -62,7 +68,9 @@ def _store_with_shot(root_path: Path, *, current_master: bool) -> tuple[ProjectR
         camera_id="cam-1", profile_name="Distinctive post camera", fps=17.25,
     )
     store.create(camera)
-    store.save(_post_profile(), expected_version=0)
+    store.save(_post_profile(font_relative=font_relative), expected_version=0)
+    if font_relative is not None:
+        root.write_bytes(font_relative, b"fixture font")
 
     original = Shot(
         shot_id="shot-1", episode_id="ep1", camera_profile=camera.camera_id,
@@ -110,7 +118,7 @@ def _tree_snapshot(root: Path) -> tuple[tuple[str, str, bytes | None], ...]:
     return tuple(sorted(items))
 
 
-def _compose(store: ProjectStore, shot: Shot, *, font_relative: str) -> DegradeRequest:
+def _compose(store: ProjectStore, shot: Shot) -> DegradeRequest:
     # Run identity is an input, like compose_render_request, so composition does not
     # create a random id or derive the stage seed.
     return compose_module.compose_degrade_request(
@@ -118,7 +126,6 @@ def _compose(store: ProjectStore, shot: Shot, *, font_relative: str) -> DegradeR
         shot_id=shot.shot_id,
         episode_id=shot.episode_id,
         run_id="run-degrade",
-        font_relative=font_relative,
     )
 
 
@@ -126,15 +133,13 @@ def test_degrade_composition_uses_current_master_shot_seed_and_named_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root, store, shot = _store_with_shot(tmp_path, current_master=True)
-    font_relative = "assets/fonts/fixture.ttf"
-    root.write_bytes(font_relative, b"fixture font")
     before = _tree_snapshot(root.path)
 
     def forbidden_command() -> Any:
         pytest.fail("compose_degrade_request acquired the ProjectStore command lock")
 
     monkeypatch.setattr(store, "command", forbidden_command)
-    request = _compose(store, shot, font_relative=font_relative)
+    request = _compose(store, shot)
 
     outputs = store.list_shot_outputs(
         shot.shot_id, episode_id=shot.episode_id,
@@ -155,13 +160,14 @@ def test_degrade_composition_uses_current_master_shot_seed_and_named_profile(
     assert request.degrade_seed == 918273 == shot.degrade_seed, (
         f"request used degrade_seed={request.degrade_seed}, Shot carries {shot.degrade_seed}"
     )
-    assert request.font_relative == font_relative, (
-        f"request used font_relative={request.font_relative!r}, caller supplied {font_relative!r}"
+    persisted_profile = store.load(PostProfile, "dvr-2005")
+    assert request.font_relative == persisted_profile.overlay.font_relative, (
+        f"request font_relative={request.font_relative!r} does not match profile-owned "
+        f"font_relative={persisted_profile.overlay.font_relative!r}"
     )
     assert request.camera_profile == store.load(CameraProfile, shot.camera_profile), (
         f"request camera_profile={request.camera_profile!r} does not match the Shot reference"
     )
-    persisted_profile = store.load(PostProfile, "dvr-2005")
     assert request.profile.identity == persisted_profile, (
         f"request profile identity={request.profile.identity!r}, Project names "
         f"{persisted_profile.name!r}"
@@ -175,8 +181,6 @@ def test_degrade_composition_rejects_only_a_stale_master_and_names_the_reason(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root, store, shot = _store_with_shot(tmp_path, current_master=False)
-    font_relative = "assets/fonts/fixture.ttf"
-    root.write_bytes(font_relative, b"fixture font")
     old_outputs = store.list_shot_outputs(
         shot.shot_id, episode_id=shot.episode_id,
         record_version=1, kind=ShotOutputKind.MASTER,
@@ -188,7 +192,7 @@ def test_degrade_composition_rejects_only_a_stale_master_and_names_the_reason(
 
     monkeypatch.setattr(store, "command", forbidden_command)
     with pytest.raises(JobError) as caught:
-        _compose(store, shot, font_relative=font_relative)
+        _compose(store, shot)
 
     message = str(caught.value).lower()
     assert len(old_outputs) == 1, f"fixture expected a retained v1 master, observed {old_outputs!r}"
@@ -198,4 +202,54 @@ def test_degrade_composition_rejects_only_a_stale_master_and_names_the_reason(
     )
     assert _tree_snapshot(root.path) == before, (
         "failed compose_degrade_request changed project files or directories"
+    )
+
+
+def test_degrade_composition_rejects_a_profile_without_its_font(
+    tmp_path: Path,
+) -> None:
+    _root, store, shot = _store_with_shot(
+        tmp_path, current_master=True, font_relative=None,
+    )
+
+    with pytest.raises(ValueError) as caught:
+        _compose(store, shot)
+
+    message = str(caught.value)
+    assert "dvr-2005" in message and "font_relative" in message, (
+        f"fontless profile error must name profile 'dvr-2005' and missing field "
+        f"'font_relative', observed {message!r}"
+    )
+
+
+def test_project_store_rejects_font_paths_outside_the_project_on_save_and_load(
+    tmp_path: Path,
+) -> None:
+    root = ProjectRoot(tmp_path)
+    store = ProjectStore(root)
+    unsafe = _post_profile(font_relative="../outside.ttf")
+
+    with pytest.raises(JobError) as save_error:
+        store.save(unsafe, expected_version=0)
+    assert save_error.value.kind is JobErrorKind.INVALID_MANIFEST, (
+        f"unsafe profile font save failed as {save_error.value.kind}, expected containment "
+        "to reject it as INVALID_MANIFEST"
+    )
+    assert "overlay.font_relative" in str(save_error.value), (
+        f"unsafe profile font save did not name the declared path: {save_error.value!r}"
+    )
+
+    # Simulate an older or edited JSON record that bypassed save-time validation. The
+    # write itself still goes through ProjectRoot; ProjectStore.load must revalidate it.
+    raw = unsafe.model_dump(mode="json")
+    raw["_store_version"] = 1
+    root.write_text("post_profiles/dvr-2005.json", json.dumps(raw))
+    with pytest.raises(JobError) as load_error:
+        store.load(PostProfile, "dvr-2005")
+    assert load_error.value.kind is JobErrorKind.INVALID_MANIFEST, (
+        f"unsafe profile font load failed as {load_error.value.kind}, expected containment "
+        "to reject it as INVALID_MANIFEST"
+    )
+    assert "overlay.font_relative" in str(load_error.value), (
+        f"unsafe profile font load did not name the declared path: {load_error.value!r}"
     )

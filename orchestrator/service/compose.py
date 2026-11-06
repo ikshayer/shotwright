@@ -149,7 +149,9 @@ def compose_post_profile_spec(store: ProjectStore) -> PostProfileSpec:
         sample_aspect_ratio=identity.sample_aspect_ratio,
         artifact_schedule=tuple(identity.artifact_schedule),
         overlay=(OverlaySpec.model_validate(
-            identity.overlay.model_dump(mode="python", exclude={"schema_version"})
+            identity.overlay.model_dump(
+                mode="python", exclude={"schema_version", "font_relative"}
+            )
         )
                  if identity.overlay is not None else None),
         encode=EncodeSpec.model_validate(
@@ -164,12 +166,11 @@ def compose_degrade_request(
     shot_id: str,
     episode_id: str,
     run_id: str,
-    font_relative: str,
 ) -> DegradeRequest:
     """Build degradation from the current Shot, its master receipt, and project profile.
 
-    This is a read-only composition step. The caller supplies the run id and the
-    project-relative overlay font path; seed derivation remains inside the adapter.
+    This is a read-only composition step. The caller supplies the run id; the font
+    comes from the selected PostProfile and seed derivation remains inside the adapter.
     """
     shot, _mutation_token = store.load_with_version(Shot, shot_id, episode_id=episode_id)
     masters = store.list_shot_outputs(
@@ -191,13 +192,19 @@ def compose_degrade_request(
             f"Shot {shot.shot_id!r} references missing CameraProfile {shot.camera_profile!r}"
         ) from exc
     profile = compose_post_profile_spec(store)
+    overlay = profile.identity.overlay
+    if overlay is None or not overlay.font_relative:
+        raise ValueError(
+            f"PostProfile {profile.identity.name!r} cannot be composed; missing persisted field: "
+            "overlay.font_relative"
+        )
     return DegradeRequest(
         shot_id=shot.shot_id,
         shot_version=shot.version,
         run_id=run_id,
         degrade_seed=shot.degrade_seed,
         master_relative=masters[-1].relative_path,
-        font_relative=font_relative,
+        font_relative=overlay.font_relative,
         camera_profile=camera_profile,
         profile=profile,
     )

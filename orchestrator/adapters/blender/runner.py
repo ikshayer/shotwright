@@ -36,8 +36,6 @@ class RenderResult:
     generation_run: GenerationRun
     master_path: str | None = None
     assembly_log_path: str | None = None
-    transfer_function: str | None = None
-    bit_depth: int | None = None
 
 
 @dataclass(frozen=True)
@@ -493,6 +491,7 @@ class BlenderAdapter:
                 assembly_log_path = None
                 transfer_function = None
                 bit_depth = None
+                generation_invocation = argv
                 assembly_outputs: list[str] = []
                 if request.mode == "master":
                     assembly_started = time.monotonic()
@@ -504,6 +503,24 @@ class BlenderAdapter:
                     )
                     transfer_function = "bt709"
                     bit_depth = 16
+                    generation_invocation = assembly_argv
+                    # GenerationRun is the provenance home for the encode. Keep the
+                    # renderer argv too, while invocation itself identifies the exact
+                    # FFmpeg command that produced the master.
+                    run_settings.update({
+                        "render_invocation": json.dumps(argv),
+                        "assembly_tool": "ffmpeg",
+                        "master_codec": "ffv1",
+                        "master_container": "matroska",
+                        "master_pixel_format": "gbrp16le",
+                        "master_frame_rate": frame_rate,
+                        "master_frame_count": frame_end,
+                        "source_transfer_function": "linear",
+                        "transfer_function": transfer_function,
+                        "bit_depth": bit_depth,
+                        "highlight_policy": "clamp",
+                        "tone_mapping": "none",
+                    })
                     metadata["master_assembly"] = {
                         "input_pattern": f"{attempt_rel}/frames/frame_%06d.exr",
                         "frame_start": 1,
@@ -529,7 +546,7 @@ class BlenderAdapter:
                 job.progress = 1.0
                 generation = GenerationRun(
                     run_id=request.run_id, tool="blender", tool_version=f"{version}+{build_hash}",
-                    invocation=json.dumps(argv), seed=plan["seed"],
+                    invocation=json.dumps(generation_invocation), seed=plan["seed"],
                     settings=run_settings,
                     input_paths=[script_rel, plan_path_rel],
                     output_paths=[blend_rel, *frame_rels, metadata_rel, *assembly_outputs],
@@ -541,8 +558,7 @@ class BlenderAdapter:
                     blend_path=blend_rel, frame_paths=frame_rels, metadata_path=metadata_rel,
                     log_path=log_rel, engine_id=engine_id, engine_build=engine_build,
                     generation_run=generation, master_path=master_path,
-                    assembly_log_path=assembly_log_path, transfer_function=transfer_function,
-                    bit_depth=bit_depth,
+                    assembly_log_path=assembly_log_path,
                 ))
             except Exception as exc:  # noqa: BLE001 - preserve the cause across the supervisor-thread boundary.
                 error_box.append(exc)

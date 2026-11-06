@@ -9,20 +9,21 @@ that JobRunner records. Tests fake Blender, FFmpeg, and ffprobe processes and us
 
 from __future__ import annotations
 
-import io
 import hashlib
+import io
 import json
 import re
 import subprocess
 from fractions import Fraction
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import pytest
 
 from orchestrator.domain.entities import (
     CameraProfile,
     Episode,
+    GenerationRun,
     Project,
     Shot,
     ShotOutputKind,
@@ -34,9 +35,8 @@ from orchestrator.service.runner import (
     JobRunner,
     _AdapterShim,
 )
-from tests.adapters.blender.test_supervision_contract import FakePopen, setup
 from tests.adapters.blender.test_scene_contract import request as render_request
-
+from tests.adapters.blender.test_supervision_contract import FakePopen, setup
 
 _FAKE_FFMPEG_VERSION = b"ffmpeg version fake-assembly-build\n"
 _MASTER_BYTES = b"fake FFV1 master representing the complete planned shot"
@@ -68,7 +68,7 @@ class _ImmediateProcess:
     def terminate(self) -> None:
         self.returncode = -15
 
-    def __enter__(self) -> _ImmediateProcess:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_exc: object) -> bool:
@@ -119,7 +119,18 @@ def rendered_master(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
     # Also cover assembly code that uses subprocess.run (which delegates to the module's
     # Popen) instead of the adapter's injected callable. No real process can escape.
     monkeypatch.setattr(subprocess, "Popen", popen)
-    root, settings, adapter, queue, _job = setup(tmp_path, popen=popen)
+    root, settings, adapter, queue, _job = setup(
+        tmp_path, popen=popen, ffmpeg_popen=popen,
+    )
+    generation_runs: list[GenerationRun] = []
+    render_managed = adapter.render_managed
+
+    def capture_generation_run(*args: Any, **kwargs: Any) -> Any:
+        result = render_managed(*args, **kwargs)
+        generation_runs.append(result.generation_run)
+        return result
+
+    monkeypatch.setattr(adapter, "render_managed", capture_generation_run)
     store = queue.store
     store.save(Project(project_id="p1", title="900-frame master"), expected_version=0)
     store.save(
@@ -175,6 +186,10 @@ def rendered_master(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
         )
         if len(outputs) != 1:
             pytest.fail(f"expected one master receipt for the fake render, observed {outputs!r}")
+        if len(generation_runs) != 1:
+            pytest.fail(
+                f"expected one GenerationRun from the fake render, observed {generation_runs!r}"
+            )
         plan_path = Path(popen.blender.calls[0][0][-1])
         plan = json.loads(plan_path.read_text(encoding="utf-8"))
         yield {
@@ -184,6 +199,7 @@ def rendered_master(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
             "request": request,
             "plan": plan,
             "receipt": outputs[0],
+            "generation_run": generation_runs[0],
             "popen": popen,
         }
     finally:
@@ -354,4 +370,59 @@ def test_master_argv_applies_an_explicit_linear_transfer_and_integer_bit_depth(
     assert depth is not None and 1 <= depth <= 16, (
         f"master argv pixel format {pixel_format!r} does not declare a supported integer "
         f"bit depth; raw-depth option={raw_depth!r}, argv={command!r}"
+    )
+
+
+def test_master_generation_run_records_conversion_policy_and_both_invocations(
+    rendered_master: dict[str, Any],
+) -> None:
+    generation_run: GenerationRun = rendered_master["generation_run"]
+    settings = generation_run.settings
+    expected_settings = {
+        "source_transfer_function": "linear",
+        "transfer_function": "bt709",
+        "bit_depth": 16,
+        "highlight_policy": "clamp",
+        "tone_mapping": "none",
+    }
+    for name, expected in expected_settings.items():
+        assert settings.get(name) == expected, (
+            f"GenerationRun.settings[{name!r}] is {settings.get(name)!r}, "
+            f"expected explicit encode policy {expected!r}; settings={settings!r}"
+        )
+
+    try:
+        ffmpeg_invocation = json.loads(generation_run.invocation)
+    except (TypeError, json.JSONDecodeError) as exc:
+        pytest.fail(
+            f"GenerationRun.invocation is not the serialized FFmpeg argv: "
+            f"{generation_run.invocation!r} ({exc})"
+        )
+    assert ffmpeg_invocation == _master_command(rendered_master), (
+        f"GenerationRun.invocation does not preserve the observed FFmpeg argv: "
+        f"{ffmpeg_invocation!r} != {_master_command(rendered_master)!r}"
+    )
+
+    try:
+        render_invocation = json.loads(settings["render_invocation"])
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        pytest.fail(
+            f"GenerationRun.settings does not preserve the Blender render argv: "
+            f"{settings.get('render_invocation')!r} ({exc})"
+        )
+    blender_argv = next(
+        (call for call in rendered_master["popen"].calls if "--background" in call), None,
+    )
+    assert blender_argv is not None, (
+        f"fake run did not observe Blender argv among {rendered_master['popen'].calls!r}"
+    )
+    assert render_invocation == blender_argv, (
+        f"GenerationRun.settings['render_invocation']={render_invocation!r} does not match "
+        f"the Blender argv {blender_argv!r}"
+    )
+
+    receipt = rendered_master["receipt"]
+    assert not hasattr(receipt, "transfer_function") and not hasattr(receipt, "bit_depth"), (
+        f"ShotOutput contains encode settings {receipt!r}; contract stores them on "
+        "GenerationRun.settings"
     )

@@ -195,8 +195,6 @@ class ShotOutput(Entity):
     profile_semver: str | None = None
     filter_graph_hash: str | None = None
     pinned_binaries: dict[str, str] | None = None
-    transfer_function: str | None = None
-    bit_depth: StrictInt | None = None
 
     @field_validator("relative_path")
     @classmethod
@@ -228,8 +226,7 @@ class ShotOutput(Entity):
             if self.engine_id is not None and (not self.engine_id or not self.engine_build):
                 raise ValueError("scene engine provenance fields must be non-empty when provided")
             if any(value is not None for value in
-                   (self.profile_semver, self.filter_graph_hash, self.pinned_binaries,
-                    self.transfer_function, self.bit_depth)):
+                   (self.profile_semver, self.filter_graph_hash, self.pinned_binaries)):
                 raise ValueError("scene outputs may not carry degradation provenance")
         elif self.kind is ShotOutputKind.MASTER:
             if not self.engine_id or not self.engine_build:
@@ -237,33 +234,22 @@ class ShotOutput(Entity):
             if any(value is not None for value in
                    (self.profile_semver, self.filter_graph_hash, self.pinned_binaries)):
                 raise ValueError("render outputs may not carry degradation provenance")
-            # Optional as a pair so older persisted master receipts remain loadable;
-            # every newly assembled master supplies both values.
-            if (self.transfer_function is None) != (self.bit_depth is None):
-                raise ValueError("master conversion provenance must provide transfer_function and bit_depth together")
-            if self.transfer_function is not None and not self.transfer_function:
-                raise ValueError("master transfer_function must be non-empty when provided")
-            if self.bit_depth is not None and self.bit_depth < 1:
-                raise ValueError("master bit_depth must be positive when provided")
         elif self.kind is ShotOutputKind.PREVIEW:
             if not self.engine_id or not self.engine_build:
                 raise ValueError(f"{self.kind.value} output requires engine_id and engine_build")
             if any(value is not None for value in
-                   (self.profile_semver, self.filter_graph_hash, self.pinned_binaries,
-                    self.transfer_function, self.bit_depth)):
+                   (self.profile_semver, self.filter_graph_hash, self.pinned_binaries)):
                 raise ValueError("preview outputs may not carry degradation or master conversion provenance")
         elif self.kind is ShotOutputKind.DEGRADED:
             if not self.profile_semver or not self.filter_graph_hash or not self.pinned_binaries:
                 raise ValueError("degraded output requires profile_semver, filter_graph_hash, and pinned_binaries")
             if self.engine_id is not None or self.engine_build is not None:
                 raise ValueError("degraded output may not carry render provenance")
-            if self.transfer_function is not None or self.bit_depth is not None:
-                raise ValueError("degraded output may not carry master conversion provenance")
             if any(not key or not value for key, value in self.pinned_binaries.items()):
                 raise ValueError("pinned_binaries keys and values must be non-empty")
         elif any(value is not None for value in (
             self.engine_id, self.engine_build, self.profile_semver, self.filter_graph_hash,
-            self.pinned_binaries, self.transfer_function, self.bit_depth,
+            self.pinned_binaries,
         )):
             raise ValueError("still output has no additional provenance fields")
         return self
@@ -334,6 +320,10 @@ class PostProfileOverlay(Entity):
     camera_id: str
     clock_epoch: int
     fontsize: StrictInt = Field(gt=0)
+    # Optional only so existing schema-version-1 profiles remain readable. Degradation
+    # composition rejects a missing path with the owning profile name; it never chooses
+    # a process-local font. ProjectStore validates any supplied value via ProjectRoot.
+    font_relative: str | None = Field(None, min_length=1)
     x: StrictInt | str = 8
     y: StrictInt | str = "h-24"
     placement: Literal["in_recording", "on_playback"] = "in_recording"

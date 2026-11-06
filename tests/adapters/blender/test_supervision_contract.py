@@ -148,6 +148,31 @@ class FakePopen:
         stream.flush()
 
 
+class _MasterEncodeProcess:
+    """Completed FFmpeg fake that writes the authorized master output file."""
+
+    returncode = 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self.returncode
+
+
+class _FakeMasterFFmpeg:
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def __call__(self, argv: list[str], **kwargs: Any) -> _MasterEncodeProcess:
+        assert kwargs.get("shell") is False, "master assembly must not use a shell"
+        assert "-c:v" in argv and argv[argv.index("-c:v") + 1] == "ffv1", (
+            f"master assembly fake received unexpected codec argv={argv!r}"
+        )
+        output = Path(argv[-1])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"fake lossless FFV1 master")
+        self.calls.append((argv, kwargs))
+        return _MasterEncodeProcess()
+
+
 class RetryPopen(FakePopen):
     def __call__(self, argv: list[str], **kwargs: Any) -> Child:
         self.omit = "frame" if len(self.calls) == 0 else None
@@ -166,7 +191,8 @@ class SignalingHangPopen(FakePopen):
 
 
 def setup(tmp_path: Path, *, floor: float = 0.0, wall: float = 900.0,
-          popen: Any | None = None, queue_clock: Any | None = None):
+          popen: Any | None = None, ffmpeg_popen: Any | None = None,
+          queue_clock: Any | None = None):
     root = ProjectRoot(tmp_path)
     exe = root.write_bytes("fake-blender.exe", b"executable")
     settings = parse_settings({"resources": {"throughput_floor_per_second": floor,
@@ -175,7 +201,8 @@ def setup(tmp_path: Path, *, floor: float = 0.0, wall: float = 900.0,
                                "binaries": {"blender_exe": str(exe)}})
     nvml = Nvml()
     adapter = BlenderAdapter(root, settings, popen=popen or
-                             (lambda *_a, **_k: pytest.fail("unexpected Popen")))
+                             (lambda *_a, **_k: pytest.fail("unexpected Popen")),
+                             ffmpeg_popen=ffmpeg_popen or _FakeMasterFFmpeg())
     lease = GpuLease(root, settings, nvml=nvml, worker=adapter.worker,
                      pid_alive=lambda _pid: True, ttl_seconds=30)
     queue = JobQueue(root, settings, lease, ProjectStore(root), nvml=nvml,

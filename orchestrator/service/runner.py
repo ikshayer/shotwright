@@ -181,11 +181,6 @@ class JobRunner:
                 raise ValueError("adapter payload shot_id must match AdapterRequest.record_id")
             if raw_version is not None and raw_version != request.record_version:
                 raise ValueError("adapter payload shot_version must match AdapterRequest.record_version")
-            font_relative = _payload_value(raw_payload, "font_relative")
-            if font_relative is None:
-                font_relative = _payload_value(request.payload, "font_relative")
-            if not isinstance(font_relative, str) or not font_relative:
-                raise ValueError("degrade request requires a project-relative font_relative path")
             try:
                 bound_shot = store.load(Shot, request.record_id, episode_id=request.episode_id)
             except RecordNotFound as exc:
@@ -196,7 +191,6 @@ class JobRunner:
                 shot_id=request.record_id,
                 episode_id=episode_id,
                 run_id=uuid.uuid4().hex,
-                font_relative=font_relative,
             )
             if request.record_version != degradation.shot_version:
                 raise ValueError(
@@ -501,10 +495,8 @@ def _output_kind(kind: AdapterKind, payload: Any) -> ShotOutputKind:
 
 def _provenance(kind: ShotOutputKind, value: Any) -> dict[str, Any]:
     """Project only declared, kind-appropriate provenance from the adapter result."""
-    if kind in {ShotOutputKind.SCENE, ShotOutputKind.PREVIEW}:
+    if kind in {ShotOutputKind.SCENE, ShotOutputKind.PREVIEW, ShotOutputKind.MASTER}:
         fields = ("engine_id", "engine_build")
-    elif kind is ShotOutputKind.MASTER:
-        fields = ("engine_id", "engine_build", "transfer_function", "bit_depth")
     elif kind is ShotOutputKind.DEGRADED:
         fields = ("profile_semver", "filter_graph_hash", "pinned_binaries")
     else:

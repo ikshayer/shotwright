@@ -10,7 +10,18 @@ from datetime import UTC, datetime
 import pytest
 
 from orchestrator.domain.base import ShotStatus
-from orchestrator.domain.entities import Episode, Project, Review, Shot, ShotOutputKind
+from orchestrator.domain.entities import (
+    CameraProfile,
+    Episode,
+    PostProfile,
+    PostProfileEncode,
+    PostProfileOverlay,
+    Project,
+    Review,
+    Shot,
+    ShotOutput,
+    ShotOutputKind,
+)
 from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.service.dependencies import revise_shot
 from orchestrator.store.json_store import ProjectStore
@@ -23,6 +34,55 @@ def _shot(store: ProjectStore, shot_id: str = "s1") -> Shot:
     shot = Shot(shot_id=shot_id, episode_id="ep1", duration_sec=5)
     store.create(shot)
     return shot
+
+
+def _seed_degrade_inputs(store: ProjectStore, shot: Shot) -> None:
+    """Supply composition's project records without involving a real adapter."""
+    root = store._root
+    store.create(CameraProfile(
+        camera_id=shot.camera_profile,
+        profile_name="Fixture DVR camera",
+    ))
+    font_relative = "assets/fonts/fixture-overlay.ttf"
+    root.write_bytes(font_relative, b"fixture overlay font")
+    store.save(
+        PostProfile(
+            name="dvr-2005",
+            semver="1.0.0",
+            output_fps=12,
+            storage_resolution=(640, 480),
+            sample_aspect_ratio="1/1",
+            overlay=PostProfileOverlay(
+                camera_id="CAM 03",
+                clock_epoch=1131984000,
+                fontsize=16,
+                font_relative=font_relative,
+            ),
+            encode=PostProfileEncode(
+                codec="libx264", preset="medium", crf=30,
+                pix_fmt="yuv420p", threads=1,
+            ),
+            provenance="service integration fixture",
+        ),
+        expected_version=0,
+    )
+    master_relative = f"renders/{shot.shot_id}/v{shot.version:04d}/seed/master.mkv"
+    master_bytes = b"fixture current master"
+    root.write_bytes(master_relative, master_bytes)
+    store.append_shot_output(
+        ShotOutput(
+            output_id="seed-master",
+            episode_id=shot.episode_id,
+            shot_id=shot.shot_id,
+            record_version=shot.version,
+            kind=ShotOutputKind.MASTER,
+            relative_path=master_relative,
+            content_sha256=hashlib.sha256(master_bytes).hexdigest(),
+            engine_id="BLENDER_EEVEE",
+            engine_build="fixture-build",
+        ),
+        expected_version=0,
+    )
 
 
 def _revision(store: ProjectStore, before: Shot) -> Shot:
@@ -94,14 +154,18 @@ def test_completed_job_appends_output_bound_to_submitted_content_version(env) ->
 def test_kind_projects_to_output_kind_and_zero_vram_does_not_change_lease_routing(
     env, kind_name, expected_output_kind, takes_gpu_lease
 ) -> None:
-    _shot(env.store)
+    shot = _shot(env.store)
+    if kind_name == "degrade":
+        _seed_degrade_inputs(env.store, shot)
     env.adapter.release.set()
     job = env.runner.submit(
         "p1", env.request(kind=getattr(env.AdapterKind, kind_name.upper()), required_vram_gb=0.0)
     )
     env.runner.drain()
 
-    output, = env.store.list_shot_outputs("s1", episode_id="ep1")
+    output, = env.store.list_shot_outputs(
+        "s1", episode_id="ep1", kind=expected_output_kind,
+    )
     assert output.kind is expected_output_kind
     assert env.adapter.lease_states_during_invoke == [takes_gpu_lease]
     assert job.required_vram_gb == 0.0

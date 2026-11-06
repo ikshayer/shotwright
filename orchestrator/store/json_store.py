@@ -160,6 +160,13 @@ def _declared_paths(data: dict[str, Any], entity_type: type[Entity]) -> list[tup
             found.extend(
                 (f"{name}[{i}]", v) for i, v in enumerate(value) if isinstance(v, str) and v
             )
+    # PostProfileOverlay is nested in PostProfile JSON rather than having its own
+    # store layout. Keep the nested path on this same ProjectRoot validation route.
+    if entity_type is PostProfile:
+        overlay = data.get("overlay")
+        font = overlay.get("font_relative") if isinstance(overlay, dict) else None
+        if isinstance(font, str) and font:
+            found.append(("overlay.font_relative", font))
     return found
 
 
