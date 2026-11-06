@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from orchestrator.domain.entities import CameraProfile, Episode, Project, Shot
+from orchestrator.adapters.blender.scene import build_scene_plan
+from orchestrator.domain.entities import (
+    CameraProfile,
+    Episode,
+    Project,
+    Shot,
+    ShotOutput,
+    ShotOutputKind,
+)
 from orchestrator.platform.containment import ProjectRoot
+from orchestrator.service.compose import compose_render_request
 from orchestrator.store.json_store import ProjectStore
 
 from .conftest import TOKEN, TOKEN_HEADER, find_key, operations, valid_request_kwargs
@@ -39,7 +50,8 @@ def _seed_wired_route_records(app: FastAPI) -> None:
     """The route-table harness substitutes `x` for every path parameter."""
     root = ProjectRoot(app.state.settings.project_root)
     root.make_dir("x")
-    store = ProjectStore(ProjectRoot(root.resolve("x")))
+    project_root = ProjectRoot(root.resolve("x"))
+    store = ProjectStore(project_root)
     store.save(Project(project_id="x", title="Route test"), expected_version=0)
     store.save(
         Episode(episode_id="x", project_id="x", number=1, duration_target_sec=10),
@@ -55,6 +67,37 @@ def _seed_wired_route_records(app: FastAPI) -> None:
         CameraProfile(camera_id=shot.camera_profile, profile_name=shot.camera_profile)
     )
     store.create(shot)
+
+    # Rendering now consumes a scene, so /preview refuses a shot that has none with
+    # "has no scene output; run build_scene first". Seed what build_scene would have
+    # written, through the real producer rather than a hand-written plan: the consumer
+    # checks the plan's shot identity, and the store checks the artifact's sha256.
+    scene_rel = f"scenes/{shot.shot_id}/v{shot.version:04d}/seed/scene.json"
+    plan = build_scene_plan(
+        compose_render_request(
+            store, shot_id=shot.shot_id, episode_id=shot.episode_id,
+            run_id="seed", mode="preview",
+        )
+    )
+    artifact = json.dumps(
+        {"schema_version": 1, "plan": plan},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    project_root.make_dir(f"scenes/{shot.shot_id}/v{shot.version:04d}/seed")
+    project_root.write_text(scene_rel, artifact)
+    store.append_shot_output(
+        ShotOutput(
+            output_id="seed-scene",
+            episode_id=shot.episode_id,
+            shot_id=shot.shot_id,
+            record_version=shot.version,
+            kind=ShotOutputKind.SCENE,
+            relative_path=scene_rel,
+            content_sha256=hashlib.sha256(artifact.encode("utf-8")).hexdigest(),
+        ),
+        expected_version=0,
+    )
 
 
 def _wired_request_kwargs(app: FastAPI, op) -> dict:

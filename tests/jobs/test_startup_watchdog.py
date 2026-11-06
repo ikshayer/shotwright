@@ -199,4 +199,6 @@ def test_hard_deadline_takes_precedence_during_startup(tmp_path: Path) -> None:
 
 
 def test_settings_default_is_measured_startup_allowance() -> None:
-    assert Settings().resources.startup_allowance_seconds == pytest.approx(74.0)
+    # A bound must EXCEED its measurement, not equal it: 8.4 measures ~74 s for a cold
+    # Blender shader cache, so a default equal to that fails about half the time.
+    assert Settings().resources.startup_allowance_seconds > 74.0

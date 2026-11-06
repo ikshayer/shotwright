@@ -122,3 +122,66 @@ Baseline on `main`: **1323 passed, 33 skipped**, ruff clean, about 170 s.
 write a `scene` output. The render must not die of `budget_exceeded`; if it fails for a
 genuine Blender reason, the record will now say so, and that is progress worth reporting
 honestly.
+
+## Adjudication — the progress and scene-separation pass
+
+Written after reconciling the implementer's and test author's independent work. Both were
+dispatched from this file; neither read the other. Six expectations disagreed, and each
+disagreement is recorded here rather than quietly resolved.
+
+### The artifact's shape, and the defect the disagreement was hiding
+
+The implementer wrote `{schema_version, plan, scene_spec}`; the test author expected a flat
+plan. Neither was right. `build_scene_plan()` already puts the `SceneSpec` at
+`plan["scene"]`, so a sibling `scene_spec` key is a **second copy of the same data in one
+file**, with nothing keeping the two in agreement. **Binding: the artifact is
+`{"schema_version": 1, "plan": <plan>}`, and `plan["scene"]` is the one `SceneSpec`.**
+
+Removing the duplicate exposed the real defect. `_load_scene_spec` in `compose.py` read
+`artifact["scene_spec"]` — a key the writer no longer produced — so **every render would
+have failed** with `invalid_manifest: scene plan identity does not match the bound Shot
+content version`. Both halves of this had full test coverage and the suite was green,
+because **nothing round-tripped the artifact**: the adapter test asserted what was written,
+the compose tests asserted what was read, and the two never met. The route test caught it
+only by accident, as a 422 from `/preview`.
+
+`tests/service/test_compose.py::test_render_consumes_the_scene_artifact_build_scene_actually_wrote`
+now closes that: it assembles through the real adapter, persists the receipt as `JobRunner`
+does, composes with `require_built_scene=True`, and asserts the consumed `SceneSpec` is the
+one persisted. It was verified red against the old consumer and green against the fix.
+
+**This is the fifteenth round, and the fifteenth contract gap — and it is a new kind.** The
+previous fourteen were under-specification: a type, a precondition, a vocabulary left open.
+This one is fully specified on both sides and still wrong, because splitting one piece of
+knowledge across two modules created an agreement the contract never named as a thing to
+test. **When a contract separates a producer from a consumer, it must require the round
+trip, not the two halves.**
+
+### The other five
+
+- **Startup allowance.** `74.0` against a measured ~74 s cold shader cache is a bound equal
+  to its own measurement. Now `150.0`, a labelled derived bound. The tests assert
+  `> 74.0` and reference `Settings().resources.startup_allowance_seconds` rather than
+  restating a literal, so raising the bound again does not falsify them.
+- **The scene lease.** `AdapterKind.SCENE` no longer takes the GPU lease and uses
+  `preflight_cpu`. `ADAPTER_INTEGRATION_CONTRACT.md` Amendment 6 supersedes Amendment 3's
+  classification; the integration test's expectation was flipped to `False`.
+- **The route harness.** `render preview` answered 422 because rendering now consumes a
+  scene and the harness seeded none. Fixed in the fixture, through the real producer
+  (`compose_render_request` → `build_scene_plan`) rather than a hand-written plan, so the
+  seed cannot drift from what `build_scene` writes. Not a routing fault.
+
+### Two defects this pass found and did not fix
+
+Both are real, both are recorded rather than left in a report:
+
+1. **`report-jobs` can hide a later failure.** The journal's first-terminal-wins precedence
+   returns an earlier `completed` snapshot even when a `failed` snapshot was appended after
+   it. Diagnosability regression: the record says the run succeeded.
+2. **`lease_holder_pid` survives release.** A completed render's record still names a pid
+   after the lease was released, so the field cannot be read as "who holds it now".
+
+### Verified
+
+`1330 passed, 33 skipped` (baseline 1323), ruff clean on `orchestrator/` and `tests/`,
+about 176 s. No GPU or Blender run in this reconciliation.

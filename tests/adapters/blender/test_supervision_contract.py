@@ -16,7 +16,7 @@ from orchestrator.jobs.lease import GpuLease, MemoryReading
 from orchestrator.jobs.queue import JobQueue, ProjectQuarantine
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.errors import JobError, JobErrorKind
-from orchestrator.platform.settings import parse_settings
+from orchestrator.platform.settings import Settings, parse_settings
 from orchestrator.store.json_store import ProjectStore
 from tests.adapters.blender.test_scene_contract import request
 
@@ -202,7 +202,7 @@ def test_render_accepts_positive_floor_and_forwards_measured_startup_allowance(
 
     assert result.generation_run.status == "completed"
     assert len(fake.calls) == 1
-    assert forwarded == [74.0]
+    assert forwarded == [Settings().resources.startup_allowance_seconds]
 
 
 @pytest.mark.parametrize("mismatch", ["shot", "run"])

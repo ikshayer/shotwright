@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 
-from orchestrator.adapters.blender.scene import build_scene_plan
 from orchestrator.adapters.blender.runner import BlenderAdapter
+from orchestrator.adapters.blender.scene import build_scene_plan
 from orchestrator.domain.entities import (
     Episode,
     Project,
@@ -390,7 +391,11 @@ def test_build_scene_persists_scene_output_without_subprocess_or_gpu_lease(
         assert output.kind is ShotOutputKind.SCENE, f"expected scene output kind, got {output.kind!r}"
         artifact = root.resolve(output.relative_path)
         assert artifact.is_file(), f"scene output receipt points to no artifact: {output.relative_path}"
-        persisted_plan = json.loads(root.read_text(output.relative_path, encoding="utf-8"))
+        artifact_json = json.loads(root.read_text(output.relative_path, encoding="utf-8"))
+        # The artifact is versioned like every other record here; the plan lives under
+        # "plan", and plan["scene"] is the SceneSpec -- it is not duplicated alongside.
+        assert artifact_json["schema_version"] == 1
+        persisted_plan = artifact_json["plan"]
         expected_plan = build_scene_plan(payload)
         assert persisted_plan["scene"] == expected_plan["scene"], (
             "scene artifact did not persist the request's SceneSpec"

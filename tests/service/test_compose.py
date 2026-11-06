@@ -11,14 +11,27 @@ not FR-04's future procedural hallway builder driven by a text brief.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
+from orchestrator.adapters.blender.runner import BlenderAdapter
 from orchestrator.adapters.blender.scene import RenderRequest, SceneSpec, synthetic_interior
-from orchestrator.domain.entities import CameraProfile, Episode, Project, Shot
+from orchestrator.domain.entities import (
+    CameraProfile,
+    Episode,
+    Job,
+    Project,
+    Shot,
+    ShotOutput,
+    ShotOutputKind,
+)
 from orchestrator.platform.containment import ProjectRoot
+from orchestrator.platform.settings import parse_settings
+from orchestrator.service.compose import compose_render_request
 from orchestrator.store.json_store import ProjectStore
 
 
@@ -76,8 +89,6 @@ def _store_with_shot(
 def _compose_render(
     store: ProjectStore, shot: Shot, *, mode: str = "master", run_id: str = "run-aaaa"
 ) -> RenderRequest:
-    from orchestrator.service.compose import compose_render_request
-
     # Keyword-only, and run_id is supplied by the caller: composition stays pure, so the
     # determinism assertion below is about composition rather than about a patched RNG.
     return compose_render_request(
@@ -160,3 +171,55 @@ def test_missing_camera_profile_names_the_missing_record(tmp_path: Path) -> None
     assert "missing-camera-profile" in str(caught.value)
     assert not isinstance(caught.value, ValidationError)
     assert "validation errors for RenderRequest" not in str(caught.value)
+
+
+def test_render_consumes_the_scene_artifact_build_scene_actually_wrote(tmp_path: Path) -> None:
+    """Producer and consumer must agree on the scene artifact's shape.
+
+    Separating assembly from rendering split one piece of knowledge across two modules:
+    `assemble_scene` writes the artifact and `_load_scene_spec` reads it. Every test for
+    each half passed while they disagreed about which key holds the SceneSpec, because
+    nothing round-tripped. This asserts the round trip, so the next disagreement fails
+    here instead of at a 422 from /preview.
+    """
+    root = ProjectRoot(tmp_path)
+    store, shot, _ = _store_with_shot(tmp_path)
+    blender_exe = root.write_bytes("fake-blender.exe", b"not an executable")
+    settings = parse_settings({
+        "project_root": str(root.path),
+        "binaries": {"blender_exe": str(blender_exe)},
+    })
+
+    def forbidden_popen(argv: list[str], **_kwargs: Any) -> Any:
+        raise AssertionError(f"scene assembly must not launch a subprocess: {argv!r}")
+
+    request = _compose_render(store, shot, run_id="run-scene")
+    adapter = BlenderAdapter(root, settings, popen=forbidden_popen)
+    result = adapter.assemble_scene(
+        request, Job(job_id="job-scene", type="scene", shot_id=shot.shot_id, run_id="run-scene"),
+    )
+
+    # Persist the receipt the way JobRunner does, so the consumer finds it by ledger.
+    store.append_shot_output(
+        ShotOutput(
+            output_id="scene-1",
+            episode_id=shot.episode_id,
+            shot_id=shot.shot_id,
+            record_version=shot.version,
+            kind=ShotOutputKind.SCENE,
+            relative_path=result.scene_path,
+            content_sha256=hashlib.sha256(
+                root.resolve(result.scene_path).read_bytes()
+            ).hexdigest(),
+        ),
+        expected_version=0,
+    )
+
+    consumed = compose_render_request(
+        store, shot_id=shot.shot_id, episode_id=shot.episode_id,
+        run_id="run-render", mode="master", require_built_scene=True,
+    )
+
+    assert consumed.scene == request.scene, (
+        "the SceneSpec a render consumes is not the one build_scene persisted"
+    )

@@ -217,11 +217,9 @@ class BlenderAdapter:
         )
         scene_dir = f"scenes/{request.shot_id}/v{request.shot_version:04d}/{request.run_id}"
         self.root.make_dir(scene_dir)
-        artifact = {
-            "schema_version": 1,
-            "plan": plan,
-            "scene_spec": request.scene.model_dump(mode="json"),
-        }
+        # No scene_spec key: plan["scene"] already holds the SceneSpec, and carrying it
+        # twice in one artifact would be two sources of truth for the same data.
+        artifact = {"schema_version": 1, "plan": plan}
         self.root.write_text(
             scene_rel,
             json.dumps(artifact, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False),

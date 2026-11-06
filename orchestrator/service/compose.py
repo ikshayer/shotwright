@@ -76,7 +76,10 @@ def _load_scene_spec(store: ProjectStore, shot: Shot) -> SceneSpec:
         if (not isinstance(plan, dict) or plan.get("shot_id") != shot.shot_id
                 or plan.get("shot_version") != shot.version):
             raise ValueError("scene plan identity does not match the bound Shot content version")
-        return SceneSpec.model_validate(artifact.get("scene_spec"))
+        # plan["scene"] IS the SceneSpec (build_scene_plan dumps it there). The artifact
+        # deliberately carries no sibling "scene_spec" key: two copies of the same spec in
+        # one file is two sources of truth, and nothing would keep them agreeing.
+        return SceneSpec.model_validate(plan.get("scene"))
     except (OSError, TypeError, ValueError) as exc:
         raise JobError(
             JobErrorKind.INVALID_MANIFEST,

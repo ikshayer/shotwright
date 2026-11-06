@@ -85,7 +85,7 @@ def test_completed_job_appends_output_bound_to_submitted_content_version(env) ->
 @pytest.mark.parametrize(
     ("kind_name", "expected_output_kind", "takes_gpu_lease"),
     [
-        ("scene", ShotOutputKind.SCENE, True),
+        ("scene", ShotOutputKind.SCENE, False),
         ("render", ShotOutputKind.MASTER, True),
         ("generate", ShotOutputKind.STILL, True),
         ("degrade", ShotOutputKind.DEGRADED, False),
