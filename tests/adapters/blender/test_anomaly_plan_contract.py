@@ -10,7 +10,9 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from orchestrator.adapters.blender.scene import (
+    ObjectSpec,
     RenderRequest,
+    SceneSpec,
     build_scene_plan,
     synthetic_interior,
 )
@@ -31,6 +33,9 @@ _ANOMALY_KINDS = (
 # used in tests/adapters/blender/test_scene_contract.py. Canonical JSON is the
 # serialization under comparison; the digest avoids a large inline snapshot.
 _STATIC_PLAN_SHA256 = "92de3ed358ecc3bc4ef91127db9c6a12254e86a59f255645c03579b60b03788a"
+
+_TEST_OCCLUDER = "AnomalyTestOccluder"
+_TEST_TARGET = "AnomalyTestTarget"
 
 
 def _request() -> RenderRequest:
@@ -72,7 +77,7 @@ def _valid_anomaly(kind: str, **changes: object) -> AnomalySpec:
             "maximum_on_frame_height_px": 960,
         })
         if kind == "partial_occlusion":
-            values["occluder"] = "RoomShell"
+            values["occluder"] = _TEST_OCCLUDER
     if kind == "linear_walk_path":
         values.update({
             "path": ((-0.5, 0.8, 0.0), (0.5, 0.8, 0.0)),
@@ -85,11 +90,36 @@ def _valid_anomaly(kind: str, **changes: object) -> AnomalySpec:
     if kind == "light_flicker":
         values.update({"light_name": "Panel0", "flicker_fraction": 0.25, "frequency_hz": 2.0})
     if kind == "door_or_object_movement":
-        values.update({"target_object": "RoomShell", "path": ((0.0, 0.0, 1.35), (0.5, 0.0, 1.35))})
+        values.update({
+            "target_object": _TEST_TARGET,
+            "path": ((0.0, 0.0, 1.35), (0.5, 0.0, 1.35)),
+        })
     if kind == "object_appearing_disappearing":
-        values["target_object"] = "RoomShell"
+        values["target_object"] = _TEST_TARGET
     values.update(changes)
     return _spec_adapter().validate_python(values)
+
+
+def _scene_with_anomaly_targets() -> SceneSpec:
+    """Return an owned room fixture with objects for the object-bound anomalies."""
+    scene = synthetic_interior()
+    targets = (
+        ObjectSpec(
+            name=_TEST_OCCLUDER,
+            kind="box",
+            location=(-0.92, -0.1, 0.85),
+            dimensions=(0.8, 0.2, 1.4),
+            material="Clutter",
+        ),
+        ObjectSpec(
+            name=_TEST_TARGET,
+            kind="box",
+            location=(0.3, -0.2, 0.45),
+            dimensions=(0.3, 0.2, 0.3),
+            material="Clutter",
+        ),
+    )
+    return scene.model_copy(update={"objects": (*scene.objects, *targets)})
 
 
 def _keyframe_location_samples(value: object) -> list[tuple[int, tuple[float, ...]]]:
@@ -215,8 +245,22 @@ def test_linear_walk_plan_contains_distinct_effective_location_samples(tmp_path:
 
 
 @pytest.mark.parametrize("kind", _ANOMALY_KINDS)
-def test_each_fr20_primitive_validates_and_reaches_worker_plan(kind: str, tmp_path: Path) -> None:
+def test_each_fr20_primitive_validates_and_reaches_worker_plan(
+    kind: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from tests.service.test_anomaly_composition_contract import _compose_plan
+
+    object_bound_kinds = {
+        "partial_occlusion",
+        "door_or_object_movement",
+        "object_appearing_disappearing",
+    }
+    if kind in object_bound_kinds:
+        # Keep this composer-to-worker test independent of the composer's room choice.
+        # These cases need named objects, so supply a scene that belongs to this test.
+        from orchestrator.service import compose as compose_service
+
+        monkeypatch.setattr(compose_service, "american_living_room", _scene_with_anomaly_targets)
 
     anomaly = _valid_anomaly(kind)
     plan = _compose_plan(tmp_path, anomaly, event_sec=1.0)

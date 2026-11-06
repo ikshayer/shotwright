@@ -5,8 +5,8 @@ JSON store and typed adapter requests. The composition API is not named in the
 contract, so the tests assume ``compose_render_request(store, episode_id, shot_id,
 mode=...)`` and ``compose_post_profile_spec(store)``.
 
-The bound Phase 1 scene is the measured ``synthetic_interior()`` fixture. It is
-not FR-04's future procedural hallway builder driven by a text brief.
+The composer currently selects a procedural scene as a temporary default. Tests that
+care about scene content pin an explicit ``SceneSpec`` rather than that selection.
 """
 
 from __future__ import annotations
@@ -19,7 +19,13 @@ import pytest
 from pydantic import ValidationError
 
 from orchestrator.adapters.blender.runner import BlenderAdapter
-from orchestrator.adapters.blender.scene import RenderRequest, SceneSpec, synthetic_interior
+from orchestrator.adapters.blender.scene import (
+    LightSpec,
+    MaterialSpec,
+    ObjectSpec,
+    RenderRequest,
+    SceneSpec,
+)
 from orchestrator.domain.entities import (
     CameraProfile,
     Episode,
@@ -108,14 +114,46 @@ def _tree_snapshot(root: Path) -> tuple[tuple[str, str, bytes | None], ...]:
     return tuple(sorted(items))
 
 
-def test_render_composition_uses_shot_values_and_content_version(tmp_path: Path) -> None:
+def test_render_composition_uses_shot_values_and_content_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     store, shot, mutation_token = _store_with_shot(tmp_path)
+    expected_scene = SceneSpec(
+        materials=(MaterialSpec(name="TestMaterial", color=(0.2, 0.3, 0.4, 1.0)),),
+        objects=(ObjectSpec(
+            name="CompositionMarker",
+            kind="box",
+            location=(0.0, 0.0, 0.0),
+            dimensions=(1.0, 1.0, 1.0),
+            material="TestMaterial",
+        ),),
+        lights=(LightSpec(
+            name="TestKey",
+            location=(0.0, -3.0, 4.0),
+            energy=400.0,
+            color=(1.0, 1.0, 1.0),
+            target=(0.0, 0.0, 0.0),
+        ),),
+        camera_location=(0.0, -5.0, 2.0),
+        camera_target=(0.0, 0.0, 1.0),
+    )
+    monkeypatch.setattr(
+        "orchestrator.service.compose._load_scene_spec",
+        lambda _store, _shot: (expected_scene, False),
+    )
 
     assert shot.version == 2
     assert mutation_token == 3
     assert shot.version != mutation_token
 
-    request = _compose_render(store, shot)
+    request = compose_render_request(
+        store,
+        shot_id=shot.shot_id,
+        episode_id=shot.episode_id,
+        run_id="run-aaaa",
+        mode="master",
+        require_built_scene=True,
+    )
 
     assert isinstance(request, RenderRequest)
     assert request.shot_id == shot.shot_id
@@ -126,7 +164,8 @@ def test_render_composition_uses_shot_values_and_content_version(tmp_path: Path)
     assert request.camera_profile == store.load(CameraProfile, shot.camera_profile)
     assert request.camera_profile.field_of_view_mm == 21.25
     assert isinstance(request.scene, SceneSpec)
-    assert request.scene == synthetic_interior()
+    assert request.scene == expected_scene
+    assert request.scene.objects[0].name == "CompositionMarker"
     assert request.engine == "eevee"
 
 

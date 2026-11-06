@@ -1,0 +1,38 @@
+{
+  "before-clean": {
+    "1": {
+      "linear_pixel_sha256": "32a20995fb17cc44cc47c5a651b27ec5a6f4bcd0602d79c25f52ea05f326803b",
+      "finite": true
+    },
+    "60": {
+      "linear_pixel_sha256": "32a20995fb17cc44cc47c5a651b27ec5a6f4bcd0602d79c25f52ea05f326803b",
+      "finite": true,
+      "mean_abs_linear_difference_from_frame1": 0.0,
+      "max_abs_linear_difference_from_frame1": 0.0
+    },
+    "120": {
+      "linear_pixel_sha256": "32a20995fb17cc44cc47c5a651b27ec5a6f4bcd0602d79c25f52ea05f326803b",
+      "finite": true,
+      "mean_abs_linear_difference_from_frame1": 0.0,
+      "max_abs_linear_difference_from_frame1": 0.0
+    }
+  },
+  "after-living-room": {
+    "1": {
+      "linear_pixel_sha256": "dac52930324f37265dff7b27cfc30012e876290b29d09db4ac1f9e0c9e60db9f",
+      "finite": true
+    },
+    "60": {
+      "linear_pixel_sha256": "dac52930324f37265dff7b27cfc30012e876290b29d09db4ac1f9e0c9e60db9f",
+      "finite": true,
+      "mean_abs_linear_difference_from_frame1": 0.0,
+      "max_abs_linear_difference_from_frame1": 0.0
+    },
+    "120": {
+      "linear_pixel_sha256": "dac52930324f37265dff7b27cfc30012e876290b29d09db4ac1f9e0c9e60db9f",
+      "finite": true,
+      "mean_abs_linear_difference_from_frame1": 0.0,
+      "max_abs_linear_difference_from_frame1": 0.0
+    }
+  }
+}

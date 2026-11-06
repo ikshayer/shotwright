@@ -1,8 +1,8 @@
 """Compose adapter requests from project-local domain records.
 
-The Phase 1 scene uses ``synthetic_interior()``, the measured spike room. This does
-not implement FR-04's requirement to build a believable hallway from a text brief;
-the Script is not interpreted as scene geometry here.
+The default Phase 1 scene is a deterministic procedural domestic living-room fixture.
+It does not interpret the Shot Script as scene geometry. Previously built scene
+artifacts continue to load from their persisted plans when ``require_built_scene`` is set.
 
 These functions accept an already-generated run id and only read through ProjectStore.
 They do not acquire the service command lock, mutate records, write files, or derive
@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from typing import Literal
 
-from orchestrator.adapters.blender.scene import RenderRequest, SceneSpec, synthetic_interior
+from orchestrator.adapters.blender.scene import RenderRequest, SceneSpec, american_living_room
 from orchestrator.adapters.postprofile.profile import (
     EncodeSpec,
     OverlaySpec,
@@ -53,7 +53,9 @@ def compose_render_request(
     if require_built_scene:
         scene, anomaly_precomposed = _load_scene_spec(store, shot)
     else:
-        scene, anomaly_precomposed = synthetic_interior(), False
+        # Temporary selection here; FR-15 (P0) belongs on Shot.location_id resolving to
+        # a Location record for intra-episode location and camera reuse.
+        scene, anomaly_precomposed = american_living_room(), False
     return RenderRequest(
         shot_id=shot.shot_id,
         shot_version=shot.version,
