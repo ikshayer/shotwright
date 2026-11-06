@@ -18,7 +18,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from orchestrator.platform.containment import UploadLimits
 
@@ -113,6 +121,7 @@ class ResourceSettings(_Section):
 
 
 class Settings(_Section):
+    _runtime_secrets: set[str] = PrivateAttr(default_factory=set)
     project_root: Path = Field(Path("projects"), description="Active project root; all writes are contained here.")
     use_windows_share_delete_reads: bool = Field(
         False,
@@ -164,6 +173,19 @@ class Settings(_Section):
         if not value:
             raise KeyError(f"Environment variable {env_name} (credential for {provider!r}) is not set")
         return value
+
+    def register_runtime_secret(self, value: str) -> None:
+        """Make an in-memory runtime token available to diagnostic redaction."""
+        if value:
+            self._runtime_secrets.add(value)
+
+    def diagnostic_secrets(self) -> tuple[str, ...]:
+        """Return configured credential values and runtime tokens for redaction."""
+        values = {value for value in self._runtime_secrets if value}
+        values.update(
+            value for name in self.credentials.values() if (value := os.environ.get(name))
+        )
+        return tuple(sorted(values, key=len, reverse=True))
 
 
 @dataclass(frozen=True)

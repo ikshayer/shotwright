@@ -29,7 +29,7 @@ from orchestrator.domain.invalidation import field_invalidation
 from orchestrator.jobs.journal import append_job, read_job
 from orchestrator.jobs.queue import JobQueue
 from orchestrator.platform.containment import ProjectRoot
-from orchestrator.platform.errors import JobError, JobErrorKind
+from orchestrator.platform.errors import JobError, JobErrorKind, failure_diagnostics
 from orchestrator.platform.settings import Settings
 from orchestrator.store.json_store import ProjectStore, RecordNotFound
 
@@ -286,7 +286,13 @@ class JobRunner:
                     raise _job_error(
                         JobErrorKind.CANCELLED, "job cancelled before adapter start", active
                     )
-                return adapter.invoke(request, active, queue=queue)
+                try:
+                    return adapter.invoke(request, active, queue=queue)
+                except Exception as exc:
+                    raise JobError.from_exception(
+                        exc, job_id=active.job_id, shot_id=active.shot_id,
+                        run_id=active.run_id, origin="adapter",
+                    ) from exc
 
             if self._is_cancelled(key):
                 raise _job_error(JobErrorKind.CANCELLED, "job cancelled before adapter start", job)
@@ -320,11 +326,14 @@ class JobRunner:
                 except Exception as transition_error:  # noqa: BLE001 - persist a classified transition failure.
                     _persist_job(root, job, JobError.from_exception(
                         transition_error, job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id,
-                    ))
+                        origin="runner",
+                    ), self.settings)
         except Exception as exc:  # noqa: BLE001 - adapter failures are classified at the job boundary.
-            error = JobError.from_exception(exc, job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
+            error = JobError.from_exception(
+                exc, job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id, origin="runner"
+            )
             job.state, job.error_kind = "failed", error.kind.value
-            _persist_job(root, job, error)
+            _persist_job(root, job, error, self.settings)
         finally:
             with self._condition:
                 self._active.discard(key)
@@ -472,7 +481,7 @@ def _job_error(kind: JobErrorKind, message: str, job: Job,
                     run_id=job.run_id, cause=cause)
 
 
-def _persist_job(root: ProjectRoot, job: Job, error: JobError) -> None:
+def _persist_job(root: ProjectRoot, job: Job, error: JobError, settings: Settings) -> None:
     # A cancellation is not a failure. This fallback path previously wrote "failed" for
     # every error kind, so a job cancelled before its adapter started reported "failed"
     # and overwrote the "cancelled" state cancel() had already persisted. FR-27 keeps the
@@ -480,4 +489,11 @@ def _persist_job(root: ProjectRoot, job: Job, error: JobError) -> None:
     # and JobQueue's own terminal branch already makes the same distinction.
     job.state = "cancelled" if error.kind is JobErrorKind.CANCELLED else "failed"
     job.error_kind = error.kind.value
+    details = failure_diagnostics(
+        error,
+        origin=error.origin or ("runner" if error.kind is JobErrorKind.INTERNAL else None),
+        secrets=settings.diagnostic_secrets(),
+    )
+    for name, value in details.items():
+        setattr(job, name, value)
     append_job(root, job)

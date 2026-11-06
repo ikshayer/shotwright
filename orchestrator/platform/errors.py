@@ -7,9 +7,59 @@ function of the kind: no I/O, no clock, no randomness.
 from __future__ import annotations
 
 import errno
+import re
+import traceback
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
+
+DIAGNOSTIC_TRACEBACK_LIMIT = 16 * 1024
+_BEARER_PATTERN = re.compile(r"(?i)(\bBearer\s+)[A-Za-z0-9._~+/-]+=*")
+_TOKEN_ASSIGNMENT_PATTERN = re.compile(
+    r"(?i)(\b(?:loopback[_ -]?token|access[_ -]?token|api[_ -]?key|secret)\b\s*[:=]\s*)['\"]?[^\s,'\"]+"
+)
+
+
+def failure_diagnostics(
+    error: JobError, *, origin: str | None = None, secrets: tuple[str, ...] = ()
+) -> dict[str, Any]:
+    """Return bounded, redacted fields suitable for a persisted job snapshot."""
+    cause = error.__cause__
+    if cause is None and error.kind is JobErrorKind.INTERNAL:
+        cause = error
+    secret_values = tuple(value for value in secrets if value)
+
+    def scrub(value: str) -> str:
+        for secret in secret_values:
+            value = value.replace(secret, "[REDACTED]")
+        value = _BEARER_PATTERN.sub(r"\1[REDACTED]", value)
+        return _TOKEN_ASSIGNMENT_PATTERN.sub(r"\1[REDACTED]", value)
+
+    def bounded(value: str, limit: int) -> str:
+        value = scrub(value)
+        return value if len(value) <= limit else value[:limit] + "...[TRUNCATED]"
+
+    message = bounded(error.message, 4096)
+    cause_record = None if cause is None else {
+        "type": type(cause).__qualname__,
+        "message": bounded(str(cause) or type(cause).__name__, 4096),
+    }
+    if cause is None:
+        rendered = "".join(traceback.format_exception(error))
+    else:
+        rendered = "".join(traceback.format_exception(cause))
+    rendered = scrub(rendered)
+    truncated = len(rendered) > DIAGNOSTIC_TRACEBACK_LIMIT
+    if truncated:
+        marker = "...[TRUNCATED]"
+        rendered = rendered[: DIAGNOSTIC_TRACEBACK_LIMIT - len(marker)] + marker
+    return {
+        "error_message": message,
+        "error_cause": cause_record,
+        "error_traceback": rendered or None,
+        "error_traceback_truncated": truncated,
+        "error_origin": origin or getattr(error, "origin", None),
+    }
 
 
 class JobErrorKind(StrEnum):
@@ -154,6 +204,7 @@ class JobError(Exception):
         run_id: str | None = None,
         cause: BaseException | None = None,
         remediation: str | None = None,
+        origin: str | None = None,
     ) -> None:
         if not isinstance(kind, JobErrorKind):
             raise TypeError(f"kind must be a JobErrorKind, got {type(kind).__name__}")
@@ -165,6 +216,7 @@ class JobError(Exception):
         self.run_id = run_id
         self.__cause__ = cause
         self._remediation = remediation
+        self.origin = origin
 
     @property
     def retryable(self) -> bool:
@@ -182,6 +234,7 @@ class JobError(Exception):
         job_id: str | None = None,
         shot_id: str | None = None,
         run_id: str | None = None,
+        origin: str | None = None,
     ) -> JobError:
         """Classify any exception. Unknown failures become INTERNAL; `exc` is kept as cause.
 
@@ -191,6 +244,7 @@ class JobError(Exception):
             exc.job_id = exc.job_id or job_id
             exc.shot_id = exc.shot_id or shot_id
             exc.run_id = exc.run_id or run_id
+            exc.origin = exc.origin or origin
             return exc
         return cls(
             _kind_of_foreign_exception(exc),
@@ -199,6 +253,7 @@ class JobError(Exception):
             shot_id=shot_id,
             run_id=run_id,
             cause=exc,
+            origin=origin,
         )
 
     def to_log_record(self) -> dict[str, Any]:

@@ -17,7 +17,7 @@ from orchestrator.domain.entities import Job
 from orchestrator.jobs.journal import append_job
 from orchestrator.jobs.lease import GpuLease, NvmlProbe
 from orchestrator.platform.containment import ATOMIC_WRITE_DIRECTORY, ProjectRoot
-from orchestrator.platform.errors import JobError, JobErrorKind
+from orchestrator.platform.errors import JobError, JobErrorKind, failure_diagnostics
 from orchestrator.platform.settings import Settings
 from orchestrator.store.json_store import ProjectStore
 
@@ -380,6 +380,19 @@ class JobQueue:
     def _transition(self, job: Job, state: str, *, error: JobError | None = None) -> None:
         job.state = state
         job.error_kind = error.kind.value if error else None
+        if error is None:
+            job.error_message = None
+            job.error_cause = None
+            job.error_traceback = None
+            job.error_traceback_truncated = False
+            job.error_origin = None
+        else:
+            origin = error.origin or ("job_queue" if error.kind is JobErrorKind.INTERNAL else None)
+            details = failure_diagnostics(
+                error, origin=origin, secrets=self.settings.diagnostic_secrets()
+            )
+            for name, value in details.items():
+                setattr(job, name, value)
         self._persist(job)
 
     def _persist(self, job: Job) -> None:

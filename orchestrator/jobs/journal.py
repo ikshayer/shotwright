@@ -22,6 +22,7 @@ class JobJournalError(ValueError):
 
 def append_job(root: ProjectRoot, job: Job) -> None:
     """Append a complete JSON snapshot through the project's contained writer."""
+    job.log_path = f"{JOB_DIRECTORY}/{job.job_id}.jsonl"
     record = job.model_dump(mode="json")
     _validate_record(record)
     root.append_line(f"{JOB_DIRECTORY}/{job.job_id}.jsonl", json.dumps(record, sort_keys=True))

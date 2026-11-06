@@ -430,6 +430,11 @@ class Job(Entity):
     progress: float = Field(0.0, ge=0, le=1)
     attempts: int = Field(0, ge=0)
     error_kind: str | None = None
+    error_message: str | None = None
+    error_cause: dict[str, str] | None = None
+    error_traceback: str | None = None
+    error_traceback_truncated: bool = False
+    error_origin: str | None = None
     resource_metrics: dict[str, float] = Field(default_factory=dict)
     log_path: str | None = None
     shot_id: str | None = None

@@ -281,6 +281,7 @@ def create_app(
     configured = settings
     if not token:
         raise ValueError("a loopback token must be provided")
+    configured.register_runtime_secret(token)
     root = ProjectRoot(
         configured.project_root,
         use_windows_share_delete_reads=configured.use_windows_share_delete_reads,
