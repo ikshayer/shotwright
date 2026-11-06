@@ -338,7 +338,7 @@ def _measured_dvr_2005_defaults() -> tuple[CameraProfile, PostProfile]:
         name=measured["profile_id"],
         semver=measured["profile_version"],
         stages=stages,
-        pinned_binaries={"ffmpeg": results["ffmpeg"]},
+        pinned_binaries={"ffmpeg": results["ffmpeg_full_identity"]},
         filter_graph_hash=results["filter_graph_hash"],
         output_fps=measured["output_fps"],
         storage_resolution=tuple(measured["storage_resolution"]),

@@ -329,6 +329,12 @@ def test_fresh_project_materializes_default_profiles_on_disk_and_composes_withou
     assert camera_profile.camera_id == "dvr-2005"
     assert post_profile.name == saved_project.output_profile == "dvr-2005"
     assert post_profile.semver == measured["profile_version"]
+    ffmpeg_identity = post_profile.pinned_binaries["ffmpeg"]
+    ffmpeg_identity_lines = ffmpeg_identity.splitlines()
+    assert ffmpeg_identity.startswith("ffmpeg version ")
+    assert len(ffmpeg_identity_lines) > 1
+    assert any(line.startswith("configuration: ") for line in ffmpeg_identity_lines)
+    assert any(line.startswith("libav") for line in ffmpeg_identity_lines)
     assert [stage.name for stage in post_profile.stages] == [stage["name"] for stage in measured["stages"]]
     for actual, source in zip(post_profile.stages, measured["stages"], strict=True):
         expected_params = dict(source.get("params", {}))
