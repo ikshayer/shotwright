@@ -16,6 +16,8 @@ Two things here are load-bearing rather than descriptive:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from datetime import date, datetime
 from enum import StrEnum
@@ -416,6 +418,68 @@ class Timeline(Entity):
         """Derived, never stored: a stored total can contradict the entries."""
         return max((e.start_sec + e.duration_sec for e in self.entries), default=0.0)
 
+    @property
+    def content_sha256(self) -> str:
+        """Stable digest of the declarative cut, independent of store metadata."""
+        payload = json.dumps(
+            self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+
+class EpisodeOutput(Entity):
+    """Immutable receipt for a rendered episode cut, separate from per-shot outputs."""
+
+    output_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_-]+$")
+    episode_id: str = Field(min_length=1)
+    kind: Literal["cut"] = "cut"
+    timeline_store_version: StrictInt = Field(ge=1)
+    timeline_sha256: str
+    relative_path: str = Field(min_length=1)
+    content_sha256: str
+    delivery_profile: str = Field(min_length=1)
+    storage_resolution: tuple[StrictInt, StrictInt]
+    output_fps: StrictInt = Field(gt=0)
+    sample_aspect_ratio: str = Field(min_length=1)
+    ffmpeg_identity: str = Field(min_length=1)
+
+    @field_validator("storage_resolution")
+    @classmethod
+    def _positive_storage_resolution(cls, value: tuple[int, int]) -> tuple[int, int]:
+        if len(value) != 2 or any(dimension <= 0 for dimension in value):
+            raise ValueError("storage_resolution must contain two positive dimensions")
+        return value
+
+    @field_validator("relative_path")
+    @classmethod
+    def _relative_artifact_path(cls, value: str) -> str:
+        if "\x00" in value:
+            raise ValueError("relative_path must not contain NUL")
+        posix = PurePosixPath(value)
+        windows = PureWindowsPath(value)
+        if posix.is_absolute() or windows.is_absolute() or windows.drive:
+            raise ValueError("relative_path must be project-relative")
+        if any(part == ".." for part in value.replace("\\", "/").split("/")):
+            raise ValueError("relative_path must not traverse above its project-relative location")
+        return value
+
+    @field_validator("content_sha256", "timeline_sha256")
+    @classmethod
+    def _sha256_hex(cls, value: str) -> str:
+        if not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ValueError("hash must be 64 lowercase hexadecimal characters")
+        return value
+
+    @field_validator("sample_aspect_ratio")
+    @classmethod
+    def _positive_sample_aspect_ratio(cls, value: str) -> str:
+        parts = value.replace(":", "/").split("/")
+        if (len(parts) != 2 or not all(part.isdigit() for part in parts)
+                or any(int(part) <= 0 for part in parts)):
+            raise ValueError("sample_aspect_ratio must be a positive N:D ratio")
+        return value
+
 
 # --------------------------------------------------------------------------
 # provenance and rights
@@ -645,7 +709,7 @@ _assert_camera_profile_fully_tagged()
 
 __all__ = [
     "ArtifactScheduleEntry", "Asset", "Attestation", "Beat", "CameraMode", "CameraProfile",
-    "Episode", "Export", "GenerationRun", "Invalidation", "Job", "Location",
+    "Episode", "EpisodeOutput", "Export", "GenerationRun", "Invalidation", "Job", "Location",
     "PostProfile", "PostProfileEncode", "PostProfileOverlay", "PostStage", "Project",
     "Reference", "Review", "RubricScores",
     "Script", "Shot", "ShotOutput", "ShotOutputKind", "StyleBible", "StyleClaim",

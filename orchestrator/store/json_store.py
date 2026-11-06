@@ -45,6 +45,7 @@ from orchestrator.domain.base import SCHEMA_VERSION, Entity, ShotStatus, Version
 from orchestrator.domain.entities import (
     CameraProfile,
     Episode,
+    EpisodeOutput,
     Location,
     PostProfile,
     Project,
@@ -347,6 +348,72 @@ class ProjectStore:
                 outputs.append(output)
             return tuple(outputs)
 
+    def append_episode_output(self, output: EpisodeOutput, *, expected_version: int) -> int:
+        """Append an immutable episode-cut receipt with its own ledger token."""
+        if type(expected_version) is not int or expected_version < 0:
+            raise _invalid("EpisodeOutput expected_version must be a non-negative ledger token")
+        with self._lock:
+            try:
+                output = EpisodeOutput.model_validate(output.model_dump(mode="python"))
+            except (ValidationError, AttributeError, TypeError) as exc:
+                raise _invalid(f"invalid EpisodeOutput: {exc}", cause=exc) from exc
+            self.load(Episode, output.episode_id)
+            try:
+                timeline, timeline_token = self.load_with_version(Timeline, output.episode_id)
+            except RecordNotFound as exc:
+                raise _invalid(
+                    f"EpisodeOutput for {output.episode_id!r} has no persisted Timeline",
+                    cause=exc,
+                ) from exc
+            if timeline_token != output.timeline_store_version:
+                raise VersionConflict(
+                    f"episodes/{output.episode_id}/edits/timeline.json",
+                    output.timeline_store_version, timeline_token, timeline,
+                )
+            if timeline.content_sha256 != output.timeline_sha256:
+                raise _invalid("EpisodeOutput timeline_sha256 does not match the persisted Timeline")
+            ledger = self._episode_output_directory(output.episode_id)
+            existing = self._episode_output_files(ledger)
+            current_token = len(existing)
+            if expected_version != current_token:
+                current: Entity = (
+                    self._read_episode_output(existing[-1][1], token=existing[-1][0],
+                                              episode_id=output.episode_id)[0]
+                    if existing else timeline
+                )
+                raise VersionConflict(
+                    f"episode_outputs/{output.episode_id}", expected_version, current_token, current,
+                )
+            prior = [self._read_episode_output(relative, token=token,
+                                               episode_id=output.episode_id)[0]
+                     for token, relative in existing]
+            if any(item.output_id == output.output_id for item in prior):
+                raise _invalid(f"EpisodeOutput output_id {output.output_id!r} already exists")
+            self._verify_episode_output_artifact(output)
+            token = current_token + 1
+            relative = self._episode_output_path(output.episode_id, token, output.output_id)
+            if self._resolve(relative).exists():
+                raise _invalid(f"EpisodeOutput destination already exists: {relative}")
+            self._write(relative, output, mutation_token=token,
+                        predecessor_token=current_token)
+            return token
+
+    def list_episode_outputs(self, episode_id: str) -> tuple[EpisodeOutput, ...]:
+        """Return verified cut receipts in append order."""
+        with self._lock:
+            self.load(Episode, episode_id)
+            directory = self._episode_output_directory(episode_id)
+            found = self._episode_output_files(directory)
+            outputs: list[EpisodeOutput] = []
+            for expected_token, relative in found:
+                output, token = self._read_episode_output(
+                    relative, token=expected_token, episode_id=episode_id,
+                )
+                if token != expected_token:
+                    raise _invalid(f"{relative} mutation token does not match its filename")
+                outputs.append(output)
+            return tuple(outputs)
+
     # -- writes ----------------------------------------------------------------------
 
     def save(self, entity: Entity, *, expected_version: int) -> int:
@@ -604,6 +671,14 @@ class ProjectStore:
                           output_id: str) -> str:
         return f"{cls._shot_output_directory(episode_id, shot_id)}/o{token:08d}-{output_id}.json"
 
+    @staticmethod
+    def _episode_output_directory(episode_id: str) -> str:
+        return f"episodes/{episode_id}/outputs/cut_receipts"
+
+    @classmethod
+    def _episode_output_path(cls, episode_id: str, token: int, output_id: str) -> str:
+        return f"{cls._episode_output_directory(episode_id)}/o{token:08d}-{output_id}.json"
+
     def _shot_output_files(self, directory: str) -> list[tuple[int, str]]:
         path = self._resolve(directory)
         if not path.exists():
@@ -621,6 +696,24 @@ class ProjectStore:
         for expected, (token, relative) in enumerate(found, start=1):
             if token != expected:
                 raise _invalid(f"{relative} does not advance the ShotOutput ledger token exactly once")
+        return found
+
+    def _episode_output_files(self, directory: str) -> list[tuple[int, str]]:
+        path = self._resolve(directory)
+        if not path.exists():
+            return []
+        if not path.is_dir():
+            raise _invalid(f"EpisodeOutput ledger path is not a directory: {directory}")
+        found: list[tuple[int, str]] = []
+        for item in path.iterdir():
+            match = _SHOT_OUTPUT_FILE.fullmatch(item.name)
+            if match is None:
+                raise _invalid(f"unexpected entry in EpisodeOutput ledger: {item.name!r}")
+            found.append((int(match.group(1)), f"{directory}/{item.name}"))
+        found.sort()
+        for expected, (token, relative) in enumerate(found, start=1):
+            if token != expected:
+                raise _invalid(f"{relative} does not advance the EpisodeOutput ledger token exactly once")
         return found
 
     def _read_shot_output(self, relative: str, *, token: int, episode_id: str,
@@ -658,6 +751,37 @@ class ProjectStore:
         self._verify_shot_output_artifact(output)
         return output, metadata
 
+    def _read_episode_output(self, relative: str, *, token: int,
+                             episode_id: str) -> tuple[EpisodeOutput, int]:
+        match = _SHOT_OUTPUT_FILE.fullmatch(Path(relative).name)
+        if match is None or int(match.group(1)) != token:
+            raise _invalid(f"{relative} filename does not match its expected ledger token")
+        try:
+            data = json.loads(self._read_text(relative))
+        except FileNotFoundError as exc:
+            raise RecordNotFound(f"{relative} does not exist") from exc
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise _invalid(f"cannot read EpisodeOutput {relative}: {exc}", cause=exc) from exc
+        self._require_readable_schema(relative, data)
+        if not isinstance(data, dict):
+            raise _invalid(f"{relative} is not a JSON object")
+        metadata = data.pop("_mutation_token", None)
+        predecessor = data.pop("_predecessor_token", None)
+        if (type(metadata) is not int or metadata != token
+                or type(predecessor) is not int or predecessor != token - 1):
+            raise _invalid(f"{relative} has inconsistent EpisodeOutput ledger metadata")
+        try:
+            output = EpisodeOutput.model_validate(data)
+        except ValidationError as exc:
+            raise _invalid(f"{relative} does not match EpisodeOutput: {exc}", cause=exc) from exc
+        if match.group(2) != output.output_id:
+            raise _invalid(f"{relative} filename output_id does not match its payload")
+        if output.episode_id != episode_id:
+            raise _invalid(f"{relative} Episode identity does not match its ledger")
+        self.load(Episode, output.episode_id)
+        self._verify_episode_output_artifact(output)
+        return output, metadata
+
     def _verify_shot_output_artifact(self, output: ShotOutput) -> None:
         try:
             artifact = self._root.resolve(output.relative_path)
@@ -674,6 +798,23 @@ class ProjectStore:
             raise _invalid(f"cannot hash ShotOutput artifact {output.relative_path}: {exc}", cause=exc) from exc
         if digest.hexdigest() != output.content_sha256:
             raise _invalid(f"ShotOutput artifact hash mismatch: {output.relative_path}")
+
+    def _verify_episode_output_artifact(self, output: EpisodeOutput) -> None:
+        try:
+            artifact = self._root.resolve(output.relative_path)
+        except ContainmentError as exc:
+            raise _invalid(f"EpisodeOutput artifact path escapes the project: {exc}", cause=exc) from exc
+        if not artifact.is_file():
+            raise _invalid(f"EpisodeOutput artifact is missing or not a file: {output.relative_path}")
+        digest = hashlib.sha256()
+        try:
+            with artifact.open("rb") as stream:
+                while block := stream.read(1024 * 1024):
+                    digest.update(block)
+        except OSError as exc:
+            raise _invalid(f"cannot hash EpisodeOutput artifact {output.relative_path}: {exc}", cause=exc) from exc
+        if digest.hexdigest() != output.content_sha256:
+            raise _invalid(f"EpisodeOutput artifact hash mismatch: {output.relative_path}")
 
     @staticmethod
     def _version_path(directory: str, version: int) -> str:
