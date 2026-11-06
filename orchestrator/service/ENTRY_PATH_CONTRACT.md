@@ -122,3 +122,72 @@ Baseline on `main`: **1233 passed, 30 skipped**, ruff clean, about 160 s.
 **The real acceptance criterion is the pipeline, not the suite.** When this lands it must be
 possible to drive project → episode → script → shots entirely through the CLI, and reach
 `build_scene`. The parent re-runs the Phase 1 attempt to confirm it.
+
+## Amendment 1 — adjudication, and the gap that matters most
+
+The implementer and the independent test author **agreed on the first combination** —
+**1285 passed, 31 skipped**, ruff clean, 151.84 s. They also chose the same request
+envelopes and the same resolution for the Episode versioning problem without consulting
+each other, which is what a settled contract produces. That is now twice in a row.
+
+**The entry path is open.** The implementer drove the real Click CLI end to end:
+
+```
+create-project -> create-episode -> draft-script -> propose-shots -> build-scene
+```
+
+and `build-scene` submitted a job that reached `queued`, `running`, `failed`, returning
+`job_error` with kind `internal` — **not** `missing_adapter`. The pipeline is reachable
+through the required surface for the first time.
+
+### Ratified
+
+- **Request envelopes are `{"episode": ...}`, `{"script": ...}`, `{"shots": [...]}`.**
+  Both agents chose these independently; they match `ScriptRevision`'s existing shape.
+- Creation uses the store's defined creation token, **0**. Scripts and shots go through
+  `store.create()`; episodes through `store.save(..., expected_version=0)`.
+- Creation enters the service boundary under `store.command()` and runs **no** invalidation
+  cascade, as required.
+- The `501` set is exactly `search_assets`, `create_asset`, `sample_references`, `export`,
+  `apply_typed_feedback`.
+
+### The whole-table guard now exists, and it is the most valuable thing here
+
+`tests/api/test_entry_path.py::test_every_route_is_implemented_or_deliberately_501`
+derives its cases from `operations(app)` and compares the observed `501`s against the five
+deliberate absences. **A newly registered operation that falls through to `MissingAdapter`
+now fails it automatically.**
+
+This is the hole that let a missing entry path survive nine rounds of contract work and
+1233 passing tests: `test_adapters.py` asserted behaviour for seven operations out of
+nineteen, and the two broken ones were on neither its list nor any implemented path. Two
+of this contract's own amendments then enumerated the surviving `501` set in a way that
+*implied* they worked. Do not replace this test with a hand-maintained list.
+
+### Corrected: "at version 1" was wrong for Episode
+
+This contract said all three records are persisted "at version 1". The test author caught
+that **`Episode` inherits `Entity`, not `VersionedEntity`**, and has no content `version`
+field at all; both agents resolved it the same way and both reported it.
+
+**Binding:** `Script` and `Shot` are persisted at **content version 1**. An `Episode` has no
+content version; what holds for it is that its **first store mutation token is 1**. Do not
+add a content version to `Episode` to make the sentence true — the asymmetry is in the
+domain by design, and the contract was simply sloppy about it.
+
+### Still open, and the first one is urgent
+
+- **A failed job records no cause and no log path.** `build-scene` failed with kind
+  `internal` and the implementer could not tell whether that was an adapter failure or a
+  runner failure, because the job record carries neither a message nor a `log_path` —
+  despite `Job.log_path` existing as a field. FR-27 exists so that a failure names what to
+  do about it, and right now the pipeline's first real failure is **undiagnosable**. This
+  must be fixed before the Phase 1 run is retried; otherwise the run teaches us nothing.
+- **There are no read routes for episodes, scripts or shots.** The API offers
+  `load_project` and nothing else, so the test author had to verify post-create readability
+  through `ProjectStore` directly. An agent or UI can create a script and then has no way to
+  fetch it back. FR-10's review surface will need these.
+- **Partial shot-proposal failure is implemented but untested.** The implementer reports
+  written and unwritten shot ids; the test author declined to cover it because this contract
+  never defined rollback behaviour, a response shape, or a failure-injection boundary.
+  Define those before relying on it.
