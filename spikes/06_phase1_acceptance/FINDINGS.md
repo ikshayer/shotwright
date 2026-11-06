@@ -127,3 +127,93 @@ Phase 1's range, any encode, any degradation, and the rubric. The budget ceiling
 raised for this run (3600 s wall clock, 60 GPU-minutes) because the defaults are
 UNMEASURED PLACEHOLDERs; at 294.8 s the **default** 900 s wall clock would in fact have
 held for 15 s, and on these numbers a 30-second shot at ~590 s would too.
+
+# Second acceptance run — with an anomaly, and with master assembly
+
+Run 2026-11-06, after FR-20 anomaly staging, scene animation and master assembly landed.
+Same harness (`run_spike.py`), now proposing a `linear_walk_path` anomaly and attempting
+degradation.
+
+## What is now true that was not
+
+**The frames differ.** Decoded to raw RGB24 and hashed: frames 1, 300 and 480 are
+identical; frames 520, 600 and 900 are each distinct. `event_sec = 8.0` is frame 480 at the
+60 fps master, so **the scene is static until exactly the declared event frame and changes
+from there** — the anomaly's timing is driven by `Shot.event_sec` as FR-20 requires, not by
+a duplicate field. Compare decoded pixels, never EXR file hashes: the files differ in
+embedded metadata even when the pictures are identical, which is how the first run's 900
+identical frames went unnoticed.
+
+**The master is one assembled file.** The `master` receipt points at
+`renders/s1/v0001/<run>/attempt-0001/master.mkv`, not at `frame_000001.exr`, and carries
+`engine_id BLENDER_EEVEE`, `engine_build fbe6228777e7`. Probed: **FFV1, 1280×960,
+gbrp16le, 60/1 fps, duration exactly 15.000000 s**. Both of the defects the first run
+exposed are closed and proven end to end, not just in tests.
+
+## Costs, measured
+
+| | First run | This run |
+|---|---:|---:|
+| `render-master` wall clock | 294.8 s | **996.7 s** |
+| Job `elapsed_seconds` | 294.5 | 988.6 |
+| VRAM baseline → peak | 1936.8 → 3041.8 MB | 2266.6 → 3360.7 MB |
+| Frames on disk | 1.76 GB | 1.76 GB |
+| Master on disk | — | **2.40 GB** |
+
+The anomaly adds one object and cannot account for the difference, so **master assembly
+costs roughly 690 s** — about 0.77 s per frame, more than twice the 0.323 s/frame the
+render itself takes.
+
+**Two findings follow, and the first is actionable.**
+
+1. **The encode is single-threaded.** The argv passes `-threads 1`, presumably for
+   bit-exactness. FFV1 supports deterministic multi-threading through fixed slice counts
+   (`-slices`), so a substantial speedup is likely available **without** giving up the
+   byte-identical reproducibility AT-05 requires. This should be measured before anyone
+   accepts 690 s as the cost of a master. It was not measured here.
+2. **A lossless master is larger than its lossless source.** 2.40 GB of FFV1 from 1.76 GB
+   of EXR, because the conversion to 16-bit RGB full range discards EXR's compression
+   without discarding information. Total for one 15-second shot is **4.16 GB** against a
+   `disk_ceiling_gb` default of 40 — about **nine shots per project**, before any
+   degradation output. Retention of the frame intermediates is out of scope here but is now
+   clearly load-bearing, not housekeeping.
+
+This is a real cost of the orchestrator's Decision 2 (lossless master). The determinism
+argument for it stands — a lossy master bakes in artifacts no `PostProfile` asked for, and
+AT-05 needs a stable input — but the price is now known and should be weighed rather than
+assumed.
+
+## Degradation is still unreachable, as predicted
+
+```
+PostProfile 'dvr-2005' cannot be composed; missing persisted field: overlay.font_relative
+```
+
+Amendment 3 made the overlay font a profile field, because a caller-supplied font makes
+AT-05's byte-identical guarantee unenforceable. The profile that `create-project` seeds
+predates the field, so **every existing project is now unable to degrade until its profile
+gains a font**. The field was kept optional on the model so schema-v1 profiles still load,
+and composition rejects them loudly instead — which is the right failure, but it is a
+migration gap, and the repository has **no registered FR-28 migration mechanism**.
+
+This was left to fail rather than hand-patched, so the gap is visible in the record.
+
+## What the anomaly actually looks like
+
+The figure is placed correctly: right perspective, occluded by the room's clutter, walking
+the declared path at roughly 4.3 m from the camera, within the shot's declared 2.0 m
+minimum and 400 px ceiling. **It is a featureless dark rectangular prism** — a box proxy,
+not a humanoid mesh.
+
+So FR-20's *staging* is proven and its *appearance* is a placeholder. §4.3 criterion 5 asks
+that "the horror element sits inside the recording rather than pasted over it"; a box is
+inside the recording, and it is not yet a figure. Closing that needs either a humanoid
+proxy mesh or §9's routing method 3 (a generated image insert), and the projection spike's
+adjudication already warns that a pasted insert struggles with contact shadow and depth.
+
+## Still not done
+
+No rubric score. No degraded delivery. The scene is still `synthetic_interior()`, so the
+Script does not drive geometry. A viewable H.264 copy of the master is at
+`D:\Work\video_pipeline\_work\phase1_shot_v2.mp4` — it is a convenience for inspection and
+is **not** a pipeline output.

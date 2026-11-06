@@ -91,12 +91,30 @@ def main_run() -> None:
     # Project.output_profile ("dvr-2005"), so creating it again is a version_conflict
     # against the stored version 1. The composer resolves the seeded one by name.
 
+    # A figure walks across the room at event_sec. The spike-02 room is 6x4x2.7 m with the
+    # camera at (-2.75, -1.75, 2.52), so a path along x=1.5 keeps the figure about 4.3 m
+    # away -- comfortably past the 2.0 m minimum this shot declares. At 12 mm on a 36 mm
+    # sensor, focal_px = 12*1280/36 = 426.7, so a 1.8 m figure at 4.3 m projects to roughly
+    # 180 px; the 400 px cap is the shot's declared ceiling, not a fitted number.
+    anomaly = {
+        "kind": "linear_walk_path",
+        "timing": {"duration_sec": 3.0},
+        "subtlety": 2,
+        "height_m": 1.8,
+        "width_m": 0.5,
+        "depth_m": 0.35,
+        "minimum_distance_m": 2.0,
+        "maximum_on_frame_height_px": 400,
+        "path": [[1.5, -1.0, 0.0], [1.5, 1.5, 0.0]],
+    }
+
     run("propose-shots", [
         "propose-shots", "--json", "--project-id", PROJECT_ID, "--episode-id", EPISODE_ID,
         "--data", json.dumps({"shots": [{
             "shot_id": SHOT_ID, "episode_id": EPISODE_ID,
             "duration_sec": DURATION_SEC, "event_sec": 8.0,
             "camera_profile": CAMERA_ID,
+            "anomaly": anomaly,
         }]}),
     ])
 
@@ -109,6 +127,17 @@ def main_run() -> None:
         "render-master", "--json", "--project-id", PROJECT_ID,
         "--episode-id", EPISODE_ID, "--shot-id", SHOT_ID,
     ])
+
+    # Degradation is attempted but NOT allowed to fail the run: Amendment 3 made
+    # PostProfileOverlay.font_relative required at composition, and the profile seeded by
+    # create-project predates it. Whether this step works is itself the finding.
+    try:
+        run("degrade-media", [
+            "degrade-media", "--json", "--project-id", PROJECT_ID,
+            "--episode-id", EPISODE_ID, "--shot-id", SHOT_ID,
+        ])
+    except SystemExit as exc:
+        print(f"--- degrade-media FAILED (recorded, not fatal): {exc}", flush=True)
 
     run("report-jobs", ["report-jobs", "--json", "--project-id", PROJECT_ID])
 
