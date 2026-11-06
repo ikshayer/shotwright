@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from orchestrator.adapters.blender.scene import build_scene_plan
+import pytest
+
+from orchestrator.adapters.blender.scene import build_scene_plan, synthetic_interior
 from orchestrator.domain.anomaly import AnomalySpec
 from orchestrator.domain.entities import CameraProfile, Episode, Project, Shot
 from orchestrator.platform.containment import ProjectRoot
@@ -53,12 +55,19 @@ def _compose_plan(tmp_path: Path, anomaly: AnomalySpec | None, *, event_sec: flo
     return build_scene_plan(request)
 
 
-def test_shot_without_anomaly_composes_to_the_current_static_plan(tmp_path: Path) -> None:
+def test_shot_without_anomaly_composes_to_the_current_static_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from orchestrator.service import compose as compose_service
     from tests.adapters.blender.test_anomaly_plan_contract import (
         _STATIC_PLAN_SHA256,
         _canonical_plan_bytes,
     )
 
+    # This hash is the synthetic fixture's worker-plan contract, so supply that
+    # SceneSpec explicitly instead of inheriting whichever room the composer selects.
+    expected_scene = synthetic_interior()
+    monkeypatch.setattr(compose_service, "american_living_room", lambda: expected_scene)
     plan = _compose_plan(tmp_path, None, event_sec=0.5)
     observed = hashlib.sha256(_canonical_plan_bytes(plan)).hexdigest()
 

@@ -1,0 +1,311 @@
+[
+  {
+    "run_id": "after-living-room",
+    "wall_seconds": 142.84400000000005,
+    "nvml": {
+      "delta_bytes": 1155567616,
+      "device": {
+        "device_index": 0,
+        "name": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+        "pci_bus_id": "00000000:64:00.0",
+        "uuid": "GPU-1d191f2c-f7d6-2a33-e652-b197ef7b6906"
+      },
+      "error": null,
+      "idle_baseline_bytes": 1740075008,
+      "peak_bytes": 2895642624,
+      "sample_count": 1319,
+      "sampling_interval_seconds": 0.1,
+      "source": "device-wide NVML; includes other processes"
+    },
+    "frames_requested": 120,
+    "warm_receipt_mean_seconds": 0.8570084033613439,
+    "return_code": 0,
+    "configuration": {
+      "camera_location": [
+        -2.48,
+        -1.85,
+        2.25
+      ],
+      "camera_target": [
+        0.2,
+        0.5,
+        0.2
+      ],
+      "engine": "eevee",
+      "exposure_ev": 0.0,
+      "frames": 120,
+      "height": 960,
+      "lens_mm": 12.0,
+      "practical_light_color_k": 3200,
+      "samples": 32,
+      "threads": 8,
+      "width": 1280
+    },
+    "other_blender_processes_observed": [],
+    "process_sampling_errors": []
+  },
+  {
+    "run_id": "before-clean",
+    "wall_seconds": 135.79700000000003,
+    "nvml": {
+      "delta_bytes": 1153404928,
+      "device": {
+        "device_index": 0,
+        "name": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+        "pci_bus_id": "00000000:64:00.0",
+        "uuid": "GPU-1d191f2c-f7d6-2a33-e652-b197ef7b6906"
+      },
+      "error": null,
+      "idle_baseline_bytes": 1740075008,
+      "peak_bytes": 2893479936,
+      "sample_count": 1252,
+      "sampling_interval_seconds": 0.1,
+      "source": "device-wide NVML; includes other processes"
+    },
+    "frames_requested": 120,
+    "warm_receipt_mean_seconds": 0.8187983193277303,
+    "return_code": 0,
+    "configuration": {
+      "camera_location": [
+        -2.48,
+        -1.85,
+        2.25
+      ],
+      "camera_target": [
+        0.2,
+        0.5,
+        0.2
+      ],
+      "engine": "eevee",
+      "exposure_ev": 0.0,
+      "frames": 120,
+      "height": 960,
+      "lens_mm": 12.0,
+      "practical_light_color_k": 3200,
+      "samples": 32,
+      "threads": 8,
+      "width": 1280
+    },
+    "other_blender_processes_observed": [],
+    "process_sampling_errors": []
+  },
+  {
+    "run_id": "before-final",
+    "wall_seconds": 163.10899999999992,
+    "nvml": {
+      "delta_bytes": 2309824512,
+      "device": {
+        "device_index": 0,
+        "name": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+        "pci_bus_id": "00000000:64:00.0",
+        "uuid": "GPU-1d191f2c-f7d6-2a33-e652-b197ef7b6906"
+      },
+      "error": null,
+      "idle_baseline_bytes": 1632686080,
+      "peak_bytes": 3942510592,
+      "sample_count": 1511,
+      "sampling_interval_seconds": 0.1,
+      "source": "device-wide NVML; includes other processes"
+    },
+    "frames_requested": 120,
+    "warm_receipt_mean_seconds": 1.6087466666666659,
+    "return_code": 15,
+    "configuration": {
+      "camera_location": [
+        -2.48,
+        -1.85,
+        2.25
+      ],
+      "camera_target": [
+        0.2,
+        0.5,
+        0.2
+      ],
+      "engine": "eevee",
+      "exposure_ev": 0.0,
+      "frames": 120,
+      "height": 960,
+      "lens_mm": 12.0,
+      "practical_light_color_k": 3200,
+      "samples": 32,
+      "threads": 8,
+      "width": 1280
+    },
+    "other_blender_processes_observed": "not monitored in this version",
+    "process_sampling_errors": "not monitored in this version"
+  },
+  {
+    "run_id": "before-greybox",
+    "wall_seconds": 42.58759009999994,
+    "nvml": {
+      "delta_bytes": 2292260864,
+      "error": null,
+      "idle_baseline_bytes": 1551273984,
+      "peak_bytes": 3843534848,
+      "sample_count": 399,
+      "sampling_interval_seconds": 0.1,
+      "source": "device-wide NVML; includes other processes"
+    },
+    "frames_requested": 1,
+    "warm_receipt_mean_seconds": null,
+    "return_code": 0,
+    "configuration": {
+      "camera_location": [
+        -2.48,
+        -1.85,
+        2.25
+      ],
+      "camera_target": [
+        0.25,
+        0.6,
+        0.85
+      ],
+      "engine": "eevee",
+      "exposure_ev": 0.0,
+      "frames": 1,
+      "height": 960,
+      "lens_mm": 12.0,
+      "practical_light_color_k": 3200,
+      "samples": 32,
+      "threads": 8,
+      "width": 1280
+    },
+    "other_blender_processes_observed": "not monitored in this version",
+    "process_sampling_errors": "not monitored in this version"
+  },
+  {
+    "run_id": "before-isolated",
+    "wall_seconds": 143.40599999999995,
+    "nvml": {
+      "delta_bytes": 2301370368,
+      "device": {
+        "device_index": 0,
+        "name": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+        "pci_bus_id": "00000000:64:00.0",
+        "uuid": "GPU-1d191f2c-f7d6-2a33-e652-b197ef7b6906"
+      },
+      "error": null,
+      "idle_baseline_bytes": 1637470208,
+      "peak_bytes": 3938840576,
+      "sample_count": 1329,
+      "sampling_interval_seconds": 0.1,
+      "source": "device-wide NVML; includes other processes"
+    },
+    "frames_requested": 120,
+    "warm_receipt_mean_seconds": 0.8960084033613446,
+    "return_code": 0,
+    "configuration": {
+      "camera_location": [
+        -2.48,
+        -1.85,
+        2.25
+      ],
+      "camera_target": [
+        0.2,
+        0.5,
+        0.2
+      ],
+      "engine": "eevee",
+      "exposure_ev": 0.0,
+      "frames": 120,
+      "height": 960,
+      "lens_mm": 12.0,
+      "practical_light_color_k": 3200,
+      "samples": 32,
+      "threads": 8,
+      "width": 1280
+    },
+    "other_blender_processes_observed": "not monitored in this version",
+    "process_sampling_errors": "not monitored in this version"
+  },
+  {
+    "run_id": "living-v1",
+    "wall_seconds": 39.612827299999935,
+    "nvml": {
+      "delta_bytes": 1153863680,
+      "device": {
+        "device_index": 0,
+        "name": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+        "pci_bus_id": "00000000:64:00.0",
+        "uuid": "GPU-1d191f2c-f7d6-2a33-e652-b197ef7b6906"
+      },
+      "error": null,
+      "idle_baseline_bytes": 1622200320,
+      "peak_bytes": 2776064000,
+      "sample_count": 371,
+      "sampling_interval_seconds": 0.1,
+      "source": "device-wide NVML; includes other processes"
+    },
+    "frames_requested": 1,
+    "warm_receipt_mean_seconds": null,
+    "return_code": 0,
+    "configuration": {
+      "camera_location": [
+        -2.48,
+        -1.85,
+        2.25
+      ],
+      "camera_target": [
+        0.25,
+        0.6,
+        0.85
+      ],
+      "engine": "eevee",
+      "exposure_ev": 0.0,
+      "frames": 1,
+      "height": 960,
+      "lens_mm": 12.0,
+      "practical_light_color_k": 3200,
+      "samples": 32,
+      "threads": 8,
+      "width": 1280
+    },
+    "other_blender_processes_observed": "not monitored in this version",
+    "process_sampling_errors": "not monitored in this version"
+  },
+  {
+    "run_id": "living-v2",
+    "wall_seconds": 68.625,
+    "nvml": {
+      "delta_bytes": 1159442432,
+      "device": {
+        "device_index": 0,
+        "name": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+        "pci_bus_id": "00000000:64:00.0",
+        "uuid": "GPU-1d191f2c-f7d6-2a33-e652-b197ef7b6906"
+      },
+      "error": null,
+      "idle_baseline_bytes": 1637470208,
+      "peak_bytes": 2796912640,
+      "sample_count": 639,
+      "sampling_interval_seconds": 0.1,
+      "source": "device-wide NVML; includes other processes"
+    },
+    "frames_requested": 1,
+    "warm_receipt_mean_seconds": null,
+    "return_code": 0,
+    "configuration": {
+      "camera_location": [
+        -2.48,
+        -1.85,
+        2.25
+      ],
+      "camera_target": [
+        0.2,
+        0.5,
+        0.2
+      ],
+      "engine": "eevee",
+      "exposure_ev": 0.0,
+      "frames": 1,
+      "height": 960,
+      "lens_mm": 12.0,
+      "practical_light_color_k": 3200,
+      "samples": 32,
+      "threads": 8,
+      "width": 1280
+    },
+    "other_blender_processes_observed": "not monitored in this version",
+    "process_sampling_errors": "not monitored in this version"
+  }
+]

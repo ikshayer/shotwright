@@ -1,4 +1,5 @@
 """Pure, serializable scene descriptions and Blender render planning."""
+
 from __future__ import annotations
 
 import math
@@ -33,6 +34,19 @@ class MaterialSpec(_FrozenModel):
     name: str
     color: tuple[float, float, float, float]
     roughness: float = Field(default=0.7, ge=0, le=1)
+    surface: Literal["plain", "wood", "fabric", "plaster", "rug"] = "plain"
+    texture_scale: Vec3 = (1.0, 1.0, 1.0)
+    variation: float = Field(default=0.0, ge=0, le=1)
+    bump_strength: float = Field(default=0.0, ge=0, le=1)
+    emission_strength: float = Field(default=0.0, ge=0)
+    metallic: float = Field(default=0.0, ge=0, le=1)
+
+    @field_validator("texture_scale")
+    @classmethod
+    def valid_texture_scale(cls, value: Vec3) -> Vec3:
+        if any(not math.isfinite(v) or v <= 0 for v in value):
+            raise ValueError("texture_scale must be finite and positive")
+        return value
 
     @field_validator("name")
     @classmethod
@@ -43,7 +57,9 @@ class MaterialSpec(_FrozenModel):
 
     @field_validator("color")
     @classmethod
-    def valid_color(cls, value: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    def valid_color(
+        cls, value: tuple[float, float, float, float]
+    ) -> tuple[float, float, float, float]:
         if any(not math.isfinite(c) or not 0 <= c <= 1 for c in value):
             raise ValueError("color channels must be finite and in [0, 1]")
         return value
@@ -61,10 +77,12 @@ class VisibilityKeyframeSpec(_FrozenModel):
 
 class ObjectSpec(_FrozenModel):
     name: str
-    kind: Literal["box", "cylinder"]
+    kind: Literal["box", "cylinder", "sphere", "cone", "torus"]
     location: Vec3
     dimensions: Vec3
     material: str
+    rotation: Vec3 = (0.0, 0.0, 0.0)
+    bevel: float = Field(default=0.0, ge=0)
     keyframes: tuple[KeyframeSpec, ...] = ()
     visibility_keyframes: tuple[VisibilityKeyframeSpec, ...] = ()
 
@@ -105,6 +123,8 @@ class LightSpec(_FrozenModel):
     color: RGB
     size: float = Field(default=1.1, gt=0)
     energy_keyframes: tuple[LightEnergyKeyframeSpec, ...] = ()
+    kind: Literal["area", "point"] = "area"
+    target: Vec3 | None = None
 
     @field_validator("name")
     @classmethod
@@ -125,6 +145,8 @@ class LightSpec(_FrozenModel):
         frames = [item.frame for item in self.energy_keyframes]
         if len(frames) != len(set(frames)):
             raise ValueError("duplicate light energy keyframe frame")
+        if self.target is not None and math.dist(self.location, self.target) <= 1e-9:
+            raise ValueError("light location and target must not coincide")
         return self
 
 
@@ -156,7 +178,9 @@ class SceneSpec(_FrozenModel):
         known = set(material_names)
         for obj in self.objects:
             if obj.material not in known:
-                raise ValueError(f"object {obj.name!r} references unknown material {obj.material!r}")
+                raise ValueError(
+                    f"object {obj.name!r} references unknown material {obj.material!r}"
+                )
         names = [o.name for o in self.objects] + [l.name for l in self.lights]
         if len(names) != len(set(names)):
             raise ValueError("object and light names must be globally unique")
@@ -210,8 +234,15 @@ class RenderRequest(_FrozenModel):
     @classmethod
     def valid_master_resolution(cls, value: tuple[int, int]) -> tuple[int, int]:
         width, height = value
-        if (not isinstance(width, int) or isinstance(width, bool) or not isinstance(height, int)
-                or isinstance(height, bool) or width < 1280 or height < 960 or width * 3 != height * 4):
+        if (
+            not isinstance(width, int)
+            or isinstance(width, bool)
+            or not isinstance(height, int)
+            or isinstance(height, bool)
+            or width < 1280
+            or height < 960
+            or width * 3 != height * 4
+        ):
             raise ValueError("master_resolution must be positive 4:3 and at least 1280x960")
         return value
 
@@ -236,7 +267,10 @@ def build_scene_plan(request: RenderRequest) -> dict[str, object]:
     profile = request.camera_profile
     width, height = (640, 480) if request.mode == "preview" else request.master_resolution
     camera = _rebuild_camera_fields(profile)
-    if camera["camera_position"] is not None and math.dist(camera["camera_position"], request.scene.camera_target) <= 1e-9:
+    if (
+        camera["camera_position"] is not None
+        and math.dist(camera["camera_position"], request.scene.camera_target) <= 1e-9
+    ):
         raise ValueError("camera_position override must not coincide with scene camera target")
     frame_end = 1 if request.mode == "preview" else max(1, math.ceil(request.duration_sec * 60))
     scene_data = _scene_payload(request, camera)
@@ -281,19 +315,39 @@ def _scene_payload(request: RenderRequest, camera: dict[str, object]) -> dict[st
     if scene.camera_keyframes:
         frames = payload["camera_keyframes"]
         if not any(item["frame"] == 1 for item in frames):
-            frames.insert(0, {
-                "frame": 1,
-                "location": camera["camera_position"] or list(scene.camera_location),
-                "target": list(scene.camera_target),
-            })
+            frames.insert(
+                0,
+                {
+                    "frame": 1,
+                    "location": camera["camera_position"] or list(scene.camera_location),
+                    "target": list(scene.camera_target),
+                },
+            )
     else:
         payload.pop("camera_keyframes", None)
     for spec, item in zip(scene.objects, payload["objects"], strict=True):
         if not spec.visibility_keyframes:
             item.pop("visibility_keyframes", None)
+        for key, default in (("rotation", [0.0, 0.0, 0.0]), ("bevel", 0.0)):
+            if item.get(key) == default:
+                item.pop(key, None)
     for spec, item in zip(scene.lights, payload["lights"], strict=True):
         if not spec.energy_keyframes:
             item.pop("energy_keyframes", None)
+        for key, default in (("kind", "area"), ("target", None)):
+            if item.get(key) == default:
+                item.pop(key, None)
+    for item in payload["materials"]:
+        for key, default in {
+            "surface": "plain",
+            "texture_scale": [1.0, 1.0, 1.0],
+            "variation": 0.0,
+            "bump_strength": 0.0,
+            "emission_strength": 0.0,
+            "metallic": 0.0,
+        }.items():
+            if item.get(key) == default:
+                item.pop(key, None)
     return payload
 
 
@@ -315,11 +369,17 @@ def _apply_anomaly(
         if isinstance(anomaly, LinearWalkPath):
             if frame_end > 1:
                 figure_keys = _path_keyframes(
-                    anomaly.path, event_frame, end_frame, z_offset=anomaly.height_m / 2,
+                    anomaly.path,
+                    event_frame,
+                    end_frame,
+                    z_offset=anomaly.height_m / 2,
                     label="linear_walk_path",
                 )
                 positions = _sample_keyframe_positions(
-                    figure_keys, event_frame, end_frame, z_offset=anomaly.height_m / 2,
+                    figure_keys,
+                    event_frame,
+                    end_frame,
+                    z_offset=anomaly.height_m / 2,
                 )
             else:
                 figure_keys = []
@@ -368,16 +428,20 @@ def _apply_anomaly(
                 frequency_hz=anomaly.frequency_hz,
                 start_frame=event_frame,
                 end_frame=end_frame,
-            ) if frame_end > 1 else []
+            )
+            if frame_end > 1
+            else []
         )
         return
 
     if isinstance(anomaly, DoorOrObjectMovement):
         target = _find_named_item(scene_data["objects"], anomaly.target_object, "object")
         keys = (
-            _path_keyframes(anomaly.path, event_frame, end_frame, z_offset=0.0,
-                            label="door_or_object_movement")
-            if frame_end > 1 else [{"frame": 1, "location": list(anomaly.path[0])}]
+            _path_keyframes(
+                anomaly.path, event_frame, end_frame, z_offset=0.0, label="door_or_object_movement"
+            )
+            if frame_end > 1
+            else [{"frame": 1, "location": list(anomaly.path[0])}]
         )
         _merge_keyframes(target, "keyframes", keys, anomaly.target_object)
         return
@@ -408,23 +472,29 @@ def _append_figure(
     materials = scene["materials"]
     existing_material = next((item for item in materials if item["name"] == material_name), None)
     if existing_material is None:
-        materials.append({
-            "name": material_name,
-            "color": [0.015, 0.015, 0.015, 1.0],
-            "roughness": 0.92,
-        })
+        materials.append(
+            {
+                "name": material_name,
+                "color": [0.015, 0.015, 0.015, 1.0],
+                "roughness": 0.92,
+            }
+        )
     elif existing_material["color"] != [0.015, 0.015, 0.015, 1.0]:
-        raise ValueError(f"material {material_name!r} conflicts with the anomaly silhouette material")
+        raise ValueError(
+            f"material {material_name!r} conflicts with the anomaly silhouette material"
+        )
     base = (position[0], position[1], position[2] + height_m / 2)
-    scene["objects"].append({
-        "name": name,
-        "kind": "box",
-        "location": list(base),
-        "dimensions": [width_m, depth_m, height_m],
-        "material": material_name,
-        "keyframes": keyframes,
-        "visibility_keyframes": visibility_keyframes,
-    })
+    scene["objects"].append(
+        {
+            "name": name,
+            "kind": "box",
+            "location": list(base),
+            "dimensions": [width_m, depth_m, height_m],
+            "material": material_name,
+            "keyframes": keyframes,
+            "visibility_keyframes": visibility_keyframes,
+        }
+    )
 
 
 def _validate_figure_geometry(
@@ -447,7 +517,11 @@ def _validate_figure_geometry(
     for index, base in enumerate(positions):
         label = f"subject position {index}"
         distance_m = _distance_to_box(
-            camera_position, base, width_m=width_m, depth_m=depth_m, height_m=height_m,
+            camera_position,
+            base,
+            width_m=width_m,
+            depth_m=depth_m,
+            height_m=height_m,
         )
         if distance_m + 1e-9 < minimum_distance_m:
             raise ValueError(
@@ -455,9 +529,15 @@ def _validate_figure_geometry(
                 f"required at least {minimum_distance_m:.3f} m"
             )
         subject_height_px = _projected_box_height_px(
-            base, width_m=width_m, depth_m=depth_m, height_m=height_m,
-            camera_position=camera_position, basis=basis, lens_mm=lens_mm,
-            image_width=width, image_height=height,
+            base,
+            width_m=width_m,
+            depth_m=depth_m,
+            height_m=height_m,
+            camera_position=camera_position,
+            basis=basis,
+            lens_mm=lens_mm,
+            image_width=width,
+            image_height=height,
         )
         if subject_height_px > maximum_on_frame_height_px + 1e-9:
             raise ValueError(
@@ -470,7 +550,9 @@ def _camera_basis(
     camera_position: Vec3 | tuple[float, float, float],
     camera_target: Vec3 | tuple[float, float, float],
 ) -> tuple[Vec3, Vec3, Vec3]:
-    forward = _unit(tuple(target - origin for origin, target in zip(camera_position, camera_target)))
+    forward = _unit(
+        tuple(target - origin for origin, target in zip(camera_position, camera_target))
+    )
     world_up = (0.0, 0.0, 1.0)
     right = _cross(forward, world_up)
     if _length(right) <= 1e-9:
@@ -497,10 +579,16 @@ def _projected_box_height_px(
         for y in (-depth_m / 2, depth_m / 2):
             for z in (0.0, height_m):
                 point = (base[0] + x, base[1] + y, base[2] + z)
-                projected.append(_project_y_px(
-                    point, camera_position=camera_position, basis=basis,
-                    lens_mm=lens_mm, image_width=image_width, image_height=image_height,
-                ))
+                projected.append(
+                    _project_y_px(
+                        point,
+                        camera_position=camera_position,
+                        basis=basis,
+                        lens_mm=lens_mm,
+                        image_width=image_width,
+                        image_height=image_height,
+                    )
+                )
     return max(projected) - min(projected)
 
 
@@ -535,11 +623,15 @@ def _distance_to_box(
         (base[1] - depth_m / 2, base[1] + depth_m / 2),
         (base[2], base[2] + height_m),
     )
-    nearest = tuple(min(max(value, low), high) for value, (low, high) in zip(camera_position, bounds))
+    nearest = tuple(
+        min(max(value, low), high) for value, (low, high) in zip(camera_position, bounds)
+    )
     return math.dist(camera_position, nearest)
 
 
-def _visibility_window(start_frame: int, end_frame: int, *, hide_at_end: bool) -> list[dict[str, object]]:
+def _visibility_window(
+    start_frame: int, end_frame: int, *, hide_at_end: bool
+) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
     if start_frame > 1:
         result.append({"frame": 1, "visible": False})
@@ -550,27 +642,36 @@ def _visibility_window(start_frame: int, end_frame: int, *, hide_at_end: bool) -
 
 
 def _path_keyframes(
-    path: tuple[Vec3, ...], start_frame: int, end_frame: int, *, z_offset: float, label: str,
+    path: tuple[Vec3, ...],
+    start_frame: int,
+    end_frame: int,
+    *,
+    z_offset: float,
+    label: str,
 ) -> list[dict[str, object]]:
     available = end_frame - start_frame + 1
     if available < len(path):
-        raise ValueError(
-            f"{label} timing provides {available} frames for {len(path)} path points"
-        )
+        raise ValueError(f"{label} timing provides {available} frames for {len(path)} path points")
     keys = []
     for index, point in enumerate(path):
         frame = start_frame + round((end_frame - start_frame) * index / (len(path) - 1))
-        keys.append({
-            "frame": frame,
-            "location": [point[0], point[1], point[2] + z_offset],
-        })
+        keys.append(
+            {
+                "frame": frame,
+                "location": [point[0], point[1], point[2] + z_offset],
+            }
+        )
     if len({item["frame"] for item in keys}) != len(keys):
         raise ValueError(f"{label} timing maps multiple path points to one frame")
     return keys
 
 
 def _sample_keyframe_positions(
-    keys: list[dict[str, object]], start_frame: int, end_frame: int, *, z_offset: float,
+    keys: list[dict[str, object]],
+    start_frame: int,
+    end_frame: int,
+    *,
+    z_offset: float,
 ) -> tuple[Vec3, ...]:
     locations = [(item["frame"], item["location"]) for item in keys]
     sampled: list[Vec3] = []
@@ -584,16 +685,23 @@ def _sample_keyframe_positions(
             ratio = 0.0
         else:
             ratio = (frame - left_frame) / (right_frame - left_frame)
-        sampled.append((
-            left[0] + (right[0] - left[0]) * ratio,
-            left[1] + (right[1] - left[1]) * ratio,
-            left[2] + (right[2] - left[2]) * ratio - z_offset,
-        ))
+        sampled.append(
+            (
+                left[0] + (right[0] - left[0]) * ratio,
+                left[1] + (right[1] - left[1]) * ratio,
+                left[2] + (right[2] - left[2]) * ratio - z_offset,
+            )
+        )
     return tuple(sampled)
 
 
 def _flicker_keyframes(
-    *, base_energy: float, fraction: float, frequency_hz: float, start_frame: int, end_frame: int,
+    *,
+    base_energy: float,
+    fraction: float,
+    frequency_hz: float,
+    start_frame: int,
+    end_frame: int,
 ) -> list[dict[str, object]]:
     frame_span = end_frame - start_frame
     if frame_span < 2:
@@ -610,7 +718,10 @@ def _flicker_keyframes(
 
 
 def _merge_keyframes(
-    target: dict[str, object], field: str, keys: list[dict[str, object]], label: str,
+    target: dict[str, object],
+    field: str,
+    keys: list[dict[str, object]],
+    label: str,
 ) -> None:
     existing = list(target.get(field, []))
     frames = {item["frame"] for item in existing}
@@ -621,7 +732,11 @@ def _merge_keyframes(
 
 
 def _find_named_item(
-    items: object, name: str, kind: str, *, required: bool = True,
+    items: object,
+    name: str,
+    kind: str,
+    *,
+    required: bool = True,
 ) -> dict[str, object] | None:
     for item in items:
         if item["name"] == name:
@@ -661,15 +776,31 @@ def _unit(vector: tuple[float, float, float]) -> Vec3:
 def _rebuild_camera_fields(profile: CameraProfile) -> dict[str, object]:
     result: dict[str, object] = {}
     for name, field in CameraProfile.model_fields.items():
-        if field.json_schema_extra and field.json_schema_extra.get("invalidation") == Invalidation.REBUILD.value:
+        if (
+            field.json_schema_extra
+            and field.json_schema_extra.get("invalidation") == Invalidation.REBUILD.value
+        ):
             result[name] = getattr(profile, name)
-    expected = {"field_of_view_mm", "barrel_distortion", "exposure_ev", "practical_light_color_k",
-                "practical_light_intensity", "monochrome_night", "camera_position", "camera_mount", "depth_of_field"}
+    expected = {
+        "field_of_view_mm",
+        "barrel_distortion",
+        "exposure_ev",
+        "practical_light_color_k",
+        "practical_light_intensity",
+        "monochrome_night",
+        "camera_position",
+        "camera_mount",
+        "depth_of_field",
+    }
     unsupported = set(result) - expected
     if unsupported:
         raise ValueError(f"unsupported rebuild-triggering camera fields: {sorted(unsupported)}")
     for name, value in result.items():
-        if isinstance(value, (float, int)) and not isinstance(value, bool) and not math.isfinite(value):
+        if (
+            isinstance(value, (float, int))
+            and not isinstance(value, bool)
+            and not math.isfinite(value)
+        ):
             raise ValueError(f"camera rebuild field {name} must be finite")
     if result["depth_of_field"] is not None and result["depth_of_field"] <= 0:
         raise ValueError("depth_of_field must be positive when specified")
@@ -733,3 +864,273 @@ def synthetic_interior() -> SceneSpec:
     )
     return SceneSpec(materials=mats, objects=tuple(objs), lights=lights,
                      camera_location=cam, camera_target=(0.3, 0.2, 1.15))
+
+
+def american_living_room() -> SceneSpec:
+    """Deterministic 5.4 x 4.2 m American timber-house living room."""
+    mats = (
+        MaterialSpec(
+            name="Warm drywall",
+            color=(0.70, 0.65, 0.57, 1),
+            roughness=0.88,
+            surface="plaster",
+            variation=0.06,
+            bump_strength=0.012,
+        ),
+        MaterialSpec(
+            name="Ceiling paint",
+            color=(0.77, 0.74, 0.67, 1),
+            roughness=0.9,
+            surface="plaster",
+            variation=0.03,
+            bump_strength=0.008,
+        ),
+        MaterialSpec(
+            name="Oak planks",
+            color=(0.30, 0.16, 0.075, 1),
+            roughness=0.4,
+            surface="wood",
+            texture_scale=(0.15, 7.0, 0.4),
+            variation=0.13,
+            bump_strength=0.025,
+        ),
+        MaterialSpec(name="Oak plank variation", color=(0.34, 0.19, 0.09, 1), roughness=0.42, surface="wood", texture_scale=(0.15, 7.0, 0.4), variation=0.1, bump_strength=0.02),
+        MaterialSpec(
+            name="Honey oak",
+            color=(0.34, 0.20, 0.10, 1),
+            roughness=0.43,
+            surface="wood",
+            texture_scale=(0.25, 5.0, 0.5),
+            variation=0.1,
+            bump_strength=0.02,
+        ),
+        MaterialSpec(
+            name="White trim",
+            color=(0.83, 0.80, 0.73, 1),
+            roughness=0.68,
+            surface="plaster",
+            variation=0.02,
+        ),
+        MaterialSpec(
+            name="Sofa fabric",
+            color=(0.31, 0.32, 0.29, 1),
+            roughness=0.93,
+            surface="fabric",
+            texture_scale=(55, 55, 55),
+            variation=0.06,
+            bump_strength=0.07,
+        ),
+        MaterialSpec(
+            name="Pillow fabric",
+            color=(0.47, 0.39, 0.30, 1),
+            roughness=0.94,
+            surface="fabric",
+            texture_scale=(55, 55, 55),
+            variation=0.08,
+            bump_strength=0.07,
+        ),
+        MaterialSpec(
+            name="Rug weave",
+            color=(0.28, 0.18, 0.14, 1),
+            roughness=0.97,
+            surface="rug",
+            texture_scale=(24, 24, 24),
+            variation=0.12,
+            bump_strength=0.09,
+        ),
+        MaterialSpec(
+            name="Walnut",
+            color=(0.095, 0.056, 0.032, 1),
+            roughness=0.34,
+            surface="wood",
+            variation=0.08,
+            bump_strength=0.015,
+        ),
+        MaterialSpec(
+            name="Lamp shade", color=(1.0, 0.92, 0.8, 1), roughness=0.8, emission_strength=0.65
+        ),
+        MaterialSpec(name="Window glass", color=(0.35, 0.6, 0.82, 1), roughness=0.2),
+        MaterialSpec(name="TV screen", color=(0.008, 0.009, 0.012, 1), roughness=0.22),
+        MaterialSpec(name="Ceramic", color=(0.42, 0.38, 0.32, 1), roughness=0.3),
+    )
+    o = []
+    names = {}
+
+    def unique(n):
+        names[n] = names.get(n, 0) + 1
+        return n if names[n] == 1 else f"{n} {names[n]:02d}"
+
+    def b(n, l, d, m, v=0, r=(0, 0, 0)):
+        o.append(
+            ObjectSpec(
+                name=unique(n),
+                kind="box",
+                location=l,
+                dimensions=d,
+                material=m,
+                bevel=v,
+                rotation=r,
+            )
+        )
+
+    def c(n, l, d, m):
+        o.append(ObjectSpec(name=unique(n), kind="cylinder", location=l, dimensions=d, material=m))
+
+    # Shell leaves a cased rear hall doorway and a framed window opening.
+    # Individual staggered oak boards, with small dark seams between runs.
+    for row in range(24):
+        y = -2.0125 + row * 0.175
+        offset = 0.0 if row % 2 == 0 else 0.9
+        for segment in range(-1, 4):
+            start = -2.7 + offset + segment * 1.8
+            end = start + 1.795
+            left, right = max(-2.7, start), min(2.7, end)
+            if right > left:
+                plank_material = "Oak plank variation" if (row + segment) % 4 == 0 else "Oak planks"
+                b("Floor plank", ((left + right) / 2, y, -0.024), (right - left, 0.1735, 0.048), plank_material, 0.001)
+    # Rear wall partitions leave exactly x=-1.62..0.08 for the window and
+    # x=0.20..1.12 for the hall opening.
+    b("Rear wall left", (-2.16, 2.07, 1.22), (1.08, 0.16, 2.44), "Warm drywall")
+    b("Rear wall between openings", (0.14, 2.07, 1.22), (0.12, 0.16, 2.44), "Warm drywall")
+    b("Rear wall right", (1.94, 2.07, 1.22), (1.52, 0.16, 2.44), "Warm drywall")
+    b("Wall below window", (-0.77, 2.07, 0.44), (1.70, 0.16, 0.88), "Warm drywall")
+    b("Wall above window", (-0.77, 2.07, 2.30), (1.70, 0.16, 0.28), "Warm drywall")
+    b("Hallway header", (0.66, 2.07, 2.18), (1.04, 0.16, 0.52), "Warm drywall")
+    b("Left wall", (-2.67, 0, 1.22), (0.16, 4.2, 2.44), "Warm drywall")
+    b("Right wall", (2.67, 0, 1.22), (0.16, 4.2, 2.44), "Warm drywall")
+    b("Ceiling", (0, 0, 2.43), (5.4, 4.2, 0.10), "Ceiling paint")
+    for x in (-2.57, 2.57):
+        b("Side baseboard", (x, 0, 0.075), (0.055, 4, 0.15), "White trim", 0.012)
+    for x, w in ((-2.16, 1.08), (-0.77, 1.70), (0.14, 0.12), (1.94, 1.52)):
+        b("Rear baseboard", (x, 1.975, 0.075), (w, 0.055, 0.15), "White trim", 0.012)
+    b("Window glass", (-0.77, 2, 1.48), (1.52, 0.025, 1.12), "Window glass")
+    for x in (-1.57, 0.03):
+        b("Window casing", (x, 1.91, 1.48), (0.09, 0.13, 1.30), "White trim", 0.015)
+    b("Window head casing", (-0.77, 1.91, 2.1), (1.69, 0.13, 0.1), "White trim", 0.015)
+    b("Window sill", (-0.77, 1.82, 0.89), (1.78, 0.28, 0.09), "Honey oak", 0.025)
+    b("Window muntin", (-0.77, 1.965, 1.48), (0.035, 0.04, 1.12), "White trim")
+    b("Window muntin", (-0.77, 1.965, 1.48), (1.52, 0.04, 0.035), "White trim")
+    for x in (-1.78, 0.24):
+        b("Curtain panel", (x, 1.82, 1.47), (0.34, 0.12, 1.34), "Pillow fabric", 0.06)
+        for pleat in range(4):
+            b("Curtain fold", (x - 0.12 + pleat * 0.08, 1.745, 1.47), (0.025, 0.035, 1.28), "Pillow fabric", 0.01)
+    o.append(ObjectSpec(name=unique("Curtain rod"), kind="cylinder", location=(-0.77, 1.78, 2.17), dimensions=(0.035, 0.035, 2.14), material="Walnut", rotation=(0, 1.5708, 0)))
+    for x in (0.17, 1.15):
+        b("Hall door casing", (x, 1.91, 1.04), (0.085, 0.13, 2.08), "White trim", 0.012)
+    b("Hall casing header", (0.66, 1.91, 2.11), (1.06, 0.13, 0.09), "White trim", 0.012)
+    b("Hall floor", (0.66, 2.82, 0.01), (0.92, 1.55, 0.04), "Honey oak")
+    b("Hall left return", (0.14, 2.78, 1.22), (0.12, 1.42, 2.44), "Warm drywall")
+    b("Hall right return", (1.18, 2.78, 1.22), (0.12, 1.42, 2.44), "Warm drywall")
+    b("Hall end wall", (0.66, 3.52, 1.22), (0.92, 0.12, 2.44), "Warm drywall")
+    # Sofa, rounded cushions, grounded feet.
+    for x in (-1.96, -0.43):
+        for y in (0.72, 1.68):
+            c("Sofa foot", (x, y, 0.05), (0.09, 0.09, 0.10), "Walnut")
+    b("Sofa frame", (-1.19, 1.2, 0.24), (1.95, 1.12, 0.28), "Walnut", 0.08)
+    for x in (-1.77, -1.19, -0.61):
+        b("Sofa seat cushion", (x, 1.06, 0.43), (0.56, 0.91, 0.18), "Sofa fabric", 0.07)
+        b("Sofa back cushion", (x, 1.68, 0.75), (0.56, 0.24, 0.72), "Sofa fabric", 0.09)
+    for x in (-1.96, -0.43):
+        b("Sofa arm", (x, 1.18, 0.57), (0.32, 1.12, 0.46), "Sofa fabric", 0.10)
+    b(
+        "Sofa throw pillow",
+        (-1.62, 1.36, 0.73),
+        (0.49, 0.24, 0.40),
+        "Pillow fabric",
+        0.12,
+        (0.08, -0.1, -0.08),
+    )
+    b(
+        "Sofa throw pillow",
+        (-0.91, 1.36, 0.73),
+        (0.49, 0.24, 0.40),
+        "Pillow fabric",
+        0.12,
+        (-0.05, 0.09, 0.05),
+    )
+    b("Living room rug", (0, -0.15, 0.025), (2.65, 1.85, 0.045), "Rug weave", 0.008)
+    b("Rug border long", (0, -1.0, 0.050), (2.58, 0.035, 0.005), "Pillow fabric", 0.001)
+    b("Rug border long", (0, 0.70, 0.050), (2.58, 0.035, 0.005), "Pillow fabric", 0.001)
+    b("Rug border short", (-1.28, -0.15, 0.050), (0.035, 1.70, 0.005), "Pillow fabric", 0.001)
+    b("Rug border short", (1.28, -0.15, 0.050), (0.035, 1.70, 0.005), "Pillow fabric", 0.001)
+    for x in (-0.60, 0.60):
+        for y in (-0.45, 0.15):
+            c("Coffee table leg", (x, y, 0.2975), (0.075, 0.075, 0.5), "Walnut")
+    b("Coffee table top", (0, -0.15, 0.55), (1.48, 0.92, 0.12), "Honey oak", 0.05)
+    b("Coffee table shelf", (0, -0.15, 0.32), (1.18, 0.7, 0.055), "Walnut", 0.02)
+    b("Remote control", (-0.42, -0.15, 0.6275), (0.2, 0.075, 0.035), "Walnut", 0.01)
+    for index in range(3):
+        b("Remote button", (-0.48 + index * 0.045, -0.15, 0.6495), (0.018, 0.035, 0.008), "Ceramic", 0.002)
+    c("Coffee mug", (0.35, -0.18, 0.68), (0.12, 0.12, 0.15), "Ceramic")
+    o.append(ObjectSpec(name=unique("Coffee mug handle"), kind="torus", location=(0.43, -0.18, 0.68), dimensions=(0.075, 0.06, 0.06), material="Ceramic", rotation=(1.5708, 0, 0)))
+    b("TV stand cabinet", (2.34, 0.48, 0.24), (0.48, 1.68, 0.48), "Walnut", 0.07)
+    b("TV console top", (2.30, 0.48, 0.49), (0.61, 1.78, 0.075), "Honey oak", 0.025)
+    b("Television foot", (2.39, 0.48, 0.72), (0.12, 0.30, 0.40), "Walnut", 0.035)
+    b("Television screen", (2.43, 0.48, 1.29), (0.10, 1.42, 0.82), "Walnut", 0.025, (0, 0, -0.07))
+    b(
+        "Television glass",
+        (2.365, 0.48, 1.29),
+        (0.018, 1.31, 0.70),
+        "TV screen",
+        0.008,
+        (0, 0, -0.07),
+    )
+    b("Side table pedestal", (0.10, 1.05, 0.31), (0.42, 0.42, 0.62), "Walnut", 0.04)
+    b("Side table top", (0.10, 1.05, 0.66), (0.54, 0.54, 0.08), "Honey oak", 0.03)
+    c("Lamp base", (0.10, 1.05, 0.73), (0.22, 0.22, 0.07), "Walnut")
+    c("Lamp stem", (0.10, 1.05, 0.94), (0.055, 0.055, 0.36), "Walnut")
+    o.append(
+        ObjectSpec(
+            name=unique("Lamp shade"),
+            kind="cone",
+            location=(0.10, 1.05, 1.18),
+            dimensions=(0.36, 0.36, 0.32),
+            material="Lamp shade",
+        )
+    )
+    o.append(ObjectSpec(name=unique("Lamp bulb"), kind="sphere", location=(0.17, 1.05, 0.99), dimensions=(0.085, 0.085, 0.085), material="Lamp shade"))
+    # Open-backed bookcase faces into the room from the rear-right wall.
+    for x in (1.35, 2.45):
+        b("Bookcase side panel", (x, 1.76, 1.01), (0.055, 0.36, 2.02), "Honey oak", 0.012)
+    b("Bookcase back", (1.90, 1.93, 1.01), (1.10, 0.045, 2.02), "Honey oak", 0.008)
+    b("Bookcase top", (1.90, 1.76, 2.01), (1.12, 0.36, 0.06), "Honey oak", 0.012)
+    b("Bookcase bottom", (1.90, 1.76, 0.03), (1.12, 0.36, 0.06), "Honey oak", 0.012)
+    for z in (0.43, 0.91, 1.39, 1.87):
+        b("Bookcase shelf", (1.90, 1.76, z), (1.04, 0.32, 0.055), "Walnut", 0.01)
+    for n in range(5):
+        b("Bookshelf book", (1.52 + n * 0.17, 1.69, 0.6075), (0.12, 0.15, 0.30), "Pillow fabric", 0.012, (0, 0, (n - 2) * 0.035))
+    b("Side table book", (-0.07, 0.86, 0.7125), (0.18, 0.14, 0.025), "Pillow fabric", 0.006, (0, 0, -0.08))
+    b("Picture frame", (-2.57, -0.15, 1.62), (0.05, 0.82, 0.58), "Honey oak", 0.025)
+    b("Framed picture", (-2.535, -0.15, 1.62), (0.012, 0.70, 0.46), "Pillow fabric", 0.008)
+    b("Wall outlet plate", (-2.57, 0.72, 0.30), (0.05, 0.12, 0.16), "White trim", 0.01)
+    b("Ceiling light canopy", (0, 0.1, 2.35), (0.2, 0.2, 0.035), "Walnut", 0.01)
+    c("Ceiling light stem", (0, 0.1, 2.28), (0.035, 0.035, 0.15), "Walnut")
+    c("Ceiling light diffuser", (0, 0.1, 2.20), (0.44, 0.44, 0.10), "Lamp shade")
+    lights = (
+        LightSpec(
+            name="Panel0",
+            location=(0.22, 1.05, 0.99),
+            energy=70,
+            color=(1.0, 0.92, 0.8),
+            size=0.08,
+            kind="point",
+        ),
+        LightSpec(
+            name="Panel1", location=(0, 0.1, 2.11), energy=75, color=(1.0, 0.92, 0.8), size=1.1
+        ),
+        LightSpec(
+            name="Window daylight",
+            location=(-0.77, 1.65, 1.65),
+            energy=38,
+            color=(0.35, 0.6, 1.0),
+            size=1.45,
+            target=(0, -0.3, 0.9),
+        ),
+    )
+    return SceneSpec(
+        materials=mats,
+        objects=tuple(o),
+        lights=lights,
+        camera_location=(-2.48, -1.85, 2.25),
+        camera_target=(0.2, 0.5, 0.2),
+    )
