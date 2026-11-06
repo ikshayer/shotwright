@@ -35,6 +35,23 @@ class ProfileValidationError(ValueError):
     """A malformed profile or unsupported FFmpeg feature."""
 
 
+class OverlayIndicatorSpec(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    # The persisted nested Entity carries this field through compose's model_dump().
+    schema_version: Literal[1] = 1
+    kind: Literal["battery_rec"] = "battery_rec"
+    fontsize: int = Field(gt=0, strict=True)
+    x: StrictInt | StrictStr
+    y: StrictInt | StrictStr
+    placement: Literal["in_recording"] = "in_recording"
+
+    @field_validator("x", "y")
+    @classmethod
+    def _safe_position(cls, value: StrictInt | StrictStr) -> StrictInt | StrictStr:
+        return _validate_overlay_position(value)
+
+
 class OverlaySpec(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -44,6 +61,7 @@ class OverlaySpec(BaseModel):
     x: StrictInt | StrictStr = 8
     y: StrictInt | StrictStr = "h-24"
     placement: Literal["in_recording", "on_playback"] = "in_recording"
+    indicator: OverlayIndicatorSpec | None = None
 
     @field_validator("camera_id")
     @classmethod
@@ -55,9 +73,13 @@ class OverlaySpec(BaseModel):
     @field_validator("x", "y")
     @classmethod
     def _safe_position(cls, value: StrictInt | StrictStr) -> StrictInt | StrictStr:
-        if isinstance(value, str) and not re.fullmatch(r"[A-Za-z0-9_()+*/. -]+", value):
-            raise ValueError("overlay position contains unsupported filter syntax")
-        return value
+        return _validate_overlay_position(value)
+
+
+def _validate_overlay_position(value: StrictInt | StrictStr) -> StrictInt | StrictStr:
+    if isinstance(value, str) and not re.fullmatch(r"[A-Za-z0-9_()+*/. -]+", value):
+        raise ValueError("overlay position contains unsupported filter syntax")
+    return value
 
 
 class EncodeSpec(BaseModel):
@@ -109,7 +131,7 @@ _FILTER_PARAMS: dict[str, frozenset[str]] = {
     "select": frozenset({"from_schedule"}),
     "loop": frozenset({"from_schedule"}),
     "setpts": frozenset({"from_schedule", "timebase", "pts"}),
-    "drawtext": frozenset({"camera_id", "clock_epoch", "fontsize", "x", "y"}),
+    "drawtext": frozenset({"camera_id", "clock_epoch", "fontsize", "x", "y", "element"}),
     "eq": frozenset({"brightness", "contrast", "saturation"}),
     "noise": frozenset({"alls", "allf", "all_seed_max"}),
     "unsharp": frozenset({"luma_msize_x", "luma_msize_y", "luma_amount"}),
@@ -198,6 +220,8 @@ def _validate_stages(stages: tuple[PostStage, ...]) -> None:
                     raise ProfileValidationError("unsharp luma_amount must be in [-2, 5]")
         if stage.filter == "drawtext" and stage.composite_stage not in (None, "in_recording"):
             raise ProfileValidationError("on_playback overlays are not implemented in this pass")
+        if stage.filter == "drawtext" and stage.params.get("element", "clock") not in {"clock", "battery_rec"}:
+            raise ProfileValidationError("drawtext element must be 'clock' or 'battery_rec'")
 
 
 def validate_profile(
@@ -284,8 +308,27 @@ def validate_profile(
             raise ProfileValidationError("drawtext stage requires PostProfileSpec.overlay")
         if profile.overlay.placement == "on_playback":
             raise ProfileValidationError("on_playback overlay positioning is unsupported in this pass")
+        clock_stages = [
+            stage for stage in profile.identity.stages
+            if stage.filter == "drawtext" and stage.params.get("element", "clock") == "clock"
+        ]
+        indicator_stages = [
+            stage for stage in profile.identity.stages
+            if stage.filter == "drawtext" and stage.params.get("element", "clock") == "battery_rec"
+        ]
+        if len(clock_stages) != 1:
+            raise ProfileValidationError("profile requires exactly one clock overlay element")
+        if len(indicator_stages) > 1:
+            raise ProfileValidationError("profile supports at most one battery_rec overlay element")
+        if bool(indicator_stages) != (profile.overlay.indicator is not None):
+            raise ProfileValidationError(
+                "PostProfileSpec.overlay.indicator and battery_rec drawtext stage must be present together"
+            )
         for stage in profile.identity.stages:
             if stage.filter != "drawtext":
+                continue
+            element = stage.params.get("element", "clock")
+            if element == "battery_rec":
                 continue
             fields = {"camera_id": profile.overlay.camera_id, "clock_epoch": profile.overlay.clock_epoch,
                       "fontsize": profile.overlay.fontsize, "x": profile.overlay.x, "y": profile.overlay.y}
@@ -426,12 +469,24 @@ def build_filter_graph(
             overlay = profile.profile.overlay
             if overlay is None:
                 raise ProfileValidationError("drawtext stage requires an overlay specification")
-            if overlay.placement == "on_playback":
-                raise ProfileValidationError("on_playback overlay positioning is unsupported in this pass")
             font = _escape_filter_value(font_path)
-            text = _escape_filter_value(overlay.camera_id)
-            parts.append(f"drawtext=fontfile='{font}':text='{text}  %{{pts\\:gmtime\\:{overlay.clock_epoch}}}':"
-                         f"x={overlay.x}:y={overlay.y}:fontsize={overlay.fontsize}:fontcolor=white:box=1:boxcolor=black@0.4")
+            element = p.get("element", "clock")
+            if element == "clock":
+                if overlay.placement == "on_playback":
+                    raise ProfileValidationError("on_playback overlay positioning is unsupported in this pass")
+                text = _escape_filter_value(overlay.camera_id)
+                content = f"{text}  %{{pts\\:gmtime\\:{overlay.clock_epoch}}}"
+                x, y, fontsize = overlay.x, overlay.y, overlay.fontsize
+            elif element == "battery_rec":
+                indicator = overlay.indicator
+                if indicator is None:
+                    raise ProfileValidationError("battery_rec drawtext stage requires an indicator specification")
+                content = _escape_filter_value("REC [||||]")
+                x, y, fontsize = indicator.x, indicator.y, indicator.fontsize
+            else:  # checked when the persisted profile is validated
+                raise ProfileValidationError(f"unsupported drawtext element {element!r}")
+            parts.append(f"drawtext=fontfile='{font}':text='{content}':"
+                         f"x={x}:y={y}:fontsize={fontsize}:fontcolor=white:box=1:boxcolor=black@0.4")
         elif f == "eq":
             parts.append(f"eq=brightness={p.get('brightness', 0)}:contrast={p.get('contrast', 1)}:saturation={p.get('saturation', 1)}")
         elif f == "noise":

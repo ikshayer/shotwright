@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from orchestrator.adapters.postprofile.profile import (
     EncodeSpec,
+    OverlayIndicatorSpec,
     OverlaySpec,
     PostProfileSpec,
     build_filter_graph,
@@ -321,6 +322,37 @@ def test_overlay_config_and_drawtext_stage_must_be_present_together():
     checked = validate_profile(no_overlay_no_drawtext, _camera(), master_frames=300,
                                master_rate=Fraction(60, 1))
     assert checked.predicted_frames == 60
+
+
+def test_battery_rec_indicator_cannot_be_placed_on_playback():
+    with pytest.raises(ValidationError):
+        OverlayIndicatorSpec(fontsize=12, x=8, y=8, placement="on_playback")
+
+
+def test_profile_rejects_duplicate_battery_rec_drawtext_stages():
+    profile = _spec()
+    indicator = OverlayIndicatorSpec(fontsize=12, x=8, y=8)
+    overlay = profile.overlay.model_copy(update={"indicator": indicator})
+    stages = list(profile.identity.stages)
+    clock_index = next(
+        index for index, stage in enumerate(stages)
+        if stage.filter == "drawtext"
+    )
+    indicator_stages = [
+        PostStage(
+            name=f"battery_rec_{number}", filter="drawtext",
+            params={"element": "battery_rec"}, composite_stage="in_recording",
+        )
+        for number in (1, 2)
+    ]
+    stages[clock_index + 1:clock_index + 1] = indicator_stages
+    invalid = profile.model_copy(update={
+        "identity": profile.identity.model_copy(update={"stages": stages}),
+        "overlay": overlay,
+    })
+    with pytest.raises((ValueError, JobError)):
+        validate_profile(invalid, _camera(), master_frames=300, master_rate=Fraction(60, 1))
+
 
 def test_profile_rejects_sample_aspect_ratio_that_disagrees_with_display_ratio():
     with pytest.raises((ValueError, JobError)):

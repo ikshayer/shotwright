@@ -18,6 +18,7 @@ from orchestrator.domain.entities import (
     PostProfile,
     PostProfileEncode,
     PostProfileOverlay,
+    PostProfileOverlayIndicator,
     PostStage,
     Project,
     Script,
@@ -361,14 +362,124 @@ def _measured_dvr_2005_defaults() -> tuple[CameraProfile, PostProfile]:
     return camera_profile, post_profile
 
 
+def _unmeasured_low_light_bw_defaults(*, ffmpeg_identity: str) -> tuple[CameraProfile, PostProfile]:
+    """Build the §4.2 Low-light B&W pair with every unmeasured choice called out."""
+    profile_id = "low-light-bw"
+    camera_id = "CAM 03"
+    clock_epoch = 1131984000
+    output_fps = 10
+    storage_resolution = (352, 288)
+    sample_aspect_ratio = "12/11"
+
+    overlay = PostProfileOverlay(
+        camera_id=camera_id,
+        clock_epoch=clock_epoch,
+        fontsize=16,
+        font_relative="assets/fonts/overlay.ttf",
+        x=8,
+        y="h-24",
+        placement="in_recording",
+        indicator=PostProfileOverlayIndicator(
+            kind="battery_rec",
+            fontsize=12,
+            x=8,
+            y=8,
+            placement="in_recording",
+        ),
+    )
+    stages = [
+        PostStage(name="resample", filter="scale",
+                  params={"w": storage_resolution[0], "h": storage_resolution[1], "flags": "bicubic"}),
+        PostStage(name="decimate", filter="fps", params={"fps": output_fps}),
+        PostStage(name="restructure", filter="select", params={"from_schedule": "drop+freeze"}),
+        PostStage(name="clock_timebase", filter="setpts", params={"from_schedule": "clock"}),
+        PostStage(
+            name="overlay_clock",
+            filter="drawtext",
+            params={
+                "element": "clock",
+                "camera_id": camera_id,
+                "clock_epoch": clock_epoch,
+                "fontsize": overlay.fontsize,
+                "x": overlay.x,
+                "y": overlay.y,
+            },
+            composite_stage="in_recording",
+        ),
+        PostStage(
+            name="overlay_battery_rec",
+            filter="drawtext",
+            params={"element": "battery_rec"},
+            composite_stage="in_recording",
+        ),
+        PostStage(name="output_timebase", filter="setpts",
+                  params={"timebase": "1/output_fps", "pts": "N"}),
+        PostStage(name="shadow_noise", filter="noise", params={"alls": 24, "allf": "t+u"},
+                  seed_source="shot_degrade_seed"),
+        PostStage(name="set_sar", filter="setsar", params={"sar": sample_aspect_ratio}),
+    ]
+    encode = PostProfileEncode(
+        codec="libx264", preset="medium", crf=30, pix_fmt="yuv420p", threads=1,
+    )
+    post_profile = PostProfile(
+        name=profile_id,
+        semver="0.1.0",
+        stages=stages,
+        pinned_binaries={"ffmpeg": ffmpeg_identity},
+        output_fps=output_fps,
+        storage_resolution=storage_resolution,
+        sample_aspect_ratio=sample_aspect_ratio,
+        artifact_schedule=[],
+        overlay=overlay,
+        encode=encode,
+        provenance=(
+            "Built from PRD §4.2: 352x288 storage, 4:3 display, 8-12 fps, monochrome night, "
+            "strong shadow noise, and clipped infrared-like highlights only if justified. "
+            "UNMEASURED PLACEHOLDER values for this profile: fps=10; noise alls=24; "
+            "scale flags=bicubic and noise allf=t+u (inherited from the measured DVR chain "
+            "but unmeasured for this profile); "
+            "profile semver=0.1.0; encode codec=libx264, preset=medium, crf=30, "
+            "pix_fmt=yuv420p, threads=1; overlay camera_id=CAM 03, clock_epoch=1131984000, "
+            "clock fontsize=16 at (8,h-24), and battery/REC fontsize=12 at (8,8), with "
+            "display text 'REC [||||]'. The overlay font path is the existing project-local "
+            "assets/fonts/overlay.ttf convention. Drawtext styling fontcolor=white, box=1, "
+            "boxcolor=black@0.4 is inherited and unmeasured for this profile. The font file "
+            "must be supplied project-locally. Rebuild-triggering optics and practical "
+            "lighting inherit CameraProfile domain defaults and are UNMEASURED PLACEHOLDERS: "
+            "field_of_view_mm=12, barrel_distortion=0, exposure_ev=0, "
+            "practical_light_color_k=3200, practical_light_intensity=1.0; the unused "
+            "CameraProfile bitrate_kbps=800 and its zero/empty post-only defaults are also "
+            "UNMEASURED PLACEHOLDERS and do not override the PostProfile chain. "
+            "No highlight clipping is enabled by default. The FFmpeg executable identity "
+            "is the machine measurement recorded by spike 01; no profile-specific visual "
+            "or encoding result has been measured."
+        ),
+    )
+    camera_profile = CameraProfile(
+        camera_id=profile_id,
+        profile_name=profile_id,
+        monochrome_night=True,
+        codec=encode.codec,
+        storage_resolution=storage_resolution,
+        display_aspect_ratio="4:3",
+        fps=float(output_fps),
+    )
+    return camera_profile, post_profile
+
+
 def create_project(store: ProjectStore, project: Project) -> Project:
-    """Create a project and materialize its measured, project-local DVR defaults."""
+    """Create a project with the measured DVR default and the Low-light B&W pair."""
     camera_profile, post_profile = _measured_dvr_2005_defaults()
+    low_light_camera, low_light_post = _unmeasured_low_light_bw_defaults(
+        ffmpeg_identity=post_profile.pinned_binaries["ffmpeg"],
+    )
     with store.command():
         project = store.validate_entity_payload(project)
         store.save(project, expected_version=0)
         store.create(camera_profile)
         store.save(post_profile, expected_version=0)
+        store.create(low_light_camera)
+        store.save(low_light_post, expected_version=0)
         store._root.make_dir("assets/fonts")
         return project
 

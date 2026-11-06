@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import threading
 from contextlib import contextmanager
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from orchestrator.adapters.blender.scene import RenderRequest
-from orchestrator.adapters.postprofile.profile import EncodeSpec, OverlaySpec, PostProfileSpec
+from orchestrator.adapters.postprofile.profile import (
+    EncodeSpec,
+    OverlaySpec,
+    PostProfileSpec,
+    build_filter_graph,
+    validate_profile,
+)
+from orchestrator.domain.base import Invalidation
 from orchestrator.domain.entities import (
     ArtifactScheduleEntry,
     CameraProfile,
@@ -30,6 +38,7 @@ from orchestrator.domain.entities import (
     Project,
     Shot,
 )
+from orchestrator.domain.invalidation import field_invalidation
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.store.json_store import ProjectStore
 
@@ -318,6 +327,8 @@ def test_fresh_project_materializes_default_profiles_on_disk_and_composes_withou
     saved_project = store.load(Project)
     camera_profile = store.load(CameraProfile, "dvr-2005")
     post_profile = store.load(PostProfile, saved_project.output_profile)
+    low_light_camera = store.load(CameraProfile, "low-light-bw")
+    low_light_post = store.load(PostProfile, "low-light-bw")
     measured = json.loads(
         (Path(__file__).parents[2] / "spikes" / "01_postprofile_determinism" / "post_profile.json")
         .read_text(encoding="utf-8")
@@ -328,6 +339,13 @@ def test_fresh_project_materializes_default_profiles_on_disk_and_composes_withou
     assert any(document.get("name") == saved_project.output_profile for document in documents)
     assert camera_profile.camera_id == "dvr-2005"
     assert post_profile.name == saved_project.output_profile == "dvr-2005"
+    assert low_light_camera.camera_id == low_light_post.name == "low-light-bw"
+    assert low_light_camera.monochrome_night is True
+    assert low_light_camera.storage_resolution == (352, 288)
+    assert low_light_camera.display_aspect_ratio == "4:3"
+    assert low_light_camera.fps == 10.0
+    assert field_invalidation(CameraProfile, "monochrome_night") is Invalidation.REBUILD
+    assert "UNMEASURED PLACEHOLDER" in low_light_post.provenance
     assert post_profile.semver == measured["profile_version"]
     ffmpeg_identity = post_profile.pinned_binaries["ffmpeg"]
     ffmpeg_identity_lines = ffmpeg_identity.splitlines()
@@ -385,6 +403,48 @@ def test_fresh_project_materializes_default_profiles_on_disk_and_composes_withou
     )
     assert profile_spec.encode == EncodeSpec.model_validate(measured["encode"])
     assert after == before, "composition changed the project tree"
+
+    low_light_spec = PostProfileSpec(
+        identity=low_light_post,
+        output_fps=low_light_post.output_fps,
+        storage_resolution=low_light_post.storage_resolution,
+        sample_aspect_ratio=low_light_post.sample_aspect_ratio,
+        artifact_schedule=tuple(low_light_post.artifact_schedule),
+        overlay=OverlaySpec.model_validate(
+            low_light_post.overlay.model_dump(exclude={"schema_version", "font_relative"})
+        ),
+        encode=EncodeSpec.model_validate(low_light_post.encode.model_dump(exclude={"schema_version"})),
+    )
+    assert Fraction(*low_light_spec.storage_resolution) == Fraction(11, 9)
+    assert Fraction(*low_light_spec.storage_resolution) * Fraction(12, 11) == Fraction(4, 3)
+    low_light_checked = validate_profile(
+        low_light_spec, low_light_camera, master_frames=300, master_rate=Fraction(60, 1),
+    )
+    assert low_light_checked.profile.sample_aspect_ratio == "12/11"
+    low_light_graph = build_filter_graph(
+        low_light_checked, shot_id="shot-low-light", degrade_seed=71,
+        font_path="assets/fonts/overlay.ttf",
+    )
+    assert low_light_graph.endswith("setsar=12/11")
+    assert low_light_graph.count("drawtext=") == 2
+    assert low_light_graph.index("text='CAM 03") < low_light_graph.index("text='REC")
+    assert r"text='REC \[||||\]':x=8:y=8:fontsize=12:fontcolor=white:box=1:boxcolor=black@0.4" in low_light_graph
+    assert low_light_graph.index("text='REC") < low_light_graph.index("noise=")
+    assert low_light_post.overlay.indicator.placement == "in_recording"
+    assert "saturation=0" not in low_light_graph
+
+    low_light_shot = Shot(
+        shot_id="shot-low-light",
+        episode_id="ep-default",
+        camera_profile=low_light_camera.camera_id,
+        duration_sec=5.625,
+    )
+    store.create(low_light_shot)
+    low_light_render = compose_render_request(
+        store, shot_id=low_light_shot.shot_id, episode_id=low_light_shot.episode_id,
+        run_id="run-low-light", mode="master",
+    )
+    assert low_light_render.camera_profile == low_light_camera
 
     # Select a second, project-local profile copied from the materialized default.
     # The identity assertion distinguishes using Project.output_profile from always

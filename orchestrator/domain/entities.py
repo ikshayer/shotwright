@@ -314,6 +314,16 @@ class PostStage(Entity):
     composite_stage: str | None = None  # in_recording | on_playback
 
 
+class PostProfileOverlayIndicator(Entity):
+    """A second, fixed battery/REC graphic burned into the recording."""
+
+    kind: Literal["battery_rec"] = "battery_rec"
+    fontsize: StrictInt = Field(gt=0)
+    x: StrictInt | str
+    y: StrictInt | str
+    placement: Literal["in_recording"] = "in_recording"
+
+
 class PostProfileOverlay(Entity):
     """Persisted overlay configuration, including its recorded/composited side."""
 
@@ -327,6 +337,7 @@ class PostProfileOverlay(Entity):
     x: StrictInt | str = 8
     y: StrictInt | str = "h-24"
     placement: Literal["in_recording", "on_playback"] = "in_recording"
+    indicator: PostProfileOverlayIndicator | None = None
 
 
 class PostProfileEncode(Entity):
