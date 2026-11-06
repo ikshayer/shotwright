@@ -190,3 +190,41 @@ remove a mechanism the PRD relies on.
 `GenerationRun` settings alongside the transfer function and bit depth. If a future profile
 wants a filmic roll-off it belongs in the `PostProfile` stage list, where it is versioned
 and seeded, not in the master conversion.
+
+## Amendment 5 — the master encode must run under the supervisor
+
+Raised by an automated security review of the assembly commit, and confirmed by reading
+the file. **Binding, and it must be fixed before this branch merges.**
+
+The Blender launch goes through the supervisor — `self._control.launch(...)`, with
+`stopped()` checks around it and `clear_process()` after — which
+`orchestrator/adapters/blender/REVIEW.md` records as hard-won machinery for callbacks,
+deadlines, token fencing and lease release. **The new FFmpeg master encode does not.** It
+calls `self._ffmpeg_popen(...)` directly and then a bare `process.wait()`.
+
+Two concrete failures follow, and the first is the one that matters:
+
+1. **Cancellation fails open.** A cancelled job terminates Blender and leaves FFmpeg
+   running, because the encode was never registered as the supervised child. The adapter
+   then reports quiescence while a child process it owns is still alive — exactly the
+   condition the supervisor exists to make impossible, and exactly the condition under
+   which the GPU lease must be retained rather than released. A 900-frame FFV1 encode is
+   long enough for this to be reached in practice, not a theoretical window.
+2. **The wall-clock budget is bypassed.** `process.wait()` takes no timeout, so a hung or
+   pathologically slow encode runs past `per_shot_wall_clock_seconds` with nothing able to
+   stop it. The watchdog cannot see it, because the watchdog watches progress and the
+   encode reports none.
+
+**Binding fix:** launch the encode through `self._control.launch(...)` so it is registered
+as the supervised child and is terminated or killed on stop; call `clear_process()` when it
+finishes; check `self._control.stopped()` immediately before launching and while waiting;
+and wait in a loop with a timeout that honours both the stop event and the remaining
+elapsed budget, rather than blocking indefinitely.
+
+**Do not** treat this as defensive boilerplate. The same class of defect has already cost
+this project twice — a Windows `pid_is_alive` false positive that reported an exited
+process as live, and a `_persist_job` that recorded every terminal state as `failed`. Both
+were found only because someone read the supervision path rather than trusting it.
+
+A test belongs with the fix: a cancellation during the master encode must leave no live
+FFmpeg process, and must not report the job as quiesced while one survives.
