@@ -274,8 +274,9 @@ class RenderRequest(_FrozenModel):
 
 _CAMERA_SENSOR_WIDTH_MM = 36.0
 
-# UNMEASURED PLACEHOLDERS: small bounds for a standing handheld operator.
+# UNMEASURED PLACEHOLDERS: drift bounds and axial damping for a standing handheld operator.
 _HANDHELD_MAX_POSITIONAL_DRIFT_M = 0.025
+_HANDHELD_AXIAL_DRIFT_SCALE = 0.4
 _HANDHELD_MAX_YAW_DEGREES = 0.35
 _HANDHELD_MAX_PITCH_DEGREES = 0.25
 _HANDHELD_KEYFRAME_INTERVAL_SECONDS = (2.0, 4.0)
@@ -284,7 +285,7 @@ _HANDHELD_KEYFRAME_INTERVAL_SECONDS = (2.0, 4.0)
 def build_scene_plan(request: RenderRequest) -> dict[str, object]:
     """Build one deterministic worker payload; animation is expressed as keyframes."""
     profile = request.camera_profile
-    if profile.camera_mode not in ("cctv", "handheld"):
+    if profile.camera_mode not in ("cctv", "non_cctv"):
         raise ValueError(f"unsupported camera_mode: {profile.camera_mode!r}")
     if request.scene.camera_keyframes:
         if profile.camera_mode == "cctv":
@@ -301,7 +302,7 @@ def build_scene_plan(request: RenderRequest) -> dict[str, object]:
         raise ValueError("camera_position override must not coincide with scene camera target")
     frame_end = 1 if request.mode == "preview" else max(1, math.ceil(request.duration_sec * 60))
     scene_data = _scene_payload(request, camera)
-    if profile.camera_mode == "handheld":
+    if profile.camera_mode == "non_cctv":
         scene_data["camera_keyframes"] = [
             keyframe.model_dump(mode="json")
             for keyframe in _handheld_camera_keyframes(request, camera, frame_end)
@@ -369,6 +370,11 @@ def _handheld_camera_keyframes(
         offset_length = _length(local_offset)
         if offset_length > 1.0:
             local_offset = tuple(component / offset_length for component in local_offset)
+        local_offset = (
+            local_offset[0] * _HANDHELD_AXIAL_DRIFT_SCALE,
+            local_offset[1],
+            local_offset[2],
+        )
         location = tuple(
             base_position[axis]
             + _HANDHELD_MAX_POSITIONAL_DRIFT_M
@@ -415,7 +421,18 @@ def _handheld_camera_keyframes(
             interval_high,
             f"{keyframe_index}:interval_seconds",
         )
-        frame = min(frame_end, frame + max(1, round(interval * 60)))
+        next_frame = frame + max(1, round(interval * 60))
+        if next_frame > frame_end:
+            last_keyframe = keyframes[-1]
+            keyframes.append(
+                CameraKeyframeSpec(
+                    frame=frame_end,
+                    location=last_keyframe.location,
+                    target=last_keyframe.target,
+                )
+            )
+            return tuple(keyframes)
+        frame = next_frame
         keyframe_index += 1
 
 

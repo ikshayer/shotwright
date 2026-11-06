@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import math
 
@@ -23,7 +24,6 @@ from orchestrator.platform.containment import ProjectRoot
 from orchestrator.service.compose import compose_render_request
 from orchestrator.service.dependencies import create_project
 from orchestrator.store.json_store import ProjectStore
-
 
 # Pinned by test_anomaly_plan_contract.py for the unchanged static fixture.
 _STATIC_PLAN_SHA256 = "92de3ed358ecc3bc4ef91127db9c6a12254e86a59f255645c03579b60b03788a"
@@ -445,8 +445,8 @@ def test_handheld_transform_amplitude_is_small_and_has_no_dolly_or_whip_pan() ->
         "handheld camera translated more than 1 cm along its optical axis (dolly); "
         f"observed maximum {max(axial_offsets):.6f} m across frames {observed!r}"
     )
-    for (left_frame, left_direction), (right_frame, right_direction) in zip(
-        directions, directions[1:], strict=False,
+    for (left_frame, left_direction), (right_frame, right_direction) in itertools.pairwise(
+        directions,
     ):
         elapsed_sec = (right_frame - left_frame) / 60.0
         assert elapsed_sec > 0, (
@@ -458,8 +458,8 @@ def test_handheld_transform_amplitude_is_small_and_has_no_dolly_or_whip_pan() ->
             "handheld camera rotation exceeded the 1 degree/second no-whip-pan bound; "
             f"observed {rate:.6f} degrees/second from frame {left_frame} to {right_frame}"
         )
-    for (left_frame, left_location), (right_frame, right_location) in zip(
-        locations, locations[1:], strict=False,
+    for (left_frame, left_location), (right_frame, right_location) in itertools.pairwise(
+        locations,
     ):
         elapsed_sec = (right_frame - left_frame) / 60.0
         speed = math.dist(left_location, right_location) / elapsed_sec

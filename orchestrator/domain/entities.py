@@ -39,7 +39,10 @@ from .base import (
     rebuild_triggering,
 )
 
-CameraMode = Literal["cctv", "handheld"]
+# Motion is currently gated on non_cctv, but camera class and handheld mount are
+# separate axes: a tripod-mounted camcorder is non_cctv and should not sway. If
+# one is added, use a separate mount/motion attribute rather than redefining this mode.
+CameraMode = Literal["cctv", "non_cctv"]
 CAMERA_MOTION_MODEL_SEMVER = "0.1.0"
 
 # --------------------------------------------------------------------------

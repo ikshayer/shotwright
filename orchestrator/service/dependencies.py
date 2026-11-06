@@ -523,7 +523,7 @@ def _unmeasured_consumer_2002_defaults(*, ffmpeg_identity: str) -> tuple[CameraP
             "noise_model={}, chroma_smearing=0, block_artifacts=0, sharpening=0, "
             "grade_white_balance={}, overlay_model={}, decimation_pattern=None, and "
             "frame_drop_schedule=[] are inherited/empty defaults and are also "
-            "UNMEASURED PLACEHOLDERS. camera_mode='handheld' enables deterministic, "
+            "UNMEASURED PLACEHOLDERS. camera_mode='non_cctv' enables deterministic, "
             "profile-derived camera sway; camera_mount='handheld' remains descriptive and "
             "does not drive motion. Motion bounds: maximum positional drift=0.025 m, "
             "yaw=±0.35 degrees, pitch=±0.25 degrees, keyframe interval=2.0-4.0 seconds. "
@@ -535,7 +535,7 @@ def _unmeasured_consumer_2002_defaults(*, ffmpeg_identity: str) -> tuple[CameraP
     camera_profile = CameraProfile(
         camera_id=profile_id,
         profile_name=profile_id,
-        camera_mode="handheld",
+        camera_mode="non_cctv",
         camera_mount="handheld",
         codec=encode.codec,
         storage_resolution=storage_resolution,
