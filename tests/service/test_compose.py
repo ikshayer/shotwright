@@ -3,7 +3,7 @@
 These tests treat the service composer as a pure adapter between the project-local
 JSON store and typed adapter requests. The composition API is not named in the
 contract, so the tests assume ``compose_render_request(store, episode_id, shot_id,
-mode=...)`` and ``compose_postprofile_spec(store)``.
+mode=...)`` and ``compose_post_profile_spec(store)``.
 
 The bound Phase 1 scene is the measured ``synthetic_interior()`` fixture. It is
 not FR-04's future procedural hallway builder driven by a text brief.
@@ -17,7 +17,6 @@ import pytest
 from pydantic import ValidationError
 
 from orchestrator.adapters.blender.scene import RenderRequest, SceneSpec, synthetic_interior
-from orchestrator.adapters.postprofile.profile import PostProfileSpec
 from orchestrator.domain.entities import CameraProfile, Episode, Project, Shot
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.store.json_store import ProjectStore
@@ -74,10 +73,16 @@ def _store_with_shot(
     return store, shot, mutation_token
 
 
-def _compose_render(store: ProjectStore, shot: Shot, *, mode: str = "master") -> RenderRequest:
+def _compose_render(
+    store: ProjectStore, shot: Shot, *, mode: str = "master", run_id: str = "run-aaaa"
+) -> RenderRequest:
     from orchestrator.service.compose import compose_render_request
 
-    return compose_render_request(store, shot.episode_id, shot.shot_id, mode=mode)
+    # Keyword-only, and run_id is supplied by the caller: composition stays pure, so the
+    # determinism assertion below is about composition rather than about a patched RNG.
+    return compose_render_request(
+        store, shot_id=shot.shot_id, episode_id=shot.episode_id, run_id=run_id, mode=mode
+    )
 
 
 def _tree_snapshot(root: Path) -> tuple[tuple[str, str, bytes | None], ...]:
@@ -117,15 +122,15 @@ def test_render_composition_uses_shot_values_and_content_version(tmp_path: Path)
 def test_render_composition_is_deterministic_except_for_run_id(tmp_path: Path) -> None:
     store, shot, _ = _store_with_shot(tmp_path)
 
-    first = _compose_render(store, shot)
-    second = _compose_render(store, shot)
+    # Two DIFFERENT run ids: every other field must still match, which is a stronger
+    # claim than two identical calls happening to agree.
+    first = _compose_render(store, shot, run_id="run-first")
+    second = _compose_render(store, shot, run_id="run-second")
 
     first_values = first.model_dump(mode="json")
     second_values = second.model_dump(mode="json")
-    first_run_id = first_values.pop("run_id")
-    second_run_id = second_values.pop("run_id")
-    assert first_run_id
-    assert second_run_id
+    assert first_values.pop("run_id") == "run-first"
+    assert second_values.pop("run_id") == "run-second"
     assert first_values == second_values
 
     round_tripped = RenderRequest.model_validate(first.model_dump(mode="python"))

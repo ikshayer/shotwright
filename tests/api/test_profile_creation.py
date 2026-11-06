@@ -4,8 +4,8 @@ The composition contract names the operations but not their route templates,
 request envelopes, or composition function signatures. These tests assume item
 routes ending in a profile identifier, request envelopes named ``camera_profile``
 and ``post_profile``, and direct composition functions
-``compose_render_request(store, episode_id, shot_id, mode=...)`` and
-``compose_postprofile_spec(store)``.
+``compose_render_request(store, *, shot_id, episode_id, run_id, mode)`` and
+``compose_post_profile_spec(store)``.
 """
 
 from __future__ import annotations
@@ -22,7 +22,14 @@ from fastapi.testclient import TestClient
 
 from orchestrator.adapters.blender.scene import RenderRequest
 from orchestrator.adapters.postprofile.profile import EncodeSpec, OverlaySpec, PostProfileSpec
-from orchestrator.domain.entities import ArtifactScheduleEntry, CameraProfile, Episode, PostProfile, Project, Shot
+from orchestrator.domain.entities import (
+    ArtifactScheduleEntry,
+    CameraProfile,
+    Episode,
+    PostProfile,
+    Project,
+    Shot,
+)
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.store.json_store import ProjectStore
 
@@ -293,7 +300,7 @@ def test_fresh_project_materializes_default_profiles_on_disk_and_composes_withou
     app: FastAPI,
     client: TestClient,
 ) -> None:
-    from orchestrator.service.compose import compose_postprofile_spec, compose_render_request
+    from orchestrator.service.compose import compose_post_profile_spec, compose_render_request
 
     project_id = "fresh-project"
     project = Project(project_id=project_id, title="Fresh project")
@@ -345,8 +352,11 @@ def test_fresh_project_materializes_default_profiles_on_disk_and_composes_withou
     store.create(shot)
 
     before = _tree_snapshot(project_root)
-    request = compose_render_request(store, shot.episode_id, shot.shot_id, mode="master")
-    profile_spec = compose_postprofile_spec(store)
+    request = compose_render_request(
+        store, shot_id=shot.shot_id, episode_id=shot.episode_id,
+        run_id="run-fresh-project", mode="master",
+    )
+    profile_spec = compose_post_profile_spec(store)
     after = _tree_snapshot(project_root)
 
     assert isinstance(request, RenderRequest)
@@ -380,7 +390,7 @@ def test_fresh_project_materializes_default_profiles_on_disk_and_composes_withou
         expected_version=mutation_token,
     )
     before_selected = _tree_snapshot(project_root)
-    selected_spec = compose_postprofile_spec(store)
+    selected_spec = compose_post_profile_spec(store)
     after_selected = _tree_snapshot(project_root)
 
     assert selected_spec.identity == selected_profile

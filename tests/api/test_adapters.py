@@ -8,7 +8,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from orchestrator.domain.entities import Episode, Project, Shot
+from orchestrator.domain.entities import CameraProfile, Episode, Project, Shot
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.store.json_store import ProjectStore
 
@@ -22,7 +22,9 @@ ADAPTER_OPERATIONS = {
     "build scene": r"scene",
     "render preview": r"preview|render",
     "generate media": r"generat",
-    "degrade": r"degrad|post.?profile",
+    # Narrow: r"post.?profile" also matched create_post_profile, so this demanded 202
+    # from a creation route. Only the degradation operation belongs here.
+    "degrade": r"degrad",
     "sample references": r"sample|reference",
     "export": r"export",
 }
@@ -43,7 +45,16 @@ def _seed_wired_route_records(app: FastAPI) -> None:
         Episode(episode_id="x", project_id="x", number=1, duration_target_sec=10),
         expected_version=0,
     )
-    store.create(Shot(shot_id="x", episode_id="x", duration_sec=2))
+    shot = Shot(shot_id="x", episode_id="x", duration_sec=2)
+    # Composition resolves the CameraProfile the Shot names, so a Shot without one is an
+    # incomplete fixture rather than a routing failure: /scene and /preview answer
+    # 404 "Shot 'x' references missing CameraProfile 'dvr-2005'" without it.
+    # CameraProfile is a VersionedEntity, so it is created rather than saved; the store
+    # refuses save() with "CameraProfile is versioned; use create/update/revise".
+    store.create(
+        CameraProfile(camera_id=shot.camera_profile, profile_name=shot.camera_profile)
+    )
+    store.create(shot)
 
 
 def _wired_request_kwargs(app: FastAPI, op) -> dict:
