@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any
 
@@ -12,6 +13,7 @@ from orchestrator.platform.containment import ProjectRoot
 JOB_STATES = frozenset({"queued", "running", "completed", "failed", "cancelled"})
 TERMINAL_STATES = frozenset({"completed", "failed", "cancelled"})
 JOB_DIRECTORY = "state/jobs"
+_LOGGER = logging.getLogger(__name__)
 
 
 class JobJournalError(ValueError):
@@ -30,28 +32,28 @@ def read_job(root: ProjectRoot, job_id: str) -> dict[str, Any] | None:
     journal_relative = f"{JOB_DIRECTORY}/{job_id}.jsonl"
     journal_path = root.resolve(journal_relative)
     if not journal_path.exists():
-        legacy = root.resolve(f"{JOB_DIRECTORY}/{job_id}.json")
-        if not legacy.exists():
-            return None
-        record = json.loads(legacy.read_text(encoding="utf-8"))
-        _validate_record(record)
-        return record
+        return _read_legacy(root, job_id)
 
     data = journal_path.read_bytes()
     lines = data.splitlines(keepends=True)
     snapshots: list[dict[str, Any]] = []
     for index, raw_line in enumerate(lines):
-        is_final = index == len(lines) - 1
         try:
             parsed = json.loads(raw_line.decode("utf-8"))
+            _validate_record(parsed)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            if is_final:
-                continue
-            raise JobJournalError(f"invalid complete journal line {index + 1} for job {job_id!r}: {exc}") from exc
-        _validate_record(parsed)
+            _LOGGER.warning(
+                "skipping invalid journal line %d for job %r: %s", index + 1, job_id, exc
+            )
+            continue
+        except JobJournalError as exc:
+            _LOGGER.warning(
+                "skipping invalid journal line %d for job %r: %s", index + 1, job_id, exc
+            )
+            continue
         snapshots.append(parsed)
     if not snapshots:
-        return None
+        return _read_legacy(root, job_id, damaged_journal=True)
 
     resolved_snapshot: dict[str, Any] | None = None
     for snapshot in snapshots:
@@ -59,6 +61,21 @@ def read_job(root: ProjectRoot, job_id: str) -> dict[str, Any] | None:
             break
         resolved_snapshot = snapshot
     return resolved_snapshot.copy() if resolved_snapshot is not None else None
+
+
+def _read_legacy(
+    root: ProjectRoot, job_id: str, *, damaged_journal: bool = False
+) -> dict[str, Any] | None:
+    legacy = root.resolve(f"{JOB_DIRECTORY}/{job_id}.json")
+    if not legacy.exists():
+        if damaged_journal:
+            raise JobJournalError(
+                f"job journal for {job_id!r} contains no complete snapshot and no legacy record exists"
+            )
+        return None
+    record = json.loads(legacy.read_text(encoding="utf-8"))
+    _validate_record(record)
+    return record
 
 
 def read_job_records(root: ProjectRoot, job_ids: list[str]) -> list[dict[str, Any]]:
@@ -78,5 +95,5 @@ def _validate_record(record: Any) -> None:
     if not isinstance(record, dict):
         raise JobJournalError("job record must be a JSON object")
     state = record.get("state")
-    if state not in JOB_STATES:
+    if not isinstance(state, str) or state not in JOB_STATES:
         raise JobJournalError(f"job record has unsupported state {state!r}")

@@ -193,13 +193,18 @@ class ProjectRoot:
         """Append one UTF-8 line to a contained file and close it before returning."""
         if not isinstance(text, str):
             raise TypeError("line text must be a string")
-        line = text.rstrip("\r\n")
-        if "\n" in line or "\r" in line:
+        if "\n" in text or "\r" in text:
             raise ValueError("line text must not contain embedded line breaks")
         target = self._prepare_file(relative)
         with _APPEND_LOCK, target.open("a+b") as stream:
             stream.seek(0, os.SEEK_END)
-            stream.write((line + "\n").encode("utf-8"))
+            if stream.tell() > 0:
+                stream.seek(-1, os.SEEK_END)
+                if stream.read(1) != b"\n":
+                    stream.seek(0, os.SEEK_END)
+                    stream.write(b"\n")
+            stream.seek(0, os.SEEK_END)
+            stream.write((text + "\n").encode("utf-8"))
             stream.flush()
         return target
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hmac
-import json
 import math
 from typing import Annotated, Any
 from urllib.parse import urlsplit

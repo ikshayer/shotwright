@@ -26,6 +26,7 @@ from orchestrator.domain.entities import (
     ShotOutputKind,
 )
 from orchestrator.domain.invalidation import field_invalidation
+from orchestrator.jobs.journal import append_job, read_job
 from orchestrator.jobs.queue import JobQueue
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.errors import JobError, JobErrorKind
@@ -195,7 +196,7 @@ class JobRunner:
             queue.preflight(job)
             root = store._root
             root.make_dir("state/jobs")
-            root.write_text(f"state/jobs/{job.job_id}.json", job.model_dump_json(indent=2))
+            append_job(root, job)
         with self._condition:
             self._pending.append((project_id, request, job))
             self._condition.notify_all()
@@ -204,17 +205,16 @@ class JobRunner:
     def cancel(self, project_id: str, job_id: str) -> Job:
         store = self.store_for(project_id)
         root = store._root
-        path = root.resolve(f"state/jobs/{job_id}.json")
-        if not path.is_file():
+        record = read_job(root, job_id)
+        if record is None:
             raise RecordNotFound(f"job {job_id!r} does not exist")
-        job = Job.model_validate_json(path.read_text(encoding="utf-8"))
+        job = Job.model_validate(record)
         if job.state not in {"completed", "failed", "cancelled"}:
             with self._condition:
                 self._cancelled.add((project_id, job_id))
-                if (project_id, job_id) not in self._active:
-                    job.state = "cancelled"
-                    job.error_kind = JobErrorKind.CANCELLED.value
-                    root.write_text(f"state/jobs/{job_id}.json", job.model_dump_json(indent=2))
+                job.state = "cancelled"
+                job.error_kind = JobErrorKind.CANCELLED.value
+                append_job(root, job)
                 self._condition.notify_all()
         return job
 
@@ -232,10 +232,10 @@ class JobRunner:
                           for queued_project, _, queued_job in self._pending)):
                 self._condition.wait()
         store = self.store_for(project_id)
-        path = store._root.resolve(f"state/jobs/{job_id}.json")
-        if not path.is_file():
+        record = read_job(store._root, job_id)
+        if record is None:
             raise RecordNotFound(f"job {job_id!r} does not exist")
-        return Job.model_validate_json(path.read_text(encoding="utf-8"))
+        return Job.model_validate(record)
 
     def close(self) -> None:
         self.drain()
@@ -280,12 +280,20 @@ class JobRunner:
             set_cancel_check = getattr(adapter, "set_cancel_check", None)
             if callable(set_cancel_check):
                 set_cancel_check(lambda: self._is_cancelled(key))
+
+            def invoke_if_not_cancelled(active: Job) -> AdapterResult:
+                if self._is_cancelled(key):
+                    raise _job_error(
+                        JobErrorKind.CANCELLED, "job cancelled before adapter start", active
+                    )
+                return adapter.invoke(request, active, queue=queue)
+
             if self._is_cancelled(key):
                 raise _job_error(JobErrorKind.CANCELLED, "job cancelled before adapter start", job)
             if request.kind in {AdapterKind.SCENE, AdapterKind.RENDER, AdapterKind.GENERATE}:
                 with self._gpu_lock:
                     value = queue.run(
-                        job, lambda active: adapter.invoke(request, active, queue=queue),
+                        job, invoke_if_not_cancelled,
                         startup_allowance_seconds=self.settings.resources.startup_allowance_seconds,
                     )
             else:
@@ -296,7 +304,7 @@ class JobRunner:
                 job.attempts += 1
                 queue._persist(job)
                 queue._transition(job, "running")
-                value = adapter.invoke(request, job, queue=queue)
+                value = invoke_if_not_cancelled(job)
                 queue._transition(job, "completed")
             if self._is_cancelled(key):
                 raise _job_error(JobErrorKind.CANCELLED, "job cancelled while adapter work was active", job)
@@ -472,4 +480,4 @@ def _persist_job(root: ProjectRoot, job: Job, error: JobError) -> None:
     # and JobQueue's own terminal branch already makes the same distinction.
     job.state = "cancelled" if error.kind is JobErrorKind.CANCELLED else "failed"
     job.error_kind = error.kind.value
-    root.write_text(f"state/jobs/{job.job_id}.json", job.model_dump_json(indent=2))
+    append_job(root, job)
