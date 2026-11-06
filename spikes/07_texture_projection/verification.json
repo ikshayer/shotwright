@@ -1,0 +1,131 @@
+{
+  "baseline.png": {
+    "sha256": "be5dbe295b98d34d3a3b833e1cad12e98bb987dbce6a695a3cb0ae059c4c6036",
+    "size": [
+      1280,
+      960
+    ],
+    "decoded_rgb_sha256": "381711f8535f9b22735e3ac219cbdc7d594921491f7ca91ad9a22bbc92c09efa"
+  },
+  "projected.png": {
+    "sha256": "a163aa7ab4a4ec65156c1bfa28e51ff3aa4f385a5f610b6ca8699c294d72e7a9",
+    "size": [
+      1280,
+      960
+    ],
+    "decoded_rgb_sha256": "d3066b4dea654485ac972e14fe9c7fa395351e463eb4a690689c86aa6125f89c"
+  },
+  "generated-only.png": {
+    "sha256": "9c742e024d820145a790541f49ddbcea01dc91707da9e6abba33a3c4c5f89778",
+    "size": [
+      1280,
+      960
+    ],
+    "decoded_rgb_sha256": "ec4f43216ad47e988117ff51e8609122e833f50d5110a773f9fac76dc48f0526"
+  },
+  "second-camera.png": {
+    "sha256": "0df5220a0eba024dcf33e94abcb2d02531577e08f1e15d8888ca964d9f02e469",
+    "size": [
+      1280,
+      960
+    ],
+    "decoded_rgb_sha256": "a970c8da3f82399d1d23f160aaacd015d5a3f4ef8f921fd500d02e73712d2cb7"
+  },
+  "figure-proxy.png": {
+    "sha256": "87809b9d86fac04ac1a51766d76a15c23a898fce3277df1d320d1687cc7ac207",
+    "size": [
+      1280,
+      960
+    ],
+    "decoded_rgb_sha256": "2c78caacaba16f03ffe12956a3974a33a3588f96aedb032a5e53d587a838ad1b"
+  },
+  "baseline-degraded.png": {
+    "sha256": "8adc05fe2da285675c901fb5f201d2427fd9aec8761c33f9b631760624b0ccee",
+    "size": [
+      640,
+      480
+    ],
+    "decoded_rgb_sha256": "4c070bf999a5367413e3f044344176a3159a0d53683d536a37f3a80850a94da7"
+  },
+  "projected-degraded.png": {
+    "sha256": "ceaeafa85cad0f1e155ad1a7f387077f3118492dbecd05e200e3fa8808f65e0e",
+    "size": [
+      640,
+      480
+    ],
+    "decoded_rgb_sha256": "ef8b2e312879aba67b085513410b37d838449dbd6f879ee79dbebd66a1d88c4a"
+  },
+  "generated-only-degraded.png": {
+    "sha256": "57ea8eeef92b623caab7261241ee129faa16a3604e35f3895430b09a01732d45",
+    "size": [
+      640,
+      480
+    ],
+    "decoded_rgb_sha256": "83b6de6a8f4f22f6a34f894f1677ce9f8596aac4f81044a1800769851f2be75d"
+  },
+  "baseline_sampled_temporal_identity": {
+    "frames": [
+      1,
+      450,
+      900
+    ],
+    "rgb_sha256": "381711f8535f9b22735e3ac219cbdc7d594921491f7ca91ad9a22bbc92c09efa"
+  },
+  "projection_sampled_temporal_identity": {
+    "frames": [
+      1,
+      450,
+      900
+    ],
+    "rgb_sha256": "d3066b4dea654485ac972e14fe9c7fa395351e463eb4a690689c86aa6125f89c"
+  },
+  "source_projection_mae_rgb_255": 1.6598879665798612,
+  "supplied_baseline_vs_fresh": {
+    "mae_rgb_255": 0.3089241536458333,
+    "max_channel": 2
+  },
+  "retained_artifact_hashes_verified": 17,
+  "matched_graph_sha256": "f36cef7f723c7a5a49892279d08aa53835e668aa3978e28782be0d3330fb3f0a",
+  "videos": {
+    "baseline": {
+      "width": 640,
+      "height": 480,
+      "sample_aspect_ratio": "1:1",
+      "display_aspect_ratio": "4:3",
+      "r_frame_rate": "12/1",
+      "duration": "14.500000",
+      "nb_read_frames": "174"
+    },
+    "generated": {
+      "width": 640,
+      "height": 480,
+      "r_frame_rate": "12/1",
+      "duration": "14.500000",
+      "nb_read_frames": "174"
+    },
+    "projection": {
+      "width": 640,
+      "height": 480,
+      "sample_aspect_ratio": "1:1",
+      "display_aspect_ratio": "4:3",
+      "r_frame_rate": "12/1",
+      "duration": "14.500000",
+      "nb_read_frames": "174"
+    }
+  },
+  "source_inputs_unchanged": true,
+  "containment_admission": "Initial generation/render used repo-root ProjectRoot atomic temporary staging outside spike scope. Later writes were routed through ProjectRoot rooted in spike07. The empty repo staging directory, created at02:33:19 by the initial failure report, was verified empty and removed without recursion. All retained additions are inside spike07.",
+  "metadata_admission": "Generated-control video lacks explicit SAR/DAR metadata; baseline/projection report1:1/4:3. All comparison PNGs have identical640x480 dimensions. Future harness master encode now sets SAR1:1; existing videos were retained unchanged.",
+  "rerun_guard_verified": "render, degrade and all on completed002 fail visibly before GPU launch; original report byte hash unchanged.",
+  "scripts": {
+    "run_spike.py": "7d13bc7ec71c7896384ef6290c623166a359c54f0a42519ea33478c04d3a5929",
+    "worker.py": "4db4f48f5ea8707187c9e1d66cdc8704d76a264291e149c21943561adafc7ce6"
+  },
+  "limits": [
+    "Only projected frames1/450/900 were rendered, not all900.",
+    "Opposite corner tested; safe small camera offsets unmeasured.",
+    "Only one proxy pose rendered, no complete animation.",
+    "Independent visual scores are provisional, not creator approval.",
+    "No production test suite run; production files were unchanged."
+  ]
+}

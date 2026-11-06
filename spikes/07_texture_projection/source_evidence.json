@@ -1,0 +1,107 @@
+{
+  "files": [
+    {
+      "path": "D:\\Work\\video_pipeline\\_work\\phase1_shot_s1_frame001.png",
+      "bytes": 2707509,
+      "sha256": "6be4bf9e19bb7cc08537a1436dcb3dd521305ad0fa1326d6331c43e964edce95"
+    },
+    {
+      "path": "D:\\Work\\video_pipeline\\.claude\\worktrees\\api-conformance\\_work\\phase1\\phase1\\renders\\s1\\v0001\\db7373cef42a4159ae03e701f359b07d\\attempt-0001\\scene.blend",
+      "bytes": 731616,
+      "sha256": "6f9cc9b8d6b2aa22d90bada9f9cbf29bd7ed482970f07a33e9845a939bb91a86"
+    },
+    {
+      "path": "D:\\Work\\video_pipeline\\.claude\\worktrees\\api-conformance\\_work\\phase1\\phase1\\renders\\s1\\v0001\\db7373cef42a4159ae03e701f359b07d\\attempt-0001\\frames\\frame_000001.exr",
+      "bytes": 1957695,
+      "sha256": "532ea6b7ce0e0be8381f890329e47efe43a1dafabb9190a8fa07efcf83d0e8c1"
+    },
+    {
+      "path": "D:\\Work\\video_pipeline\\.claude\\worktrees\\api-conformance\\_work\\phase1\\phase1\\renders\\s1\\v0001\\db7373cef42a4159ae03e701f359b07d\\attempt-0001\\plan.json",
+      "bytes": 156011,
+      "sha256": "ea4f772d4d95355b755ce89439050990fce49d6a32a8870047918e9fb5ba0c82"
+    },
+    {
+      "path": "D:\\Work\\video_pipeline\\.claude\\worktrees\\api-conformance\\_work\\phase1\\phase1\\renders\\s1\\v0001\\db7373cef42a4159ae03e701f359b07d\\attempt-0001\\metadata.json",
+      "bytes": 1841,
+      "sha256": "b105bdbf626591538d748c32d6682907e6f59d82fbe118848f95b6a0e1451fe9"
+    }
+  ],
+  "png_size": [
+    1280,
+    960
+  ],
+  "camera": {
+    "barrel_distortion": 0.0,
+    "camera_mount": null,
+    "camera_position": null,
+    "depth_of_field": null,
+    "exposure_ev": 0.0,
+    "field_of_view_mm": 12.0,
+    "monochrome_night": false,
+    "practical_light_color_k": 3200,
+    "practical_light_intensity": 1.0
+  },
+  "camera_location": [
+    -2.75,
+    -1.75,
+    2.52
+  ],
+  "camera_target": [
+    0.3,
+    0.2,
+    1.15
+  ],
+  "seed": 1114726891,
+  "baseline_prior_measurement": {
+    "actual_device": "NVIDIA GeForce RTX 5070 Ti Laptop GPU/PCIe/SSE2",
+    "applied_settings": {
+      "barrel_distortion": 0.0,
+      "camera_mount": null,
+      "camera_position": null,
+      "color_depth": "16",
+      "color_mode": "RGB",
+      "depth_of_field": null,
+      "engine": "BLENDER_EEVEE",
+      "exposure_ev": 0.0,
+      "exr_codec": "ZIP",
+      "field_of_view_mm": 12.0,
+      "file_format": "OPEN_EXR",
+      "fps": 60,
+      "height": 960,
+      "monochrome_conversion": null,
+      "monochrome_night": false,
+      "practical_light_color_k": 3200,
+      "practical_light_intensity": 1.0,
+      "samples": 32,
+      "seed": 1114726891,
+      "width": 1280
+    },
+    "argv": [
+      "D:\\Blender\\blender.exe",
+      "--background",
+      "--factory-startup",
+      "--disable-autoexec",
+      "--python-exit-code",
+      "1",
+      "--python",
+      "D:\\Work\\video_pipeline\\.claude\\worktrees\\api-conformance\\_work\\phase1\\phase1\\renders\\s1\\v0001\\db7373cef42a4159ae03e701f359b07d\\attempt-0001\\worker.py",
+      "--",
+      "D:\\Work\\video_pipeline\\.claude\\worktrees\\api-conformance\\_work\\phase1\\phase1\\renders\\s1\\v0001\\db7373cef42a4159ae03e701f359b07d\\attempt-0001\\plan.json"
+    ],
+    "build_hash": "fbe6228777e7",
+    "cache_identity": "be58f82ce3b6fa13254f72aefa82d12ed951ec7703bf5fbb1e7890ba37919086",
+    "child_pid": 34844,
+    "elapsed_seconds": 294.5310000000027,
+    "geometry_fingerprint": "855a54d2f749334c85c438a5a4f604ff76e86f9bf88396b16e29c928c12468ef",
+    "plan_sha256": "ea4f772d4d95355b755ce89439050990fce49d6a32a8870047918e9fb5ba0c82",
+    "run_id": "db7373cef42a4159ae03e701f359b07d",
+    "schema_version": 1,
+    "script_sha256": "f0ce80b57c631af6a3c99c0ade098cd4a4503066aedfd7a3cc540d615b60bcd2",
+    "shot_id": "s1",
+    "shot_version": 1,
+    "status": "completed",
+    "tool_version": "5.2.0 LTS",
+    "vram_baseline_mb": 1936.75,
+    "vram_peak_mb": 3041.78515625
+  }
+}
