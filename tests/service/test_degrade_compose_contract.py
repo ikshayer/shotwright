@@ -30,7 +30,7 @@ from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.platform.settings import Settings
 from orchestrator.service.dependencies import create_project
-from orchestrator.store.json_store import ProjectStore
+from orchestrator.store.json_store import ProjectStore, RecordNotFound
 
 _FONT_RELATIVE = "assets/fonts/fixture.ttf"
 
@@ -59,6 +59,8 @@ def _store_with_shot(
     *,
     current_master: bool,
     font_relative: str | None = _FONT_RELATIVE,
+    shot_post_profile: str | None = None,
+    create_shot_post_profile: bool = True,
 ) -> tuple[ProjectRoot, ProjectStore, Shot]:
     root = ProjectRoot(root_path)
     store = ProjectStore(root)
@@ -71,12 +73,17 @@ def _store_with_shot(
     )
     store.create(camera)
     store.save(_post_profile(font_relative=font_relative), expected_version=0)
+    if shot_post_profile is not None and create_shot_post_profile:
+        selected_profile = _post_profile(font_relative=font_relative).model_copy(
+            update={"name": shot_post_profile}
+        )
+        store.save(selected_profile, expected_version=0)
     if font_relative is not None:
         root.write_bytes(font_relative, b"fixture font")
 
     original = Shot(
         shot_id="shot-1", episode_id="ep1", camera_profile=camera.camera_id,
-        duration_sec=7.375, degrade_seed=918273,
+        duration_sec=7.375, degrade_seed=918273, post_profile=shot_post_profile,
     )
     store.create(original)
 
@@ -177,6 +184,37 @@ def test_degrade_composition_uses_current_master_shot_seed_and_named_profile(
     assert _tree_snapshot(root.path) == before, (
         "compose_degrade_request changed project files or directories during composition"
     )
+
+
+def test_degrade_composition_uses_the_shot_profile_override(
+    tmp_path: Path,
+) -> None:
+    _root, store, shot = _store_with_shot(
+        tmp_path, current_master=True, shot_post_profile="low-light-bw",
+    )
+
+    selected = compose_module.compose_post_profile_spec(store, shot=shot)
+    request = _compose(store, shot)
+
+    assert selected.identity.name == "low-light-bw"
+    assert request.profile.identity == selected.identity
+    assert store.load(Project).output_profile == "dvr-2005"
+
+
+def test_degrade_composition_rejects_a_missing_shot_profile_without_fallback(
+    tmp_path: Path,
+) -> None:
+    _root, store, shot = _store_with_shot(
+        tmp_path,
+        current_master=True,
+        shot_post_profile="missing-profile",
+        create_shot_post_profile=False,
+    )
+
+    with pytest.raises(RecordNotFound) as caught:
+        _compose(store, shot)
+
+    assert str(caught.value) == "Shot 'shot-1' references missing PostProfile 'missing-profile'"
 
 
 def test_degrade_composition_rejects_only_a_stale_master_and_names_the_reason(

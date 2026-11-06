@@ -25,6 +25,7 @@ from orchestrator.adapters.blender.scene import (
     ObjectSpec,
     RenderRequest,
     SceneSpec,
+    synthetic_interior,
 )
 from orchestrator.domain.entities import (
     CameraProfile,
@@ -46,6 +47,7 @@ def _store_with_shot(
     *,
     camera_profile: str = "cam-profile-1",
     create_camera_profile: bool = True,
+    scene_look: str | None = None,
 ) -> tuple[ProjectStore, Shot, int]:
     store = ProjectStore(ProjectRoot(root))
     store.save(Project(project_id="p1", title="Composition fixture"), expected_version=0)
@@ -66,6 +68,7 @@ def _store_with_shot(
         camera_profile=camera_profile,
         duration_sec=4.0,
         degrade_seed=11,
+        scene_look=scene_look,
     )
     store.create(original)
 
@@ -195,6 +198,35 @@ def test_render_preview_and_master_compose_different_modes(tmp_path: Path) -> No
 
     assert master.mode == "master"
     assert preview.mode == "preview"
+
+
+def test_render_composition_passes_the_shot_scene_look(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, shot, _ = _store_with_shot(tmp_path, scene_look="low_key")
+    expected_scene = synthetic_interior()
+    received: list[str] = []
+
+    def select_room(*, look: str) -> SceneSpec:
+        received.append(look)
+        return expected_scene
+
+    monkeypatch.setattr("orchestrator.service.compose.american_living_room", select_room)
+    request = _compose_render(store, shot)
+
+    assert received == ["low_key"]
+    assert request.scene == expected_scene
+
+
+def test_render_composition_rejects_a_missing_scene_look_with_shot_context(
+    tmp_path: Path,
+) -> None:
+    store, shot, _ = _store_with_shot(tmp_path, scene_look="moonlit")
+
+    with pytest.raises(ValueError) as caught:
+        _compose_render(store, shot)
+
+    assert str(caught.value) == "Shot 'shot-1' references missing scene look 'moonlit'"
 
 
 def test_missing_camera_profile_names_the_missing_record(tmp_path: Path) -> None:

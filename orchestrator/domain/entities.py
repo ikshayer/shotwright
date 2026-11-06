@@ -112,6 +112,10 @@ class Shot(VersionedEntity):
     location_id: str | None = None
     camera_id: str | None = None
     camera_profile: str = "dvr-2005"
+    post_profile: str | None = None
+    # Placeholder until Location is implemented: scene look belongs on Location,
+    # because a room's lighting is a property of place and time of day, not Shot.
+    scene_look: str | None = None
     camera_motion: str | None = None  # FR-30, non-CCTV profiles only
     beat_id: str | None = None
     narrative_beat: str = ""

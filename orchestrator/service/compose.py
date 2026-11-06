@@ -12,7 +12,7 @@ adapter-stage seeds.
 from __future__ import annotations
 
 import json
-from typing import Literal
+from typing import Literal, cast
 
 from orchestrator.adapters.blender.scene import RenderRequest, SceneSpec, american_living_room
 from orchestrator.adapters.postprofile.profile import (
@@ -50,12 +50,23 @@ def compose_render_request(
             f"Shot {shot.shot_id!r} references missing CameraProfile "
             f"{shot.camera_profile!r}"
         ) from exc
+    if shot.scene_look is not None and shot.scene_look not in {"bright", "low_key"}:
+        raise ValueError(
+            f"Shot {shot.shot_id!r} references missing scene look {shot.scene_look!r}"
+        )
     if require_built_scene:
         scene, anomaly_precomposed = _load_scene_spec(store, shot)
     else:
         # Temporary selection here; FR-15 (P0) belongs on Shot.location_id resolving to
-        # a Location record for intra-episode location and camera reuse.
-        scene, anomaly_precomposed = american_living_room(), False
+        # a Location record for intra-episode location and camera reuse. Scene look also
+        # belongs on Location, not Shot: lighting is a property of place and time of day.
+        if shot.scene_look is None:
+            scene = american_living_room()
+        else:
+            scene = american_living_room(
+                look=cast(Literal["bright", "low_key"], shot.scene_look)
+            )
+        anomaly_precomposed = False
     return RenderRequest(
         shot_id=shot.shot_id,
         shot_version=shot.version,
@@ -113,12 +124,24 @@ def _load_scene_spec(store: ProjectStore, shot: Shot) -> tuple[SceneSpec, bool]:
         ) from exc
 
 
-def compose_post_profile_spec(store: ProjectStore) -> PostProfileSpec:
-    """Build the adapter value from the profile named by ``Project.output_profile``."""
+def compose_post_profile_spec(
+    store: ProjectStore, *, shot: Shot | None = None,
+) -> PostProfileSpec:
+    """Build the adapter value from a Shot override or ``Project.output_profile``."""
     project = store.load(Project)
+    profile_name = (
+        shot.post_profile
+        if shot is not None and shot.post_profile is not None
+        else project.output_profile
+    )
     try:
-        identity = store.load(PostProfile, project.output_profile)
+        identity = store.load(PostProfile, profile_name)
     except RecordNotFound as exc:
+        if shot is not None and shot.post_profile is not None:
+            raise RecordNotFound(
+                f"Shot {shot.shot_id!r} references missing PostProfile "
+                f"{shot.post_profile!r}"
+            ) from exc
         raise RecordNotFound(
             f"Project output_profile {project.output_profile!r} has no project-local PostProfile record"
         ) from exc
@@ -193,7 +216,7 @@ def compose_degrade_request(
         raise RecordNotFound(
             f"Shot {shot.shot_id!r} references missing CameraProfile {shot.camera_profile!r}"
         ) from exc
-    profile = compose_post_profile_spec(store)
+    profile = compose_post_profile_spec(store, shot=shot)
     overlay = profile.identity.overlay
     if overlay is None or not overlay.font_relative:
         repair = (

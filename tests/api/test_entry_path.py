@@ -266,9 +266,24 @@ def test_propose_shots_persists_all_and_appends_on_later_proposal(
 ) -> None:
     store = _project_store(app.state.settings.project_root)
     op = _entry_op(app, "propose_shots")
-    first_body = {"shots": [_shot("s1"), _shot("s2")]}
+    first_body = {
+        "shots": [
+            _shot("s1") | {
+                "camera_profile": "low-light-bw",
+                "post_profile": "low-light-bw",
+                "scene_look": "low_key",
+            },
+            _shot("s2"),
+        ]
+    }
     first = _post(client, op, first_body, project_id="p1", episode_id="ep1")
     assert first.status_code == 200, first.text
+    selected = store.load(Shot, "s1", episode_id="ep1")
+    assert (selected.camera_profile, selected.post_profile, selected.scene_look) == (
+        "low-light-bw", "low-light-bw", "low_key",
+    )
+    unset = store.load(Shot, "s2", episode_id="ep1")
+    assert unset.post_profile is None and unset.scene_look is None
     second_body = {"shots": [_shot("s3"), _shot("s4")]}
     second = _post(client, op, second_body, project_id="p1", episode_id="ep1")
     assert second.status_code == 200, second.text
