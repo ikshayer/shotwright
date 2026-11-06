@@ -14,6 +14,9 @@ from orchestrator.adapters.blender.scene import build_scene_plan
 from orchestrator.domain.entities import (
     CameraProfile,
     Episode,
+    PostProfile,
+    PostProfileEncode,
+    PostProfileOverlay,
     Project,
     Shot,
     ShotOutput,
@@ -49,7 +52,7 @@ def _matches(app: FastAPI, pattern: str):
     return [o for o in operations(app) if rx.search(f"{o.path} {o.name}")]
 
 
-def _seed_wired_route_records(app: FastAPI) -> None:
+def _seed_wired_route_records(app: FastAPI, *, needs_degrade: bool = False) -> None:
     """The route-table harness substitutes `x` for every path parameter."""
     root = ProjectRoot(app.state.settings.project_root)
     root.make_dir("x")
@@ -102,6 +105,51 @@ def _seed_wired_route_records(app: FastAPI) -> None:
         expected_version=0,
     )
 
+    if needs_degrade:
+        # degrade_media composes from the current master receipt and the named
+        # project profile. The overlay font is profile-owned and must be persisted
+        # as a project-relative path with a real fixture file.
+        font_relative = "assets/fonts/route-overlay.ttf"
+        project_root.write_bytes(font_relative, b"route fixture font")
+        store.save(
+            PostProfile(
+                name="dvr-2005",
+                semver="1.0.0",
+                output_fps=12,
+                storage_resolution=(640, 480),
+                sample_aspect_ratio="1/1",
+                overlay=PostProfileOverlay(
+                    camera_id="CAM 03",
+                    clock_epoch=1131984000,
+                    fontsize=16,
+                    font_relative=font_relative,
+                ),
+                encode=PostProfileEncode(
+                    codec="libx264", preset="medium", crf=30,
+                    pix_fmt="yuv420p", threads=1,
+                ),
+                provenance="API route fixture",
+            ),
+            expected_version=0,
+        )
+        master_relative = f"renders/{shot.shot_id}/v{shot.version:04d}/seed/master.mkv"
+        master_bytes = b"route fixture master"
+        project_root.write_bytes(master_relative, master_bytes)
+        store.append_shot_output(
+            ShotOutput(
+                output_id="seed-master",
+                episode_id=shot.episode_id,
+                shot_id=shot.shot_id,
+                record_version=shot.version,
+                kind=ShotOutputKind.MASTER,
+                relative_path=master_relative,
+                content_sha256=hashlib.sha256(master_bytes).hexdigest(),
+                engine_id="BLENDER_EEVEE",
+                engine_build="fixture-build",
+            ),
+            expected_version=1,
+        )
+
 
 def _wired_request_kwargs(app: FastAPI, op) -> dict:
     """Provide the shot binding for the project-only media generation route too."""
@@ -128,7 +176,7 @@ def test_adapter_operation_returns_contract_status(
     ops = _matches(app, ADAPTER_OPERATIONS[operation])
     assert ops, f"no route for contract operation {operation!r}"
     if operation in WIRED:
-        _seed_wired_route_records(app)
+        _seed_wired_route_records(app, needs_degrade=operation == "degrade")
     for op in ops:
         resp = client.request(
             op.method, op.url(), headers={TOKEN_HEADER: TOKEN},

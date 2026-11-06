@@ -228,12 +228,18 @@ class ShotOutput(Entity):
             if any(value is not None for value in
                    (self.profile_semver, self.filter_graph_hash, self.pinned_binaries)):
                 raise ValueError("scene outputs may not carry degradation provenance")
-        elif self.kind in {ShotOutputKind.MASTER, ShotOutputKind.PREVIEW}:
+        elif self.kind is ShotOutputKind.MASTER:
             if not self.engine_id or not self.engine_build:
                 raise ValueError(f"{self.kind.value} output requires engine_id and engine_build")
             if any(value is not None for value in
                    (self.profile_semver, self.filter_graph_hash, self.pinned_binaries)):
                 raise ValueError("render outputs may not carry degradation provenance")
+        elif self.kind is ShotOutputKind.PREVIEW:
+            if not self.engine_id or not self.engine_build:
+                raise ValueError(f"{self.kind.value} output requires engine_id and engine_build")
+            if any(value is not None for value in
+                   (self.profile_semver, self.filter_graph_hash, self.pinned_binaries)):
+                raise ValueError("preview outputs may not carry degradation or master conversion provenance")
         elif self.kind is ShotOutputKind.DEGRADED:
             if not self.profile_semver or not self.filter_graph_hash or not self.pinned_binaries:
                 raise ValueError("degraded output requires profile_semver, filter_graph_hash, and pinned_binaries")
@@ -314,6 +320,10 @@ class PostProfileOverlay(Entity):
     camera_id: str
     clock_epoch: int
     fontsize: StrictInt = Field(gt=0)
+    # Optional only so existing schema-version-1 profiles remain readable. Degradation
+    # composition rejects a missing path with the owning profile name; it never chooses
+    # a process-local font. ProjectStore validates any supplied value via ProjectRoot.
+    font_relative: str | None = Field(None, min_length=1)
     x: StrictInt | str = 8
     y: StrictInt | str = "h-24"
     placement: Literal["in_recording", "on_playback"] = "in_recording"

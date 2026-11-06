@@ -1,6 +1,7 @@
 """Contained Blender invocation and queue-integrated process supervision."""
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import math
@@ -33,6 +34,8 @@ class RenderResult:
     engine_id: str
     engine_build: str
     generation_run: GenerationRun
+    master_path: str | None = None
+    assembly_log_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -43,6 +46,37 @@ class SceneAssemblyResult:
 def build_command(blender_exe: Path, script_path: Path, plan_path: Path) -> list[str]:
     return [str(blender_exe), "--background", "--factory-startup", "--disable-autoexec",
             "--python-exit-code", "1", "--python", str(script_path), "--", str(plan_path)]
+
+
+def build_master_command(
+    ffmpeg_exe: Path,
+    *,
+    frames_directory: Path,
+    output: Path,
+    frame_rate: int,
+    frame_count: int,
+) -> list[str]:
+    """Build the explicit, lossless linear-EXR to BT.709 integer master encode."""
+    if type(frame_rate) is not int or frame_rate <= 0:
+        raise ValueError("master frame rate must be a positive integer from the render plan")
+    if type(frame_count) is not int or frame_count <= 0:
+        raise ValueError("master frame count must be a positive integer from the render plan")
+    sequence = frames_directory / "frame_%06d.exr"
+    transfer = (
+        "zscale=primariesin=bt709:primaries=bt709:transferin=linear:transfer=bt709:"
+        "matrixin=gbr:matrix=gbr:rangein=full:range=full:dither=error_diffusion"
+    )
+    return [
+        str(ffmpeg_exe), "-hide_banner", "-nostdin", "-y", "-loglevel", "error",
+        "-fflags", "+bitexact", "-framerate", str(frame_rate), "-start_number", "1",
+        "-f", "image2", "-i", str(sequence), "-map", "0:v:0", "-frames:v", str(frame_count),
+        "-fps_mode", "passthrough", "-vf", transfer, "-an", "-sn", "-dn",
+        "-c:v", "ffv1", "-level", "3", "-coder", "1", "-context", "1",
+        "-slicecrc", "1", "-threads", "1", "-pix_fmt", "gbrp16le",
+        "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "pc",
+        "-map_metadata", "-1", "-map_chapters", "-1",
+        "-flags", "+bitexact", "-fflags", "+bitexact", str(output),
+    ]
 
 
 class _Supervisor(WorkerControl):
@@ -112,11 +146,14 @@ class _Supervisor(WorkerControl):
             self._attempt.start()
             return self._attempt
 
-    def launch(self, command: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+    def launch(self, command: list[str], *,
+               popen: Callable[..., subprocess.Popen[bytes]] | None = None,
+               **kwargs: object) -> subprocess.Popen[bytes]:
         with self._lock:
             if self._stop.is_set():
                 raise _CancelledBeforeLaunch("render stopped before Blender launch")
-            process = self._popen(command, **kwargs)  # type: ignore[arg-type]
+            factory = self._popen if popen is None else popen
+            process = factory(command, **kwargs)  # type: ignore[arg-type]
             self._process = process
             return process
 
@@ -191,11 +228,20 @@ class _CancelledBeforeLaunch(RuntimeError):
     pass
 
 
+class _MasterEncodeExit(RuntimeError):
+    def __init__(self, code: int) -> None:
+        self.code = code
+        super().__init__(f"FFmpeg exited with status {code}")
+
+
 class BlenderAdapter:
-    def __init__(self, root: ProjectRoot, settings: Settings, *, popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen) -> None:
+    def __init__(self, root: ProjectRoot, settings: Settings, *,
+                 popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
+                 ffmpeg_popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen) -> None:
         self.root = root
         self.settings = settings
         self._popen = popen
+        self._ffmpeg_popen = ffmpeg_popen
         self._control = _Supervisor(popen)
         self._render_lock = threading.Lock()
 
@@ -264,6 +310,13 @@ class BlenderAdapter:
             raise JobError(
                 JobErrorKind.CORRUPT_ARTIFACT,
                 "cannot determine render progress: plan field 'frame_end' is missing or invalid",
+                job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id,
+            )
+        frame_rate = plan_base.get("fps")
+        if isinstance(frame_rate, bool) or not isinstance(frame_rate, int) or frame_rate <= 0:
+            raise JobError(
+                JobErrorKind.CORRUPT_ARTIFACT,
+                "cannot assemble master: plan field 'fps' is missing or invalid",
                 job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id,
             )
         base_rel = f"renders/{request.shot_id}/v{request.shot_version:04d}/{request.run_id}"
@@ -409,36 +462,99 @@ class BlenderAdapter:
                 )
                 if self._control.stopped():
                     raise _stopped_error(self._control, job)
-                elapsed = time.monotonic() - start_time
+                render_elapsed = time.monotonic() - start_time
                 metadata.update({"script_sha256": script_sha, "plan_sha256": plan_digest,
-                                 "argv": argv, "elapsed_seconds": elapsed, "child_pid": child_pid,
+                                 "argv": argv, "render_elapsed_seconds": render_elapsed,
+                                 "elapsed_seconds": render_elapsed, "child_pid": child_pid,
                                  "vram_baseline_mb": baseline, "vram_peak_mb": peak,
                                  "cache_identity": cache_identity,
-                                 "status": "completed"})
+                                 "status": "assembling_master" if request.mode == "master" else "completed"})
                 self.root.write_text(metadata_rel, json.dumps(metadata, sort_keys=True, indent=2))
                 version = metadata.get("tool_version", "unknown")
                 build_hash = metadata.get("build_hash", "unknown")
                 job.resource_metrics["vram_baseline_mb"] = baseline
-                job.resource_metrics["elapsed_seconds"] = elapsed
+                job.resource_metrics["elapsed_seconds"] = render_elapsed
                 if peak is not None:
                     job.resource_metrics["vram_peak_mb"] = peak
-                job.progress = 1.0
+                job.progress = 0.99 if request.mode == "master" else 1.0
                 run_settings: dict[str, str | int | float] = {
                     "engine": plan["engine"], "mode": plan["mode"], "plan_sha256": plan_digest,
                     "script_sha256": script_sha, "child_pid": child_pid,
-                    "elapsed_seconds": elapsed, "vram_baseline_mb": baseline,
+                    "elapsed_seconds": render_elapsed, "vram_baseline_mb": baseline,
                     "cache_identity": cache_identity,
                 }
                 if peak is not None:
                     run_settings["vram_peak_mb"] = peak
-                run_metrics: dict[str, float] = {"elapsed_seconds": elapsed, "vram_baseline_mb": baseline}
+                run_metrics: dict[str, float] = {
+                    "elapsed_seconds": render_elapsed, "vram_baseline_mb": baseline,
+                }
                 if peak is not None:
                     run_metrics["vram_peak_mb"] = peak
+                master_path = None
+                assembly_log_path = None
+                transfer_function = None
+                bit_depth = None
+                generation_invocation = argv
+                assembly_outputs: list[str] = []
+                if request.mode == "master":
+                    assembly_started = time.monotonic()
+                    master_path, assembly_log_path, assembly_argv = self._assemble_master(
+                        attempt_rel=attempt_rel,
+                        frame_rate=frame_rate,
+                        frame_count=frame_end,
+                        job=job,
+                        hard_deadline=start_time + max_elapsed,
+                        cancel=cancel,
+                    )
+                    transfer_function = "bt709"
+                    bit_depth = 16
+                    generation_invocation = assembly_argv
+                    # GenerationRun is the provenance home for the encode. Keep the
+                    # renderer argv too, while invocation itself identifies the exact
+                    # FFmpeg command that produced the master.
+                    run_settings.update({
+                        "render_invocation": json.dumps(argv),
+                        "assembly_tool": "ffmpeg",
+                        "master_codec": "ffv1",
+                        "master_container": "matroska",
+                        "master_pixel_format": "gbrp16le",
+                        "master_frame_rate": frame_rate,
+                        "master_frame_count": frame_end,
+                        "source_transfer_function": "linear",
+                        "transfer_function": transfer_function,
+                        "bit_depth": bit_depth,
+                        "highlight_policy": "clamp",
+                        "tone_mapping": "none",
+                    })
+                    metadata["master_assembly"] = {
+                        "input_pattern": f"{attempt_rel}/frames/frame_%06d.exr",
+                        "frame_start": 1,
+                        "frame_count": frame_end,
+                        "frame_rate": frame_rate,
+                        "codec": "ffv1",
+                        "pixel_format": "gbrp16le",
+                        "source_transfer_function": "linear",
+                        "transfer_function": transfer_function,
+                        "bit_depth": bit_depth,
+                        "elapsed_seconds": time.monotonic() - assembly_started,
+                        "argv": assembly_argv,
+                        "log_path": assembly_log_path,
+                    }
+                    assembly_outputs.extend((master_path, assembly_log_path))
+                elapsed = time.monotonic() - start_time
+                metadata["elapsed_seconds"] = elapsed
+                metadata["status"] = "completed"
+                self.root.write_text(metadata_rel, json.dumps(metadata, sort_keys=True, indent=2))
+                job.resource_metrics["elapsed_seconds"] = elapsed
+                run_settings["elapsed_seconds"] = elapsed
+                run_metrics["elapsed_seconds"] = elapsed
+                job.progress = 1.0
                 generation = GenerationRun(
                     run_id=request.run_id, tool="blender", tool_version=f"{version}+{build_hash}",
-                    invocation=json.dumps(argv), seed=plan["seed"],
+                    invocation=json.dumps(generation_invocation), seed=plan["seed"],
                     settings=run_settings,
-                    input_paths=[script_rel, plan_path_rel], output_paths=[blend_rel, *frame_rels, metadata_rel],
+                    input_paths=[script_rel, plan_path_rel],
+                    output_paths=[blend_rel, *frame_rels, metadata_rel, *assembly_outputs],
                     log_path=log_rel,
                     status="completed", resource_metrics=run_metrics)
                 if self._control.stopped():
@@ -446,7 +562,8 @@ class BlenderAdapter:
                 result_box.append(RenderResult(
                     blend_path=blend_rel, frame_paths=frame_rels, metadata_path=metadata_rel,
                     log_path=log_rel, engine_id=engine_id, engine_build=engine_build,
-                    generation_run=generation,
+                    generation_run=generation, master_path=master_path,
+                    assembly_log_path=assembly_log_path,
                 ))
             except Exception as exc:  # noqa: BLE001 - preserve the cause across the supervisor-thread boundary.
                 error_box.append(exc)
@@ -502,6 +619,125 @@ class BlenderAdapter:
             return queued_worker(job)
         return queue.run(job, queued_worker, partial_artifacts=(base,),
                          startup_allowance_seconds=startup_allowance)
+
+    def _assemble_master(
+        self,
+        *,
+        attempt_rel: str,
+        frame_rate: int,
+        frame_count: int,
+        job: Job,
+        hard_deadline: float,
+        cancel: Callable[[], bool] | None,
+    ) -> tuple[str, str, list[str]]:
+        frames_rel = f"{attempt_rel}/frames"
+        master_rel = f"{attempt_rel}/master.mkv"
+        log_rel = f"{attempt_rel}/ffmpeg-assembly.log"
+        command_box: list[list[str]] = []
+
+        def authorize_output(output_path: Path) -> None:
+            command = build_master_command(
+                self.settings.binaries.ffmpeg_exe,
+                frames_directory=self.root.resolve(frames_rel),
+                output=output_path,
+                frame_rate=frame_rate,
+                frame_count=frame_count,
+            )
+            command_box.append(command)
+
+            def write_log(log_path: Path) -> None:
+                with log_path.open("wb") as log_stream:
+                    if time.monotonic() >= hard_deadline:
+                        self._control.stop_for(JobErrorKind.BUDGET_EXCEEDED)
+                    if self._control.stopped():
+                        raise _stopped_error(self._control, job)
+                    try:
+                        process = self._control.launch(
+                            command,
+                            popen=self._ffmpeg_popen,
+                            stdin=subprocess.DEVNULL,
+                            stdout=log_stream,
+                            stderr=subprocess.STDOUT,
+                            shell=False,
+                            cwd=self.root.path,
+                        )
+                    except OSError as exc:
+                        kind = JobErrorKind.DISK_EXHAUSTED if exc.errno == errno.ENOSPC else JobErrorKind.WORKER_UNREACHABLE
+                        raise JobError(kind, f"could not launch FFmpeg master assembly: {exc}",
+                                       job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id,
+                                       cause=exc) from exc
+                    try:
+                        while True:
+                            if cancel is not None and cancel():
+                                self._control.stop_for(JobErrorKind.CANCELLED)
+                            if self._control.stopped():
+                                raise _stopped_error(self._control, job)
+                            remaining = hard_deadline - time.monotonic()
+                            if remaining <= 0:
+                                self._control.stop_for(JobErrorKind.BUDGET_EXCEEDED)
+                                raise _stopped_error(self._control, job)
+                            try:
+                                code = process.wait(timeout=min(0.05, remaining))
+                                break
+                            except subprocess.TimeoutExpired:
+                                continue
+                    except OSError as exc:
+                        raise JobError(JobErrorKind.WORKER_UNREACHABLE,
+                                       f"could not wait for FFmpeg master assembly: {exc}",
+                                       job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id,
+                                       cause=exc) from exc
+                    # Keep a child registered on interrupted/failed waits: teardown must
+                    # confirm its exit before the GPU lease can be released.
+                    self._control.clear_process(process)
+                    if self._control.stopped():
+                        raise _stopped_error(self._control, job)
+                    if time.monotonic() >= hard_deadline:
+                        self._control.stop_for(JobErrorKind.BUDGET_EXCEEDED)
+                        raise _stopped_error(self._control, job)
+                    if code != 0:
+                        raise _MasterEncodeExit(code)
+
+            self.root.write_with(log_rel, write_log)
+
+        try:
+            self.root.write_with(master_rel, authorize_output)
+        except _MasterEncodeExit as exc:
+            try:
+                detail = self.root.read_text(log_rel, encoding="utf-8")[-3000:]
+            except OSError as log_exc:
+                raise JobError.from_exception(
+                    log_exc, job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id,
+                    origin="adapter",
+                ) from exc
+            lowered = detail.lower()
+            if any(token in lowered for token in (
+                "no space left on device", "enospc", "error -28", "error 112",
+            )):
+                kind = JobErrorKind.DISK_EXHAUSTED
+            elif any(token in lowered for token in (
+                "unknown encoder", "no such filter", "option not found", "not implemented",
+            )):
+                kind = JobErrorKind.INVALID_MANIFEST
+            else:
+                kind = JobErrorKind.INTERNAL
+            raise JobError(kind, f"FFmpeg master assembly exited with status {exc.code}: {detail}",
+                           job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id,
+                           cause=exc) from exc
+        except OSError as exc:
+            kind = JobErrorKind.DISK_EXHAUSTED if exc.errno == errno.ENOSPC else JobErrorKind.INTERNAL
+            raise JobError(kind, f"FFmpeg master assembly could not write its output: {exc}",
+                           job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id,
+                           cause=exc) from exc
+
+        master = self.root.resolve(master_rel)
+        if not master.is_file() or master.stat().st_size <= 0:
+            raise JobError(JobErrorKind.CORRUPT_ARTIFACT,
+                           "FFmpeg master assembly produced a missing or empty file",
+                           job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
+        if not command_box:
+            raise JobError(JobErrorKind.INTERNAL, "FFmpeg master assembly command was not recorded",
+                           job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
+        return master_rel, log_rel, command_box[0]
 
 
 def _completed_frame_count(frames_directory: Path, extension: str, frame_end: int, *,
