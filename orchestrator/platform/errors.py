@@ -14,6 +14,20 @@ from enum import StrEnum
 from typing import Any
 
 DIAGNOSTIC_TRACEBACK_LIMIT = 16 * 1024
+
+#: The layers that may be named as a failure's origin. Closed, like JobErrorKind: an
+#: operator reads this to tell an adapter failure from a runner or queue failure, and a
+#: free-form string would make that unreliable. The diagnosability contract required an
+#: origin without naming the vocabulary, so it is pinned here.
+DIAGNOSTIC_ORIGINS = frozenset({"adapter", "runner", "job_queue"})
+
+#: Well-known credential prefixes, redacted on sight. This is defence in depth, NOT a
+#: guarantee: an arbitrary unregistered secret cannot be recognised in general, and
+#: claiming otherwise would be worse than admitting it. Known secrets are redacted by
+#: value; these shapes are caught even when nobody registered them.
+_WELL_KNOWN_SECRET_PATTERN = re.compile(
+    r"\b(?:ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|sk-|xoxb-|xoxp-|AKIA)[A-Za-z0-9_\-]{8,}"
+)
 _BEARER_PATTERN = re.compile(r"(?i)(\bBearer\s+)[A-Za-z0-9._~+/-]+=*")
 _TOKEN_ASSIGNMENT_PATTERN = re.compile(
     r"(?i)(\b(?:loopback[_ -]?token|access[_ -]?token|api[_ -]?key|secret)\b\s*[:=]\s*)['\"]?[^\s,'\"]+"
@@ -32,6 +46,7 @@ def failure_diagnostics(
     def scrub(value: str) -> str:
         for secret in secret_values:
             value = value.replace(secret, "[REDACTED]")
+        value = _WELL_KNOWN_SECRET_PATTERN.sub("[REDACTED]", value)
         value = _BEARER_PATTERN.sub(r"\1[REDACTED]", value)
         return _TOKEN_ASSIGNMENT_PATTERN.sub(r"\1[REDACTED]", value)
 

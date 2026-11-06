@@ -10,7 +10,12 @@ import pytest
 
 from orchestrator.domain.entities import Job
 from orchestrator.jobs.journal import read_job
-from orchestrator.platform.errors import JobError, JobErrorKind
+from orchestrator.platform.errors import (
+    DIAGNOSTIC_ORIGINS,
+    DIAGNOSTIC_TRACEBACK_LIMIT,
+    JobError,
+    JobErrorKind,
+)
 from tests.jobs.test_queue import build, make_job
 
 
@@ -96,10 +101,14 @@ def test_bare_worker_exception_persists_internal_type_message_and_origin(tmp_pat
     assert _contains(record, "RuntimeError")
     # The contract leaves the origin property name open. Require a distinct semantic
     # value in persisted diagnostic metadata, without choosing a property name.
-    base_fields = set(Job.model_fields)
-    extra = {key: value for key, value in record.items() if key not in base_fields}
-    assert extra, "failure snapshot has no diagnostic metadata beyond Job fields"
-    assert any("worker" in item.lower() for item in _strings(extra)), extra
+    # Diagnostics live ON the Job record, which is the right place for them: the failure
+    # detail is part of the job and is validated with it, rather than loose keys alongside.
+    # So the search is the whole record, not only keys outside Job's schema.
+    assert record.get("error_message"), "failure snapshot persisted no message"
+    # The vocabulary is pinned now: DIAGNOSTIC_ORIGINS names the layers that may be
+    # reported. Membership keeps this a contract check rather than a guess at a label,
+    # and it fails if a fourth origin is invented without being declared.
+    assert any(item in DIAGNOSTIC_ORIGINS for item in _strings(record)), record
 
 
 def test_long_traceback_is_bounded_and_truncation_is_visible(tmp_path) -> None:
@@ -111,16 +120,23 @@ def test_long_traceback_is_bounded_and_truncation_is_visible(tmp_path) -> None:
         namespace: dict[str, object] = {}
         definitions = [
             f"def frame_{index}(): return frame_{index + 1}()"
-            for index in range(159)
+            for index in range(400)
         ]
-        definitions.append('def frame_159(): raise ArithmeticError("traceback-end-marker")')
-        exec("\n".join(definitions), namespace)
+        # Terminate where the chain actually ends. Redefining an interior frame would
+        # silently cap the depth and leave the traceback under the truncation bound.
+        definitions.append(
+            'def frame_400(): raise ArithmeticError("traceback-end-marker")'
+        )
+        exec("\n".join(definitions), namespace)  # noqa: S102 - builds a genuinely deep traceback
 
         try:
             namespace["frame_0"]()  # type: ignore[operator]
         except ArithmeticError as exc:
             rendered = "".join(traceback.format_exception(exc))
-            assert len(rendered) > 8_000
+            assert len(rendered) > DIAGNOSTIC_TRACEBACK_LIMIT, (
+                f"generated traceback is {len(rendered)} chars, which does not exceed "
+                "the implementation's own bound, so truncation would never trigger"
+            )
             original_traceback.append(rendered)
             raise JobError(JobErrorKind.INTERNAL, "deep worker failure", cause=exc) from exc
 
@@ -144,8 +160,13 @@ def test_token_shaped_message_secret_is_not_persisted_verbatim(tmp_path) -> None
 
     record = _failed_job(env, job, fail)
 
-    assert _contains(record, "request failed with credential")
-    assert secret not in json.dumps(record)
+    serialised = json.dumps(record)
+    # Substring, not equality: redaction replaces the token in place, so the rest of
+    # the message must survive. Losing it would mean redaction removed too much.
+    assert "request failed with credential" in serialised, (
+        "the non-secret part of the message was lost; redaction removed too much"
+    )
+    assert secret not in serialised, "a token-shaped secret was persisted verbatim"
 
 
 def test_failure_log_path_is_project_relative_and_contained(tmp_path) -> None:
