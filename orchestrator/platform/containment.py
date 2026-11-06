@@ -13,6 +13,7 @@ writers.
 
 from __future__ import annotations
 
+import io
 import os
 import re
 import threading
@@ -37,6 +38,21 @@ _ILLEGAL_COMPONENT_CHARS = frozenset('<>:"|?*') | {chr(c) for c in range(32)}
 _SHORT_NAME_PATTERN = re.compile(r"~\d")
 ATOMIC_WRITE_DIRECTORY = ".projectroot-atomic-write"
 _REPLACE_DELAYS_SECONDS = (0.01, 0.02, 0.04, 0.08)
+_READ_DELAYS_SECONDS = _REPLACE_DELAYS_SECONDS
+
+
+class ContainedReadError(PermissionError):
+    """A contained read remained blocked after bounded retries."""
+
+    def __init__(self, relative: str, cause: PermissionError, *, attempts: int) -> None:
+        self.relative = relative
+        self.attempts = attempts
+        super().__init__(
+            cause.errno,
+            f"Contained read of {relative!r} was denied after {attempts} attempt(s): {cause}",
+            getattr(cause, "filename", None),
+        )
+        self.__cause__ = cause
 _APPEND_LOCK = threading.Lock()
 
 
@@ -142,11 +158,12 @@ def _is_within(root: Path, candidate: Path) -> bool:
 class ProjectRoot:
     """The only object allowed to turn a relative name into a writable location."""
 
-    def __init__(self, root: Path | str) -> None:
+    def __init__(self, root: Path | str, *, use_windows_share_delete_reads: bool = False) -> None:
         resolved = Path(root).resolve(strict=False)
         if not resolved.is_dir():
             raise ContainmentError(str(root), "project root does not exist or is not a directory; create it first")
         self._root = resolved
+        self._use_windows_share_delete_reads = use_windows_share_delete_reads
 
     @property
     def path(self) -> Path:
@@ -163,6 +180,56 @@ class ProjectRoot:
                 "(a symlink or junction points out of the root)",
             )
         return resolved
+
+    def read_bytes(self, relative: str) -> bytes:
+        """Read contained bytes with bounded PermissionError retry.
+
+        ``use_windows_share_delete_reads`` opts into a slower Windows ``CreateFileW``
+        open requesting ``FILE_SHARE_DELETE``. The measured Amendment 2 replacement
+        experiment disproved its original rationale: it did not permit replacement
+        while a reader was open on this machine. This option is retained for evaluation;
+        it is not known to fix anything and is not a recommendation.
+        """
+        target = self.resolve(relative)
+        for attempt in range(len(_READ_DELAYS_SECONDS) + 1):
+            try:
+                with self._open_read(target) as stream:
+                    return stream.read()
+            except PermissionError as exc:
+                if target.is_dir():
+                    raise
+                if attempt == len(_READ_DELAYS_SECONDS):
+                    raise ContainedReadError(relative, exc, attempts=attempt + 1) from exc
+                time.sleep(_READ_DELAYS_SECONDS[attempt])
+        raise AssertionError("unreachable")
+
+    def read_text(self, relative: str, *, encoding: str = "utf-8") -> str:
+        """Read text using Path.read_text's strict decoding and universal newlines.
+
+        The optional Windows share-delete handle is slower and the Amendment 2
+        measurement disproved its original justification. It is retained only as an
+        option; it is not known to fix anything and is not a recommendation.
+        """
+        target = self.resolve(relative)
+        for attempt in range(len(_READ_DELAYS_SECONDS) + 1):
+            try:
+                with (
+                    self._open_read(target) as binary,
+                    io.TextIOWrapper(binary, encoding=encoding, newline=None) as stream,
+                ):
+                    return stream.read()
+            except PermissionError as exc:
+                if target.is_dir():
+                    raise
+                if attempt == len(_READ_DELAYS_SECONDS):
+                    raise ContainedReadError(relative, exc, attempts=attempt + 1) from exc
+                time.sleep(_READ_DELAYS_SECONDS[attempt])
+        raise AssertionError("unreachable")
+
+    def _open_read(self, target: Path):
+        if self._use_windows_share_delete_reads and os.name == "nt":
+            return _open_shared_read(target)
+        return target.open("rb")
 
     def make_dir(self, relative: str) -> Path:
         target = self.resolve(relative)
@@ -295,6 +362,47 @@ class ProjectRoot:
         target = self.resolve(relative)
         target.parent.mkdir(parents=True, exist_ok=True)
         return target
+
+
+def _open_shared_read(path: Path):
+    """Open with Windows share-delete flags; used only by the explicit opt-in path."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = create_file(
+        str(path),
+        0x80000000,  # GENERIC_READ
+        0x00000001 | 0x00000002 | 0x00000004,  # FILE_SHARE_READ | WRITE | DELETE
+        None,
+        3,  # OPEN_EXISTING
+        0x00000080,  # FILE_ATTRIBUTE_NORMAL
+        None,
+    )
+    if handle == ctypes.c_void_p(-1).value:
+        windows_error = ctypes.WinError(ctypes.get_last_error())
+        raise OSError(windows_error.errno, windows_error.strerror, str(path)) from windows_error
+
+    try:
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        kernel32.CloseHandle(handle)
+        raise
+    return os.fdopen(fd, "rb")
 
 
 # --- filenames and uploads -------------------------------------------------------------

@@ -349,7 +349,7 @@ class BlenderAdapter:
                 if self._control.stopped():
                     raise _stopped_error(self._control, job)
                 try:
-                    metadata = json.loads(self.root.resolve(metadata_rel).read_text(encoding="utf-8"))
+                    metadata = json.loads(self.root.read_text(metadata_rel, encoding="utf-8"))
                 except (OSError, ValueError) as exc:
                     raise JobError(JobErrorKind.CORRUPT_ARTIFACT, f"worker metadata missing or malformed: {exc}",
                                    job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id) from exc

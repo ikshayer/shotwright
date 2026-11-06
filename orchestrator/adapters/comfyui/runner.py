@@ -299,7 +299,10 @@ class ComfyAdapter:
                 raise JobError(JobErrorKind.CORRUPT_ARTIFACT, f"generated image cannot be decoded: {exc}", cause=exc) from exc
             self._fence(epoch, queue, token, stop)
             retained_rel = f"{attempt_rel}/image.png"
-            self.root.write_bytes(retained_rel, source.read_bytes())
+            self.root.write_bytes(
+                retained_rel,
+                self.root.read_bytes(f"{runtime_rel}/output/{subfolder}/{filename}"),
+            )
             for pin in pins.values():
                 if _sha(pin.path, checkpoint=lambda: self._fence(epoch, queue, token, stop)) != pin.sha256:
                     raise JobError(JobErrorKind.CORRUPT_ARTIFACT, f"model changed during generation: {pin.path}")
@@ -356,7 +359,9 @@ class ComfyAdapter:
                 self.root.write_text(f"{attempt_rel}/metadata.json", json.dumps({"status":"failed","error":record,"prompt_id":prompt_id},sort_keys=True,indent=2))
                 gen_path = self.root.resolve(f"{attempt_rel}/generation-run.json")
                 if gen_path.is_file():
-                    previous_gen = GenerationRun.model_validate_json(gen_path.read_text(encoding="utf-8"))
+                    previous_gen = GenerationRun.model_validate_json(
+                        self.root.read_text(f"{attempt_rel}/generation-run.json", encoding="utf-8")
+                    )
                     self.root.write_text(f"{attempt_rel}/generation-run.json",
                                          previous_gen.model_copy(update={"status":"failed"}).model_dump_json(indent=2))
             except OSError as log_exc:
@@ -404,7 +409,7 @@ class ComfyAdapter:
         if not lease._owned or token in self._blocked_tokens or not isinstance(record, dict) or record.get("token") != token or not self.root.resolve("jobs/gpu_lease.json").exists():
             raise JobError(JobErrorKind.CANCELLED, "GPU lease ownership was lost")
         try:
-            persisted = json.loads(self.root.resolve("jobs/gpu_lease.json").read_text(encoding="utf-8"))
+            persisted = json.loads(self.root.read_text("jobs/gpu_lease.json", encoding="utf-8"))
         except (OSError, ValueError) as exc: raise JobError(JobErrorKind.CANCELLED, "GPU lease record is unavailable", cause=exc) from exc
         if persisted.get("token") != token: raise JobError(JobErrorKind.CANCELLED, "GPU lease token was replaced")
         if self._cancel is not None and self._cancel():

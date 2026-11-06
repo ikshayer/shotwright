@@ -77,7 +77,10 @@ class OperationContext:
             self.root.make_dir(project_id)
         elif not resolved.is_dir():
             raise RecordNotFound(f"project {project_id!r} does not exist")
-        return ProjectRoot(resolved)
+        return ProjectRoot(
+            resolved,
+            use_windows_share_delete_reads=self.settings.use_windows_share_delete_reads,
+        )
 
     def _store(self, project_id: str, *, create: bool = False) -> ProjectStore:
         return ProjectStore(self._project_root(project_id, create=create))
@@ -97,7 +100,14 @@ class OperationContext:
                     contained = self.root.resolve(path.name)
                     if not contained.is_dir():
                         continue
-                    projects.append(ProjectStore(ProjectRoot(contained)).load(Project).model_dump(mode="json"))
+                    projects.append(
+                        ProjectStore(
+                            ProjectRoot(
+                                contained,
+                                use_windows_share_delete_reads=self.settings.use_windows_share_delete_reads,
+                            )
+                        ).load(Project).model_dump(mode="json")
+                    )
                 except RecordNotFound:
                     continue
             return projects
@@ -249,7 +259,10 @@ def create_app(
     configured = settings
     if not token:
         raise ValueError("a loopback token must be provided")
-    root = ProjectRoot(configured.project_root)
+    root = ProjectRoot(
+        configured.project_root,
+        use_windows_share_delete_reads=configured.use_windows_share_delete_reads,
+    )
     if job_runner is None:
         runtime = _DefaultRuntime(configured, root)
         job_runner = JobRunner(
@@ -476,7 +489,10 @@ class _DefaultRuntime:
         path = self.root.resolve(project_id)
         if not path.is_dir():
             raise RecordNotFound(f"project {project_id!r} does not exist")
-        return ProjectRoot(path)
+        return ProjectRoot(
+            path,
+            use_windows_share_delete_reads=self.settings.use_windows_share_delete_reads,
+        )
 
     def adapter_for(self, project_root: ProjectRoot, kind: AdapterKind) -> Any:
         key = (str(project_root.path), kind)

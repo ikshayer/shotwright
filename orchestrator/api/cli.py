@@ -73,7 +73,14 @@ def _command_callback(operation_name: str):
             payload.update({key: value for key, value in values.items() if value is not None})
             if files:
                 payload["uploads"] = [_describe_file(path) for path in files]
-            root = ProjectRoot(configured.project_root) if configured.project_root.is_dir() else None
+            root = (
+                ProjectRoot(
+                    configured.project_root,
+                    use_windows_share_delete_reads=configured.use_windows_share_delete_reads,
+                )
+                if configured.project_root.is_dir()
+                else None
+            )
             context = OperationContext(configured, root)
             result = context.invoke(operation_name, payload)
             if (operation_name in {"build_scene", "render_preview", "generate_media", "degrade_media"}

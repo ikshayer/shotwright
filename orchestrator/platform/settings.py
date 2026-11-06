@@ -114,6 +114,14 @@ class ResourceSettings(_Section):
 
 class Settings(_Section):
     project_root: Path = Field(Path("projects"), description="Active project root; all writes are contained here.")
+    use_windows_share_delete_reads: bool = Field(
+        False,
+        description=(
+            "Opt into slower Windows CreateFileW reads requesting FILE_SHARE_DELETE. "
+            "The measured Amendment 2 replacement experiment disproved the original "
+            "rationale; this option is retained for evaluation and is not known to fix anything."
+        ),
+    )
     hosted_video_tier: Literal[1, 2, 3] = Field(1, description="Section 6.2 access tier; 1 = annotate only.")
     binaries: BinariesSettings = BinariesSettings()
     models: ModelsSettings = ModelsSettings()

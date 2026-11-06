@@ -328,9 +328,8 @@ class GpuLease:
             raise
 
     def _read(self) -> dict[str, object] | None:
-        path = self.root.resolve(self._path)
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(self.root.read_text(self._path, encoding="utf-8"))
         except FileNotFoundError:
             return None
         if not isinstance(data, dict) or not isinstance(data.get("pid"), int):

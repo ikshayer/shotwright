@@ -451,7 +451,7 @@ class ProjectStore:
             for item in sorted(directory.glob("*.json")):
                 relative = f"_journal/cascades/{item.name}"
                 try:
-                    raw = json.loads(self._resolve(relative).read_text(encoding="utf-8"))
+                    raw = json.loads(self._read_text(relative))
                 except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
                     raise _invalid(f"cannot read cascade journal entry {item.name}: {exc}", cause=exc) from exc
                 if item.name.endswith(".done.json"):
@@ -620,7 +620,7 @@ class ProjectStore:
         if match is None or int(match.group(1)) != token:
             raise _invalid(f"{relative} filename does not match its expected ledger token")
         try:
-            data = json.loads(self._resolve(relative).read_text(encoding="utf-8"))
+            data = json.loads(self._read_text(relative))
         except FileNotFoundError as exc:
             raise RecordNotFound(f"{relative} does not exist") from exc
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -687,7 +687,7 @@ class ProjectStore:
                 raise _invalid(f"content history before {base_relative} has a version gap")
             previous, previous_token = self._read_version_snapshot(cls, directory, previous_version)
             try:
-                raw_base = json.loads(self._resolve(base_relative).read_text(encoding="utf-8"))
+                raw_base = json.loads(self._read_text(base_relative))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise _invalid(f"cannot read content record {base_relative}: {exc}", cause=exc) from exc
             tracked_base = "_mutation_token" in raw_base
@@ -718,7 +718,7 @@ class ProjectStore:
             if found != candidate_token:
                 raise _invalid(f"{relative} mutation token does not match its filename")
             try:
-                raw = json.loads(self._resolve(relative).read_text(encoding="utf-8"))
+                raw = json.loads(self._read_text(relative))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise _invalid(f"cannot read lifecycle snapshot {relative}: {exc}", cause=exc) from exc
             if raw.get("_predecessor_token") != token:
@@ -754,6 +754,12 @@ class ProjectStore:
         except ContainmentError as exc:
             raise _invalid(str(exc), cause=exc) from exc
 
+    def _read_text(self, relative: str) -> str:
+        try:
+            return self._root.read_text(relative, encoding="utf-8")
+        except ContainmentError as exc:
+            raise _invalid(str(exc), cause=exc) from exc
+
     def _versions_in(self, directory: str) -> list[int]:
         return self._versions_in_path(self._resolve(directory))
 
@@ -769,7 +775,7 @@ class ProjectStore:
 
     def _read_record(self, cls: type[E], relative: str) -> tuple[E, int]:
         try:
-            raw = self._resolve(relative).read_text(encoding="utf-8")
+            raw = self._read_text(relative)
         except FileNotFoundError as exc:
             raise RecordNotFound(f"{relative} does not exist") from exc
         except OSError as exc:

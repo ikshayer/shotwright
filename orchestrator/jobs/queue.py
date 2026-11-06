@@ -360,9 +360,8 @@ class JobQueue:
     def _charge_budget(self, job: Job, key: str, elapsed: float) -> None:
         path = "jobs/budgets.json"
         with self._budget_lock:
-            target = self.root.resolve(path)
             try:
-                budget = json.loads(target.read_text(encoding="utf-8"))
+                budget = json.loads(self.root.read_text(path, encoding="utf-8"))
             except FileNotFoundError:
                 budget = {"shot_seconds": {}, "episode_seconds": {}}
             shot_seconds = float(budget["shot_seconds"].get(key, 0)) + elapsed
