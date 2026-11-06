@@ -12,13 +12,19 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from orchestrator.domain.entities import Project, RubricScores, Script, Shot
+from orchestrator.domain.entities import Episode, Project, RubricScores, Script, Shot
 from orchestrator.jobs.journal import read_job_records
 from orchestrator.jobs.lease import GpuLease, PynvmlProbe
 from orchestrator.jobs.queue import JobQueue, ProjectQuarantine, SystemHostResources
 from orchestrator.platform.containment import ProjectRoot, validate_upload
 from orchestrator.platform.settings import Settings
-from orchestrator.service.dependencies import revise_script, revise_shot
+from orchestrator.service.dependencies import (
+    create_episode,
+    draft_script,
+    propose_shots,
+    revise_script,
+    revise_shot,
+)
 from orchestrator.service.runner import (
     AdapterKind,
     AdapterRegistry,
@@ -113,6 +119,22 @@ class OperationContext:
             return projects
         if operation == "load_project":
             return self._store(data["project_id"]).load(Project).model_dump(mode="json")
+        if operation == "create_episode":
+            episode = Episode.model_validate(data["episode"])
+            _require_path_match(data, "project_id", episode.project_id)
+            created = create_episode(self._store(data["project_id"]), episode)
+            return created.model_dump(mode="json")
+        if operation == "draft_script":
+            script = Script.model_validate(data["script"])
+            _require_path_match(data, "episode_id", script.episode_id)
+            created = draft_script(self._store(data["project_id"]), script)
+            return created.model_dump(mode="json")
+        if operation == "propose_shots":
+            shots = [Shot.model_validate(item) for item in data["shots"]]
+            for shot in shots:
+                _require_path_match(data, "episode_id", shot.episode_id)
+            created = propose_shots(self._store(data["project_id"]), shots)
+            return [shot.model_dump(mode="json") for shot in created]
         if operation == "revise_script":
             script = Script.model_validate(data["script"])
             _require_path_match(data, "episode_id", script.episode_id)

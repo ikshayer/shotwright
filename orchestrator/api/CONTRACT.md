@@ -22,8 +22,10 @@ Every operation below must be reachable from **both** the HTTP API and the CLI.
 | Operation | Backed by |
 |---|---|
 | create / list / load project | `store` |
-| draft script, revise script | `service.dependencies.revise_script` |
-| propose shots, revise shot | `service` |
+| create episode | `service.dependencies.create_episode` / `store` |
+| draft script | `service.dependencies.draft_script` / `store` |
+| propose shots | `service.dependencies.propose_shots` / `store` |
+| revise script, revise shot | `service.dependencies.revise_script`, `service.dependencies.revise_shot` |
 | search assets, create asset | *adapter absent* |
 | build scene | `service.runner` / Blender adapter |
 | render preview | `service.runner` / Blender adapter |
@@ -35,9 +37,19 @@ Every operation below must be reachable from **both** the HTTP API and the CLI.
 | score rubric | `domain.entities.RubricScores` |
 | export | *adapter absent* |
 
-`search_assets`, `create_asset`, `sample_references` and `export` have no adapter and
-return a `501`-shaped error naming that missing adapter. They are NOT omitted: AT-10
-requires the enumeration to be complete, and the UI is built against it.
+`search_assets`, `create_asset`, `sample_references`, `export` and
+`apply_typed_feedback` have no implementation and return a `501`-shaped error naming
+the missing adapter. They are NOT omitted: AT-10 requires the enumeration to be complete,
+and the UI is built against it.
+
+Creation requests wrap the persisted entity: `create_episode` accepts `{"episode": ...}`;
+`draft_script` accepts `{"script": ...}`; `propose_shots` accepts `{"shots": [...]}`.
+These operations persist the supplied, domain-validated content and do not generate
+content or run dependency invalidation. `Script` and `Shot` start at content version 1;
+`Episode` has no content-version field and is saved with initial mutation token 1. Creation
+uses the store's absent-record token (`expected_version=0`); creating an existing record
+conflicts. Shot proposals append records. If an individual Shot write fails after earlier
+writes succeeded, the HTTP and CLI error names both the written and unwritten Shot identities.
 
 ## Security (FR-25, AT-17)
 
@@ -66,6 +78,7 @@ The only place this translation happens:
 | `SettingsError` | 500 at startup only; the server must refuse to start |
 | `TransitionError`, `ReviewApprovalError` | 422, carrying the refusal reason verbatim |
 | `JobError` | 409 if retryable, 422 if terminal; body carries `kind`, `retryable` and the **remediation hint** |
+| partial Shot proposal write failure | 500 with the written and unwritten Shot identities |
 | missing adapter | 501, naming the adapter |
 
 Error bodies are a single consistent shape. The remediation hint is the point of

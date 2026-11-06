@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from orchestrator.domain.entities import Project, RubricScores, Script, Shot
+from orchestrator.domain.entities import Episode, Project, RubricScores, Script, Shot
 
 
 class OpenRequest(BaseModel):
@@ -29,6 +29,18 @@ class ScriptRevision(BaseModel):
 class ShotRevision(BaseModel):
     shot: Shot
     expected_version: int
+
+
+class EpisodeCreation(BaseModel):
+    episode: Episode
+
+
+class ScriptDraft(BaseModel):
+    script: Script
+
+
+class ShotProposal(BaseModel):
+    shots: list[Shot]
 
 
 class RubricRequest(BaseModel):
@@ -89,11 +101,12 @@ def path_parameters(path: str) -> list[str]:
 OPERATIONS = (
     Operation("health", "GET", "/health", "Check API health", False, "api", None, _call("health")),
     Operation("create_project", "POST", "/projects", "Create a project", True, "store", Project, _call("create_project")),
+    Operation("create_episode", "POST", "/projects/{project_id}/episodes", "Create an episode", True, "service.dependencies.create_episode", EpisodeCreation, _call("create_episode")),
     Operation("list_projects", "GET", "/projects", "List projects", False, "store", None, _call("list_projects")),
     Operation("load_project", "GET", "/projects/{project_id}", "Load a project", False, "store", None, _call("load_project")),
-    Operation("draft_script", "POST", "/projects/{project_id}/episodes/{episode_id}/scripts/draft", "Draft a script", True, "service.draft_script", OpenRequest, _call("draft_script")),
+    Operation("draft_script", "POST", "/projects/{project_id}/episodes/{episode_id}/scripts/draft", "Persist an agent-authored script", True, "service.dependencies.draft_script", ScriptDraft, _call("draft_script")),
     Operation("revise_script", "POST", "/projects/{project_id}/episodes/{episode_id}/scripts/revise", "Revise a script", True, "service.dependencies.revise_script", ScriptRevision, _call("revise_script")),
-    Operation("propose_shots", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/propose", "Propose shots", True, "service.propose_shots", OpenRequest, _call("propose_shots")),
+    Operation("propose_shots", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/propose", "Persist agent-authored shots", True, "service.dependencies.propose_shots", ShotProposal, _call("propose_shots")),
     Operation("revise_shot", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/revise", "Revise a shot", True, "service.dependencies.revise_shot", ShotRevision, _call("revise_shot")),
     Operation("search_assets", "GET", "/projects/{project_id}/assets/search", "Search assets", False, "asset search adapter", OpenRequest, _call("search_assets")),
     Operation("create_asset", "POST", "/projects/{project_id}/assets", "Create an asset", True, "asset creation adapter", None, _call("create_asset"), upload=True),

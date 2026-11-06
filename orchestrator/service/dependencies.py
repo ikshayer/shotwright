@@ -7,13 +7,26 @@ from collections.abc import Iterable
 from typing import Any
 
 from orchestrator.domain.base import ShotStatus, VersionedEntity
-from orchestrator.domain.entities import CameraProfile, Episode, Location, Script, Shot
+from orchestrator.domain.entities import CameraProfile, Episode, Location, Project, Script, Shot
 from orchestrator.domain.invalidation import revision_impact
 from orchestrator.domain.state import TransitionContext, check_revision, check_transition
 from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.store.json_store import ProjectStore, VersionConflict
 
 _ENTITY_TYPES = {"Script": Script, "Location": Location, "CameraProfile": CameraProfile, "Shot": Shot}
+
+
+class ShotProposalWriteFailure(RuntimeError):
+    """A multi-Shot append failed after reporting the durable partial result."""
+
+    def __init__(self, written: list[str], not_written: list[str], cause: BaseException) -> None:
+        self.written = tuple(written)
+        self.not_written = tuple(not_written)
+        self.cause = cause
+        super().__init__(
+            f"Shot proposal failed after writing {list(self.written)}; "
+            f"not written: {list(self.not_written)}; cause: {cause}"
+        )
 
 
 def validated_cascades(store: ProjectStore) -> tuple[dict[str, Any], ...]:
@@ -257,3 +270,51 @@ def revise_shot(store: ProjectStore, revised: Shot, *, expected_version: int) ->
     with store.command():
         _revise(store, revised, expected_version, [revised.episode_id])
         return revised
+
+
+def create_episode(store: ProjectStore, episode: Episode) -> Episode:
+    """Persist a new Episode under the service command boundary."""
+    with store.command():
+        episode = store.validate_entity_payload(episode)
+        store.load(Project, episode.project_id)
+        store.save(episode, expected_version=0)
+        return episode
+
+
+def draft_script(store: ProjectStore, script: Script) -> Script:
+    """Persist an agent-authored Script at version 1 without invalidating anything."""
+    with store.command():
+        script = store.validate_entity_payload(script)
+        store.load(Episode, script.episode_id)
+        store.create(script)
+        return script
+
+
+def propose_shots(store: ProjectStore, shots: list[Shot]) -> tuple[Shot, ...]:
+    """Append a set of new draft Shots; report any writes if a set fails partway."""
+    with store.command():
+        validated = tuple(store.validate_entity_payload(shot) for shot in shots)
+        episode_ids = {shot.episode_id for shot in validated}
+        for episode_id in sorted(episode_ids):
+            store.load(Episode, episode_id)
+        # Resolve all ordinary create conflicts before the first append. A pre-existing
+        # Shot therefore keeps the normal VersionConflict/409 mapping and cannot leave
+        # earlier proposals from the same request written just before the conflict.
+        for shot in validated:
+            if store.versions(Shot, shot.shot_id, episode_id=shot.episode_id):
+                current, token = store.load_with_version(
+                    Shot, shot.shot_id, episode_id=shot.episode_id,
+                )
+                raise VersionConflict(
+                    f"episodes/{shot.episode_id}/shots/{shot.shot_id}", 0, token, current,
+                )
+        written: list[Shot] = []
+        for index, shot in enumerate(validated):
+            try:
+                store.create(shot)
+            except Exception as exc:
+                pending = [f"{item.episode_id}/{item.shot_id}" for item in validated[index:]]
+                completed = [f"{item.episode_id}/{item.shot_id}" for item in written]
+                raise ShotProposalWriteFailure(completed, pending, exc) from exc
+            written.append(shot)
+        return tuple(written)
