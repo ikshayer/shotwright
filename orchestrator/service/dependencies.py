@@ -467,10 +467,84 @@ def _unmeasured_low_light_bw_defaults(*, ffmpeg_identity: str) -> tuple[CameraPr
     return camera_profile, post_profile
 
 
+def _unmeasured_consumer_2002_defaults(*, ffmpeg_identity: str) -> tuple[CameraProfile, PostProfile]:
+    """Build the §4.2 Consumer-2002 pair with every unmeasured choice identified."""
+    profile_id = "consumer-2002"
+    output_fps = 30
+    storage_resolution = (640, 480)
+    sample_aspect_ratio = "1/1"
+    noise_strength = 24
+
+    stages = [
+        PostStage(name="resample", filter="scale",
+                  params={"w": storage_resolution[0], "h": storage_resolution[1], "flags": "bicubic"}),
+        PostStage(name="decimate", filter="fps", params={"fps": output_fps}),
+        PostStage(name="restructure", filter="select", params={"from_schedule": "drop+freeze"}),
+        PostStage(name="clock_timebase", filter="setpts", params={"from_schedule": "clock"}),
+        PostStage(name="output_timebase", filter="setpts",
+                  params={"timebase": "1/output_fps", "pts": "N"}),
+        PostStage(name="sensor_noise", filter="noise",
+                  params={"alls": noise_strength, "allf": "t+u"},
+                  seed_source="shot_degrade_seed"),
+    ]
+    encode = PostProfileEncode(
+        codec="libx264", preset="medium", crf=30, pix_fmt="yuv420p", threads=1,
+    )
+    post_profile = PostProfile(
+        name=profile_id,
+        semver="0.1.0",
+        stages=stages,
+        pinned_binaries={"ffmpeg": ffmpeg_identity},
+        output_fps=output_fps,
+        storage_resolution=storage_resolution,
+        sample_aspect_ratio=sample_aspect_ratio,
+        artifact_schedule=[],
+        overlay=None,
+        encode=encode,
+        provenance=(
+            "Built from PRD §4.2: Non-CCTV poor handheld camera, 640x480 storage, "
+            "4:3 display, 15-30 fps, autofocus hunting, rolling movement, and sensor noise; "
+            "this profile is rebuild-triggering. The spec supplies the resolution, display "
+            "ratio, frame-rate range, intended handheld mode, and no default timestamp. "
+            "UNMEASURED PLACEHOLDER values: output_fps=30 (integer selected from the "
+            "specified range); sensor_noise alls=24 and allf=t+u; scale flags=bicubic; "
+            "semver=0.1.0; encode codec=libx264, preset=medium, crf=30, "
+            "pix_fmt=yuv420p, threads=1. Storage sample aspect ratio 1/1 follows the "
+            "spec's square-pixel 640x480 rule. The profile has no burned-in overlay: "
+            "overlay=None and no drawtext stage. analog_artifacts remains empty/off. "
+            "The FFmpeg identity is the machine pin measured by spike 01, not a "
+            "Consumer-2002 behavior measurement. CameraProfile's rebuild-triggering "
+            "optics and lighting retain unmeasured domain defaults: field_of_view_mm=12, "
+            "barrel_distortion=0, exposure_ev=0, practical_light_color_k=3200, "
+            "practical_light_intensity=1.0, camera_position=None, depth_of_field=None, "
+            "and monochrome_night=False. Its post-only bitrate_kbps=800, "
+            "noise_model={}, chroma_smearing=0, block_artifacts=0, sharpening=0, "
+            "grade_white_balance={}, overlay_model={}, decimation_pattern=None, and "
+            "frame_drop_schedule=[] are inherited/empty defaults and are also "
+            "UNMEASURED PLACEHOLDERS. The camera_mount value 'handheld' encodes the "
+            "specification's intended mode; scene motion is not implemented by this profile. "
+            "No profile-specific image, motion, noise, or encoding result has been measured."
+        ),
+    )
+    camera_profile = CameraProfile(
+        camera_id=profile_id,
+        profile_name=profile_id,
+        camera_mount="handheld",
+        codec=encode.codec,
+        storage_resolution=storage_resolution,
+        display_aspect_ratio="4:3",
+        fps=float(output_fps),
+    )
+    return camera_profile, post_profile
+
+
 def create_project(store: ProjectStore, project: Project) -> Project:
-    """Create a project with the measured DVR default and the Low-light B&W pair."""
+    """Create a project with the measured DVR and unmeasured Low-light/Consumer pairs."""
     camera_profile, post_profile = _measured_dvr_2005_defaults()
     low_light_camera, low_light_post = _unmeasured_low_light_bw_defaults(
+        ffmpeg_identity=post_profile.pinned_binaries["ffmpeg"],
+    )
+    consumer_camera, consumer_post = _unmeasured_consumer_2002_defaults(
         ffmpeg_identity=post_profile.pinned_binaries["ffmpeg"],
     )
     with store.command():
@@ -480,6 +554,8 @@ def create_project(store: ProjectStore, project: Project) -> Project:
         store.save(post_profile, expected_version=0)
         store.create(low_light_camera)
         store.save(low_light_post, expected_version=0)
+        store.create(consumer_camera)
+        store.save(consumer_post, expected_version=0)
         store._root.make_dir("assets/fonts")
         return project
 

@@ -488,6 +488,40 @@ def test_adapter_fake_process_success_records_contained_artifacts_and_metadata(t
     assert root.resolve(result.log_path).is_file()
 
 
+def test_adapter_runs_profile_without_overlay_or_font(tmp_path):
+    root_path = tmp_path / "project"
+    root_path.mkdir()
+    root = ProjectRoot(root_path)
+    request = _run(root_path, "no-overlay")
+    stages = [stage for stage in request.profile.identity.stages if stage.filter != "drawtext"]
+    identity = request.profile.identity.model_copy(update={"stages": stages})
+    profile = request.profile.model_copy(update={"identity": identity, "overlay": None})
+    request = request.model_copy(update={"font_relative": None, "profile": profile})
+    root.resolve("font.ttf").unlink()
+    calls = []
+
+    result = PostProfileAdapter(
+        root,
+        Settings(project_root=root.path),
+        popen=_fake_popen_factory(calls=calls),
+    ).degrade(request)
+
+    assert "drawtext=" not in result.filter_graph
+    assert "noise=alls=" in result.filter_graph
+    assert any("-vf" in call for call in calls)
+
+
+def test_request_requires_font_for_drawtext_profile(tmp_path):
+    root_path = tmp_path / "project"
+    root_path.mkdir()
+    request = _run(root_path, "overlay-needs-font")
+
+    with pytest.raises(ValidationError, match="font_relative is required"):
+        DegradeRequest.model_validate(
+            request.model_dump(mode="python") | {"font_relative": None}
+        )
+
+
 def test_successful_degrade_result_projects_valid_shot_output_receipt(tmp_path):
     root_path = tmp_path / "project"
     root_path.mkdir()

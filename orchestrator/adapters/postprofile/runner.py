@@ -16,7 +16,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from orchestrator.domain.entities import CameraProfile
 from orchestrator.platform.containment import ProjectRoot
@@ -42,7 +42,7 @@ class DegradeRequest(BaseModel):
     run_id: str
     degrade_seed: int = Field(ge=0)
     master_relative: str
-    font_relative: str
+    font_relative: str | None = None
     camera_profile: CameraProfile
     profile: PostProfileSpec
 
@@ -53,12 +53,28 @@ class DegradeRequest(BaseModel):
             raise ValueError("identifier must match [A-Za-z0-9_-]+")
         return value
 
-    @field_validator("master_relative", "font_relative")
+    @field_validator("master_relative")
     @classmethod
     def _relative_path(cls, value: str) -> str:
         if not value or "\x00" in value or Path(value).is_absolute() or re.match(r"^[A-Za-z]:", value):
             raise ValueError("path must be project-relative")
         return value
+
+    @field_validator("font_relative")
+    @classmethod
+    def _optional_relative_font_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value or "\x00" in value or Path(value).is_absolute() or re.match(r"^[A-Za-z]:", value):
+            raise ValueError("font path must be project-relative")
+        return value
+
+    @model_validator(mode="after")
+    def _font_matches_overlay_stages(self) -> DegradeRequest:
+        has_drawtext = any(stage.filter == "drawtext" for stage in self.profile.identity.stages)
+        if has_drawtext and self.font_relative is None:
+            raise ValueError("font_relative is required when the PostProfile has a drawtext stage")
+        return self
 
 
 @dataclass(frozen=True)
@@ -113,11 +129,12 @@ class PostProfileAdapter:
         except (ValidationError, AttributeError, TypeError) as exc:
             raise ValueError(f"invalid degradation request: {exc}") from exc
         master = self.root.resolve(request.master_relative)
-        font = self.root.resolve(request.font_relative)
+        has_drawtext = any(stage.filter == "drawtext" for stage in request.profile.identity.stages)
+        font = self.root.resolve(request.font_relative) if request.font_relative is not None else None
         if not master.is_file():
             raise JobError(JobErrorKind.MISSING_MODEL_ARTIFACT, f"master input is missing: {request.master_relative}",
                            shot_id=request.shot_id, run_id=request.run_id)
-        if not font.is_file():
+        if has_drawtext and (font is None or not font.is_file()):
             raise JobError(JobErrorKind.MISSING_MODEL_ARTIFACT, f"overlay font is missing: {request.font_relative}",
                            shot_id=request.shot_id, run_id=request.run_id)
         identity = normalize_ffmpeg_identity(
