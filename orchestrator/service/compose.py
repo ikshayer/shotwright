@@ -107,7 +107,20 @@ def _load_scene_spec(store: ProjectStore, shot: Shot) -> tuple[SceneSpec, bool]:
         # plan["scene"] IS the SceneSpec (build_scene_plan dumps it there). The artifact
         # deliberately carries no sibling "scene_spec" key: two copies of the same spec in
         # one file is two sources of truth, and nothing would keep them agreeing.
-        scene = SceneSpec.model_validate(plan.get("scene"))
+        #
+        # Strip the camera animation before validating. The plan is a worker payload, so
+        # its scene block legitimately carries the handheld keyframes `build_scene_plan`
+        # derived from the camera profile -- but those are DERIVED, not part of the
+        # scene's identity, and feeding them back in as input is rejected outright by the
+        # gate that stops a caller supplying camera motion. Measured 2026-11-06: every
+        # handheld shot failed its render with "caller-supplied camera keyframes are
+        # unsupported", because build_scene persisted motion that render then read back.
+        # Dropping it here also means a changed `motion_seed` actually takes effect on a
+        # re-render instead of being pinned by the stored scene.
+        scene_payload = plan.get("scene")
+        if isinstance(scene_payload, dict):
+            scene_payload = {k: v for k, v in scene_payload.items() if k != "camera_keyframes"}
+        scene = SceneSpec.model_validate(scene_payload)
         stored_anomaly = plan.get("anomaly")
         if shot.anomaly is None:
             if stored_anomaly is not None:
