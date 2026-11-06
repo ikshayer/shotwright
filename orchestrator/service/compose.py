@@ -43,7 +43,10 @@ def compose_render_request(
             f"Shot {shot.shot_id!r} references missing CameraProfile "
             f"{shot.camera_profile!r}"
         ) from exc
-    scene = _load_scene_spec(store, shot) if require_built_scene else synthetic_interior()
+    if require_built_scene:
+        scene, anomaly_precomposed = _load_scene_spec(store, shot)
+    else:
+        scene, anomaly_precomposed = synthetic_interior(), False
     return RenderRequest(
         shot_id=shot.shot_id,
         shot_version=shot.version,
@@ -52,12 +55,15 @@ def compose_render_request(
         duration_sec=shot.duration_sec,
         camera_profile=camera_profile,
         scene=scene,
+        event_sec=shot.event_sec,
+        anomaly=shot.anomaly,
+        anomaly_precomposed=anomaly_precomposed,
         mode=mode,
         engine="eevee",
     )
 
 
-def _load_scene_spec(store: ProjectStore, shot: Shot) -> SceneSpec:
+def _load_scene_spec(store: ProjectStore, shot: Shot) -> tuple[SceneSpec, bool]:
     outputs = store.list_shot_outputs(
         shot.shot_id, episode_id=shot.episode_id,
         record_version=shot.version, kind=ShotOutputKind.SCENE,
@@ -79,7 +85,16 @@ def _load_scene_spec(store: ProjectStore, shot: Shot) -> SceneSpec:
         # plan["scene"] IS the SceneSpec (build_scene_plan dumps it there). The artifact
         # deliberately carries no sibling "scene_spec" key: two copies of the same spec in
         # one file is two sources of truth, and nothing would keep them agreeing.
-        return SceneSpec.model_validate(plan.get("scene"))
+        scene = SceneSpec.model_validate(plan.get("scene"))
+        stored_anomaly = plan.get("anomaly")
+        if shot.anomaly is None:
+            if stored_anomaly is not None:
+                raise ValueError("scene plan carries an anomaly absent from the current Shot")
+            return scene, False
+        expected_anomaly = shot.anomaly.model_dump(mode="json")
+        if stored_anomaly != expected_anomaly or plan.get("event_sec") != shot.event_sec:
+            raise ValueError("scene plan anomaly or event_sec does not match the current Shot")
+        return scene, True
     except (OSError, TypeError, ValueError) as exc:
         raise JobError(
             JobErrorKind.INVALID_MANIFEST,

@@ -131,17 +131,23 @@ def _run(plan_path: str) -> None:
             for key in spec["keyframes"]:
                 obj.location = tuple(key["location"])
                 obj.keyframe_insert(data_path="location", frame=key["frame"])
+            for key in spec.get("visibility_keyframes", []):
+                obj.hide_render = not bool(key["visible"])
+                obj.keyframe_insert(data_path="hide_render", frame=key["frame"])
             _linearize_action(obj)
+            _constantize_action_path(obj, "hide_render")
         for spec in scene_data["lights"]:
             light = bpy.data.lights.new(spec["name"], type="AREA")
-            expected_energy = spec["energy"] * float(camera_settings["practical_light_intensity"])
+            energy_scale = float(camera_settings["practical_light_intensity"])
+            if camera_settings["monochrome_night"]:
+                energy_scale *= 0.35
+            expected_energy = spec["energy"] * energy_scale
             light.energy = expected_energy
             expected_color = ((1.0, 1.0, 1.0) if plan["mode"] == "preview" else
                               tuple(_temperature_color(spec["color"], camera_settings["practical_light_color_k"])))
             if camera_settings["monochrome_night"]:
                 value = sum(expected_color) / 3
                 expected_color = (value, value, value)
-                expected_energy *= 0.35
                 light.energy = expected_energy
             light.color = expected_color
             if any(not math.isclose(float(actual), expected, rel_tol=1e-6, abs_tol=1e-6)
@@ -153,6 +159,10 @@ def _run(plan_path: str) -> None:
             if (not math.isclose(light.energy, expected_energy, rel_tol=1e-6, abs_tol=1e-6) or
                     not math.isclose(light.size, float(spec["size"]), rel_tol=1e-6, abs_tol=1e-6)):
                 raise RuntimeError(f"light {spec['name']!r} energy or size was clamped")
+            for key in spec.get("energy_keyframes", []):
+                light.energy = float(key["energy"]) * energy_scale
+                light.keyframe_insert(data_path="energy", frame=key["frame"])
+            _linearize_action(light)
             obj = bpy.data.objects.new(spec["name"], light)
             obj.location = spec["location"]
             scene.collection.objects.link(obj)
@@ -164,12 +174,23 @@ def _run(plan_path: str) -> None:
         if Vector(position) == target:
             raise ValueError("camera position override coincides with target")
         camera.rotation_euler = (target - Vector(position)).normalized().to_track_quat("-Z", "Y").to_euler()
+        camera_data.sensor_width = 36.0
+        camera_data.sensor_fit = "HORIZONTAL"
         camera_data.lens = camera_settings["field_of_view_mm"]
         if not math.isclose(camera_data.lens, float(camera_settings["field_of_view_mm"]),
                             rel_tol=1e-6, abs_tol=1e-6):
             raise RuntimeError("camera lens was clamped by Blender")
         scene.collection.objects.link(camera)
         scene.camera = camera
+        for key in scene_data.get("camera_keyframes", []):
+            camera.location = tuple(key["location"])
+            key_target = Vector(key["target"])
+            if Vector(key["location"]) == key_target:
+                raise ValueError("camera keyframe location coincides with target")
+            camera.rotation_euler = (key_target - Vector(key["location"])).normalized().to_track_quat("-Z", "Y").to_euler()
+            camera.keyframe_insert(data_path="location", frame=key["frame"])
+            camera.keyframe_insert(data_path="rotation_euler", frame=key["frame"])
+        _linearize_action(camera)
         if camera_settings["depth_of_field"] is not None:
             camera_data.dof.use_dof = True
             camera_data.dof.focus_distance = camera_settings["depth_of_field"]
@@ -338,9 +359,22 @@ def _temperature_color(base: tuple[float, float, float], kelvin: int) -> tuple[f
 
 
 def _linearize_action(obj: object) -> None:
+    for curve in _action_fcurves(obj):
+        for point in curve.keyframe_points:
+            point.interpolation = "LINEAR"
+
+
+def _constantize_action_path(obj: object, data_path: str) -> None:
+    for curve in _action_fcurves(obj):
+        if getattr(curve, "data_path", None) == data_path:
+            for point in curve.keyframe_points:
+                point.interpolation = "CONSTANT"
+
+
+def _action_fcurves(obj: object) -> list[object]:
     action = getattr(getattr(obj, "animation_data", None), "action", None)
     if action is None:
-        return
+        return []
     curves = list(getattr(action, "fcurves", ()))
     for layer in getattr(action, "layers", ()):
         for strip in getattr(layer, "strips", ()):
@@ -351,9 +385,7 @@ def _linearize_action(obj: object) -> None:
                     continue
                 if bag:
                     curves.extend(getattr(bag, "fcurves", ()))
-    for curve in curves:
-        for point in curve.keyframe_points:
-            point.interpolation = "LINEAR"
+    return curves
 
 
 def _add_surface_roughness(material: object) -> None:
