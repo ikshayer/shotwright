@@ -97,3 +97,47 @@ D:\Work\video_pipeline\.venv\Scripts\python.exe -m ruff check orchestrator/ test
 ```
 
 Baseline: **1351 passed, 34 skipped**, ruff clean, about 190 s.
+
+## Amendment 1 — the 48 px face rule is superseded, and is not this layer's to enforce
+
+Raised by the blind test author, which noticed that Decision 2's face constraint
+contradicts the PRD. It was right and the contract was wrong. Recorded rather than quietly
+corrected, because the implementer was dispatched against the wrong text.
+
+**What Decision 2 said:** "No visible faces above 48 px of frame height. Enforced, not
+documented."
+
+**What the PRD says** (§3.2, the normative *Face identity-destruction rule*, adopted
+2026-11-04 after REF-001 was inspected): a human face may occupy **any** fraction of frame
+height provided the **delivered** frame destroys identity-level information, by block
+quantisation to ≤16 effective pixels across the face, or by highlight clipping such that
+≥60% of the face area lies within 5% of white. It states outright: "This replaces v1.2's
+'no visible faces above 48 px of frame height'." FR-20's own section still carries the
+superseded sentence, which is where this contract picked it up; §3.2 is later, explicit
+about replacing it, and governs.
+
+**Two consequences, and the second matters more:**
+
+1. **There is no 48 px check.** Any anomaly rejected solely for exceeding 48 px of face
+   height is rejected wrongly. Remove the rule rather than relax it.
+2. **This layer cannot enforce the replacement at all.** The PRD is explicit that FR-22
+   measures identity destruction **on the delivered frame, not on the master, because the
+   master is deliberately clean**. Identity destruction is produced by the degradation
+   chain, so a scene-time validator has nothing to measure: the master is *supposed* to
+   contain a clean face. Enforcing it here would reject shots that the delivered frame
+   would have rendered compliant.
+
+**Binding:** the anomaly layer carries face-related parameters and **enforces nothing about
+faces**. The check belongs to FR-22, on the delivered frame, and is out of scope here. A
+test asserting a 48 px rejection is asserting superseded behaviour and must be removed.
+
+**Still in force, because they are FR-20's own staging limits and not about faces:**
+minimum subject distance and maximum on-frame height, "enforced per shot". The PRD gives no
+global numbers for either — they are **per-shot declared limits**, so the enforcement is
+that a shot's staging respects the limits that shot declares, not a comparison against a
+constant this contract invents. A degenerate value (zero distance, a figure taller than the
+frame) is still a validation failure.
+
+**Also noted for the PRD, not fixed here:** FR-20's section and §3.2 disagree in the
+shipped document. §3.2 wins, and FR-20's stale sentence should be struck when the PRD is
+next edited.
