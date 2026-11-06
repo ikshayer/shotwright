@@ -31,7 +31,10 @@ ADAPTER_OPERATIONS = {
     "search assets": r"search.*asset|asset.*search",
     "create asset": r"(create|add|new).*asset|asset.*(create|add|new)",
     "build scene": r"scene",
-    "render preview": r"preview|render",
+    # One label per route: r"preview|render" also matched /master, so the master
+    # route was only ever checked as a side effect of the preview label.
+    "render preview": r"preview",
+    "render master": r"master",
     "generate media": r"generat",
     # Narrow: r"post.?profile" also matched create_post_profile, so this demanded 202
     # from a creation route. Only the degradation operation belongs here.
@@ -109,6 +112,9 @@ def _wired_request_kwargs(app: FastAPI, op) -> dict:
     return kwargs
 
 
+WIRED = {"build scene", "render preview", "render master", "generate media", "degrade"}
+
+
 @pytest.mark.parametrize("operation", list(ADAPTER_OPERATIONS))
 def test_adapter_operation_is_routed_not_omitted(app: FastAPI, operation: str) -> None:
     assert _matches(app, ADAPTER_OPERATIONS[operation]), f"no route for contract operation {operation!r}"
@@ -121,16 +127,15 @@ def test_adapter_operation_returns_contract_status(
     """The app fixture constructs the default app with only settings and auth token."""
     ops = _matches(app, ADAPTER_OPERATIONS[operation])
     assert ops, f"no route for contract operation {operation!r}"
-    if operation in {"build scene", "render preview", "generate media", "degrade"}:
+    if operation in WIRED:
         _seed_wired_route_records(app)
     for op in ops:
         resp = client.request(
             op.method, op.url(), headers={TOKEN_HEADER: TOKEN},
-            **(_wired_request_kwargs(app, op) if operation in {
-                "build scene", "render preview", "generate media", "degrade"
-            } else valid_request_kwargs(app, op))
+            **(_wired_request_kwargs(app, op) if operation in WIRED
+               else valid_request_kwargs(app, op))
         )
-        if operation in {"build scene", "render preview", "generate media", "degrade"}:
+        if operation in WIRED:
             assert resp.status_code == 202, f"{op.key} answered {resp.status_code}: {resp.text}"
             job_ids = [v for v in find_key(resp.json(), lambda k: "job" in k.lower() and "id" in k.lower())
                        if isinstance(v, str) and v]
@@ -147,9 +152,8 @@ def test_adapter_operation_returns_contract_status(
 def test_all_wired_routes_return_404_for_missing_project(
     client: TestClient, app: FastAPI
 ) -> None:
-    """All four submissions validate synchronously before issuing a job id."""
-    wired = ("build scene", "render preview", "generate media", "degrade")
-    for operation in wired:
+    """Every submission validates synchronously before issuing a job id."""
+    for operation in sorted(WIRED):
         ops = _matches(app, ADAPTER_OPERATIONS[operation])
         assert ops, f"no route for contract operation {operation!r}"
         for op in ops:
@@ -165,7 +169,7 @@ def test_newly_wired_routes_have_matching_cli_commands(app: FastAPI) -> None:
     """The wired operations stay on the route table's shared API/CLI surface."""
     cli_names = _command_names(_cli())
     flat_cli_names = cli_names | {name.replace(" ", "-") for name in cli_names}
-    for label in ("build scene", "render preview", "generate media", "degrade"):
+    for label in sorted(WIRED):
         ops = _matches(app, ADAPTER_OPERATIONS[label])
         assert ops, f"no route for contract operation {label!r}"
         for op in ops:

@@ -55,7 +55,13 @@ from .errors import (
     error_body,
 )
 from .manifest import build_manifest
-from .routes import MAGIC_HEADER_BYTES, OPERATIONS, Operation, UploadedFile
+from .routes import (
+    ASYNC_ADAPTER_OPERATIONS,
+    MAGIC_HEADER_BYTES,
+    OPERATIONS,
+    Operation,
+    UploadedFile,
+)
 
 #: Hostnames a browser may legitimately use to reach a loopback-bound server
 #: (Amendment 2). The configured port is appended to each as an accepted variant.
@@ -190,12 +196,13 @@ class OperationContext:
         if operation == "report_jobs":
             queue = self.job_queues.get(data["project_id"])
             return self._read_job_reports(data["project_id"], root=queue.root if queue else None)
-        if operation in {"build_scene", "render_preview", "generate_media", "degrade_media"}:
+        if operation in ASYNC_ADAPTER_OPERATIONS:
             if self.job_runner is None:
                 raise RuntimeError("default JobRunner was not configured")
             kind = {
                 "build_scene": AdapterKind.SCENE,
                 "render_preview": AdapterKind.RENDER,
+                "render_master": AdapterKind.RENDER,
                 "generate_media": AdapterKind.GENERATE,
                 "degrade_media": AdapterKind.DEGRADE,
             }[operation]
@@ -203,14 +210,16 @@ class OperationContext:
             if not record_id:
                 raise AdapterRequestInvalid(f"{operation} requires shot_id")
             store = self._store(data["project_id"])
-            if operation in {"build_scene", "render_preview"}:
+            if operation in {"build_scene", "render_preview", "render_master"}:
+                # Only build_scene composes its own scene; both renders consume the one
+                # it persisted, so neither silently re-derives geometry of its own.
                 payload = compose_render_request(
                     store,
                     shot_id=record_id,
                     episode_id=data.get("episode_id"),
                     run_id=uuid.uuid4().hex,
                     mode="preview" if operation == "render_preview" else "master",
-                    require_built_scene=operation == "render_preview",
+                    require_built_scene=operation != "build_scene",
                 )
                 record_version = payload.shot_version
                 episode_id = data.get("episode_id")
@@ -445,7 +454,7 @@ def _register_operation(app: FastAPI, operation: Operation, context: OperationCo
         if files:
             data["uploads"] = [await _describe_upload(item) for item in files]
         result = operation.invoke(context, data)
-        if operation.name in {"build_scene", "render_preview", "generate_media", "degrade_media"}:
+        if operation.name in ASYNC_ADAPTER_OPERATIONS:
             return JSONResponse(status_code=202, content=result)
         return result
 
@@ -482,9 +491,7 @@ def _register_operation(app: FastAPI, operation: Operation, context: OperationCo
     app.add_api_route(operation.path, endpoint, methods=[operation.method],
                       name=operation.name, operation_id=operation.name,
                       summary=operation.summary, response_model=None, include_in_schema=True,
-                      status_code=202 if operation.name in {
-                          "build_scene", "render_preview", "generate_media", "degrade_media",
-                      } else 200,
+                      status_code=202 if operation.name in ASYNC_ADAPTER_OPERATIONS else 200,
                       openapi_extra={"parameters": [{
                           "name": "X-Loopback-Token",
                           "in": "header",

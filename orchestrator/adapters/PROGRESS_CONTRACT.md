@@ -185,3 +185,81 @@ Both are real, both are recorded rather than left in a report:
 
 `1330 passed, 33 skipped` (baseline 1323), ruff clean on `orchestrator/` and `tests/`,
 about 176 s. No GPU or Blender run in this reconciliation.
+
+## Open finding — the throughput floor's units are wrong, and a master render exposes it
+
+Raised by an independent review of the master-render addition, then confirmed by reading
+`queue.py`. **Not fixed in this pass**, deliberately: it contradicts a pinned test and
+changes watchdog semantics, which is a contract decision rather than a tuning change.
+Three previous passes "fixed" this area by switching the floor off; this records the
+mechanism instead.
+
+### What the code does
+
+`JobQueue._watch`, after startup completes:
+
+```python
+elif job.progress > last_progress:
+    progress_rate = (job.progress - last_progress) / max(now - last_change, 1e-9)
+    last_progress, last_change = job.progress, now
+    if progress_rate < configured_floor:
+        self._fail_throughput_stall()
+...
+elif now - last_change >= 1.0 / configured_floor:
+    self._fail_throughput_stall()
+```
+
+Two mechanisms share one setting: an **instantaneous rate** comparison on each observed
+advance, and a **time-since-last-advance** timeout.
+
+### Why the rate comparison is the wrong instrument
+
+`job.progress` is normalised to `[0, 1]`, so one completed frame advances it by
+`1 / frame_end`. The instantaneous rate for a healthy render is therefore
+
+    rate = (1 / frame_end) / seconds_per_frame
+
+which **falls as `frame_end` rises**. The comparison conflates how fast the work is going
+with how many steps it was divided into, so:
+
+- **It punishes fine-grained progress reporting** — exactly the behaviour the progress
+  contract was written to introduce. A render that reports every frame is penalised
+  relative to one that reports rarely, and one that reports nothing at all is only caught
+  by the timeout.
+- **The floor cannot be a duration-independent constant in these units**, yet it is one.
+
+The review that raised this predicted a healthy 30-second master would fail, using §8.4's
+0.56–0.63 s/frame. **Measured, it does not.** The Phase 1 master render was timed at
+**0.323 s/frame** (median gap 0.322 s, max 0.356 s over 900 frames at 1280×960 Eevee,
+32 samples), roughly twice as fast as §8.4's spike-02 figure:
+
+| Shot | `frame_end` | Rate at 0.323 s/frame | Against a 0.001 floor |
+|---|---:|---:|---|
+| 15 s | 900 | 0.00344 /s | passes |
+| 30 s | 1800 | 0.00172 /s | passes |
+| ~52 s | 3100 | 0.00100 /s | **the boundary** |
+
+So the concrete prediction was wrong on the numbers, and Phase 1's 15–30 s range is safe
+at the measured cadence. **The units flaw is still real**: the floor tightens as shots
+lengthen, the boundary is only ~52 s of shot away, and it moves closer on any slower
+hardware, at higher sample counts, or with Cycles — which has never been run here. A bound
+that holds only because one measurement came in twice as fast as the recorded one is not a
+bound. §8.4's per-frame figure should also be updated: it was measured on spike 02, not at
+the master resolution.
+
+### The adjudication this needs
+
+The timeout branch already detects both a hard stall and pathological slowness, and it is
+duration-independent because it measures **time between advances** rather than a
+normalised rate. That suggests the rate comparison should be removed rather than retuned,
+leaving one mechanism whose unit is *seconds per progress step*, with its bound derived
+from the measured per-frame cost plus margin.
+
+**What blocks it:** `tests/jobs/test_startup_watchdog.py::test_below_floor_subsequent_progress_rate_fails`
+pins the rate branch explicitly. It is a deliberate test from the FR-12 pass, not an
+accident, so removing the branch means overruling a ratified behaviour — with an argument,
+in an amendment, not by deleting the test. The present `1 / floor` timeout of 1000 s is
+also far too lax to catch thrash and would need deriving at the same time.
+
+**Do not simply lower the default.** That keeps the broken units and buys margin that the
+next longer shot spends again.

@@ -130,6 +130,7 @@ OPERATIONS = (
     Operation("create_asset", "POST", "/projects/{project_id}/assets", "Create an asset", True, "asset creation adapter", None, _call("create_asset"), upload=True),
     Operation("build_scene", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/scene", "Build a scene", True, "scene builder adapter", OpenRequest, _call("build_scene")),
     Operation("render_preview", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/preview", "Render a preview", True, "preview renderer adapter", OpenRequest, _call("render_preview")),
+    Operation("render_master", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/master", "Render a master", True, "master renderer adapter", OpenRequest, _call("render_master")),
     Operation("generate_media", "POST", "/projects/{project_id}/media/generate", "Generate media", True, "media generation adapter", OpenRequest, _call("generate_media")),
     Operation("degrade_media", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/degrade", "Degrade a shot master", True, "PostProfile adapter", OpenRequest, _call("degrade_media")),
     Operation("sample_references", "POST", "/projects/{project_id}/references/sample", "Sample references", True, "reference sampling adapter", OpenRequest, _call("sample_references")),
@@ -138,3 +139,16 @@ OPERATIONS = (
     Operation("score_rubric", "POST", "/projects/{project_id}/rubric/score", "Score rubric criteria", True, "domain.entities.RubricScores", RubricRequest, _call("score_rubric")),
     Operation("export", "POST", "/projects/{project_id}/export", "Export a project", True, "export adapter", OpenRequest, _call("export")),
 )
+
+#: Operations that submit work to the JobQueue and answer 202 with a job record rather
+#: than performing the work inline (CONTRACT.md Amendment 5). Declared once, because this
+#: set was previously spelled out at three separate call sites: adding `render_master` to
+#: the submission gate but not to the two status sites produced a route that queued the
+#: job correctly and then reported 200, and only a conformance test caught it.
+ASYNC_ADAPTER_OPERATIONS = frozenset({
+    "build_scene",
+    "render_preview",
+    "render_master",
+    "generate_media",
+    "degrade_media",
+})

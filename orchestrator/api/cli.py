@@ -15,7 +15,13 @@ from orchestrator.platform.settings import Settings
 
 from .app import OperationContext
 from .errors import describe, error_body
-from .routes import MAGIC_HEADER_BYTES, OPERATIONS, UploadedFile, path_parameters
+from .routes import (
+    ASYNC_ADAPTER_OPERATIONS,
+    MAGIC_HEADER_BYTES,
+    OPERATIONS,
+    UploadedFile,
+    path_parameters,
+)
 
 #: Request model per operation, from the one registry, so the CLI validates exactly what
 #: the HTTP route validates.
@@ -83,8 +89,7 @@ def _command_callback(operation_name: str):
             )
             context = OperationContext(configured, root)
             result = context.invoke(operation_name, payload)
-            if (operation_name in {"build_scene", "render_preview", "generate_media", "degrade_media"}
-                    and wait_for_job):
+            if operation_name in ASYNC_ADAPTER_OPERATIONS and wait_for_job:
                 job = context.job_runner.wait(payload["project_id"], result["job_id"])
                 context.job_runner.close()
                 if job.state != "completed":
@@ -116,7 +121,7 @@ def _build_command(operation: Any, name: str) -> click.Command:
     ]
     for path_name in path_parameters(operation.path):
         params.append(click.Option([f"--{path_name.replace('_', '-')}"]),)
-    if operation.name in {"build_scene", "render_preview", "generate_media", "degrade_media"}:
+    if operation.name in ASYNC_ADAPTER_OPERATIONS:
         params.append(click.Option(
             ["--wait/--no-wait"], default=True, show_default=True,
             help="Wait for this job to finish (default), or return after submission.",
