@@ -94,3 +94,57 @@ D:\Work\video_pipeline\.venv\Scripts\python.exe -m ruff check orchestrator/ test
 ```
 
 Baseline: **1456 passed, 34 skipped**, ruff clean.
+
+## Amendment 1 — motion seeds from `motion_seed`, not `degrade_seed`
+
+Raised by the implementer, which noticed Decision 2 conflicts with **FR-30** and asked
+rather than choosing. It was right and the contract was wrong.
+
+**What Decision 2 said:** derive the motion's randomness from the existing seed
+derivation, i.e. `(shot_id, degrade_seed)`.
+
+**Why that is a correctness defect, not a conformance quibble.** `degrade_seed` is a
+**post-only** input. §4.4 splits `CameraProfile` fields into post-only and
+rebuild-triggering precisely so that a post change provably cannot require a re-render,
+and `AGENTS.md`'s invariant is blunter still: **degradation never re-renders.** If camera
+motion derives from `degrade_seed`, then changing a degradation seed silently changes the
+master — the split stops holding, and FR-07's promise that post-only fields need no
+re-render becomes false.
+
+**What FR-30 specifies** (P2, but normative where it touches this): movement comes from a
+"versioned, parameterised motion model, never from ad-hoc keyframes"; every stochastic
+component is seeded from **`(shot_id, motion_seed)`**; the model "carries a semver
+recorded on the Shot, so a re-render reproduces the same motion exactly". AT-22 requires
+that two renders at the same motion seed and model version produce identical camera
+transforms, that changing only the seed changes the motion, and that a CCTV profile
+cannot be assigned a motion model.
+
+**Binding:**
+
+1. **Add a `motion_seed` to `Shot`**, distinct from `degrade_seed`, and seed the motion
+   from `(shot_id, motion_seed)`. Changing `degrade_seed` must leave the camera transforms
+   byte-identical; changing `motion_seed` must change them. Test both directions — the
+   first is the one that protects §4.4.
+2. **Record the motion model's semver on the `Shot`**, as FR-30 requires. It is cheap now
+   and prevents a migration later.
+3. **Keyframes remain the output representation, not the source.** A versioned
+   parameterised model produces them. That satisfies FR-30's "never from ad-hoc
+   keyframes" while keeping the single animation mechanism this contract already requires.
+
+**Scope stays P0.** This implements only as much of FR-30 as §4.2's `consumer-2002`
+"rolling movement" needs, in a form FR-30 can later extend. FR-30's fuller model — step
+cadence and bob, drift with correction snaps, whip-pan magnitude and settle, operator
+attention bias — **remains P2 and is not in scope.** Say in the report which parameters
+exist and which are deliberately absent, so the P2 pass inherits a clear boundary.
+
+## Amendment 2 — the invalidation table test
+
+`test_tables_cover_every_camera_profile_field` fails because its table does not list the
+new `camera_mode`. That test is a **completeness guard and it worked**: it exists to catch
+exactly this, a new `CameraProfile` field with no declared invalidation class.
+
+The implementer was told not to touch tests, which was right for behaviour tests. This one
+is a registry of fields rather than an assertion about motion, so **the implementer should
+add `camera_mode` to it** as part of this change, classified rebuild-triggering to match
+the production tag. Adding the entry is the fix the test is asking for; changing what the
+test checks is not.
