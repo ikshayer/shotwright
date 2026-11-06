@@ -217,3 +217,80 @@ No rubric score. No degraded delivery. The scene is still `synthetic_interior()`
 Script does not drive geometry. A viewable H.264 copy of the master is at
 `D:\Work\video_pipeline\_work\phase1_shot_v2.mp4` — it is a convenience for inspection and
 is **not** a pipeline output.
+
+# Third acceptance run — the complete chain, and a delivered artifact
+
+Run 2026-11-06, with the procedural living room, FR-20 anomaly staging, master assembly
+and degradation all present. **The pipeline produced a delivered CCTV clip with a valid
+receipt for the first time.**
+
+| Step | Result |
+|---|---|
+| `create-project` → `propose-shots` | all exit 0, under 0.1 s each |
+| `build-scene` | 0.281 s, no subprocess, no GPU lease |
+| `render-master` | **628.4 s**, completed, 900 frames + FFV1 master |
+| `degrade-media` (first attempt) | failed: `overlay font is missing: assets/fonts/overlay.ttf` |
+| `degrade-media` (after placing a font) | **exit 0, completed** |
+
+The first degrade failure is the designed behaviour for a fresh project, not a defect: the
+seeded profile names its font and the adapter says exactly which path is empty. Placing a
+font at that path and re-running is the whole remediation.
+
+## Three receipts, all with correct provenance
+
+```
+scene     -> scenes/s1/v0001/<run>/scene.json
+master    -> renders/s1/v0001/<run>/attempt-0001/master.mkv
+             engine_id=BLENDER_EEVEE  engine_build=fbe6228777e7
+degraded  -> post/s1/v0001/<run>/degraded.mp4
+             profile_semver=0.2.0  filter_graph_hash=8d045f80…  pinned_binaries present
+```
+
+Delivered artifact: **640×480, 12 fps, H.264, 90 KB**, burned-in `CAM 03 2005-11-14
+16:00:09`, duration 14.5 s — the 0.5 s shortfall being exactly the six dropped frames the
+profile's `artifact_schedule` declares, at 12 fps. The manifest and the output agree,
+which is the specific failure spike 01 measured FFmpeg committing silently.
+
+## The cadence discrepancy is resolved
+
+The living-room master rendered at **0.373 s/frame** (median over 899 gaps, max 0.592).
+That is close to the 0.323 s/frame measured on the grey-box room over 471 gaps, and
+nowhere near the **0.819 s/frame** a 120-frame harness reported for the same grey-box
+scene. **The ~0.32–0.37 s/frame figure is the real sustained cadence**; the 120-frame
+measurement was the outlier and should not be used for budget arithmetic.
+
+The dressed living room costs about **15% more per frame** than the grey box, which is
+consistent with §8.4's finding that cost is resolution × samples rather than scene
+complexity. Total `render-master` wall clock of 628.4 s decomposes as roughly 336 s of
+frames plus ~290 s of FFV1 assembly.
+
+## §4.3, judged on the delivered frame
+
+This is the first run where the rubric can be judged on the surface the PRD actually
+scores — FR-22 measures on the delivered frame "because the master is deliberately clean".
+
+Judged by eye on one sampled frame, **not** a conducted rubric score:
+
+- **1, mount inferable** — plausible pass. The high corner view reads as a wall-mounted
+  camera.
+- **2, plausible place** — plausible pass, and a clear change. The clean-CG tells that
+  made the master read as an architectural visualisation — even lighting, unworn matte
+  surfaces, uniform materials — are substantially destroyed by 640×480, grain and blown
+  highlights. **The room now reads as a real room captured badly**, which is the target.
+- **3, no unmotivated movement** — pass. The camera is static by construction.
+- **4, stable light and geometry** — not assessed across the sequence.
+- **5, integrated anomaly** — **fail.** The figure is a featureless dark prism. At this
+  resolution it is ambiguous enough to read as furniture rather than as a person, which is
+  the opposite of "the horror element sits inside the recording".
+
+So the believability work has moved criterion 2 from a clear fail to a plausible pass, and
+criterion 5 is now the binding one. **This is an eyeball judgement on a single frame and
+is not a rubric score.** §4.3 requires deterministic sampling — one frame every 3 seconds
+plus the first anomaly beat and the longest neutral interval — scored across the cut, with
+criterion 3 mandatory on every sample. That has still not been run.
+
+## What remains
+
+A humanoid figure instead of a box proxy; the §4.3 rubric actually scored; and the Script
+still does not drive the geometry, so FR-04's "believable interior from a text brief"
+is unmet even though the interior is now believable.
