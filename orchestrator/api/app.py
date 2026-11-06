@@ -210,6 +210,7 @@ class OperationContext:
                     episode_id=data.get("episode_id"),
                     run_id=uuid.uuid4().hex,
                     mode="preview" if operation == "render_preview" else "master",
+                    require_built_scene=operation == "render_preview",
                 )
                 record_version = payload.shot_version
                 episode_id = data.get("episode_id")

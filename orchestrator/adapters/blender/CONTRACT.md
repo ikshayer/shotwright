@@ -270,3 +270,16 @@ explicitly disabled instead of teaching tests to accept arbitrary headers.
 ## Amendment 5 — startup-aware throughput floor (binding)
 
 The zero-only throughput-floor limitation in Amendment 1 item 4 is superseded. BlenderAdapter.render accepts a positive configured floor and passes startup_allowance_seconds=74.0 to queue.run, grounded in PRD §8.4’s measured ~74 s one-time cold shader/kernel cache cost. Queue watchdog behavior, hard deadline, progress reporting, cancellation, supervision, fencing, lease handling and output behavior remain unchanged. Do not fake progress or claim measured production resource reservations.
+
+## Amendment 6 — artifact-counted progress and derived startup bound
+
+Amendment 5's 74-second startup allowance is superseded. BlenderAdapter reports progress
+from completed expected frame files divided by the plan's `frame_end`; it samples the
+contained frames directory on each process-monitor iteration and never parses stdout for
+progress. The 150-second startup allowance is a derived bound just over twice the measured
+~74-second cold-cache cost in PRD §8.4, not a measurement. It only needs to cover startup
+until the first frame appears. Under `JobRunner`'s managed queue, a preview's hard deadline
+is that configured startup allowance plus the existing 10-second render/verification
+window. Direct adapter previews retain their existing 10-second hard deadline. Scene
+assembly is a separate no-process, no-lease operation and is not part of
+`BlenderAdapter.render`.

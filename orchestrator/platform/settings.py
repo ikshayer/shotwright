@@ -109,7 +109,12 @@ class ResourceSettings(_Section):
         0.001, ge=0, description="Minimum job progress per second before the GPU stall watchdog fires."
     )
     startup_allowance_seconds: float = Field(
-        74.0, ge=0, description="Maximum startup time before the first progress update (PRD §8.4)."
+        150.0,
+        ge=0,
+        description=(
+            "Derived watchdog bound, not a measurement: 150 s is just over 2x the measured ~74 s cold "
+            "Blender shader/kernel cache cost (PRD §8.4), with allowance through the first frame."
+        ),
     )
 
     @field_validator("throughput_floor_per_second", "startup_allowance_seconds")

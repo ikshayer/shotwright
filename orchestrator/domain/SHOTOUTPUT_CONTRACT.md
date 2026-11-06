@@ -32,7 +32,10 @@ class ShotOutput(Entity):
     pinned_binaries: dict[str, str] | None  # PostProfile identity pins
 ```
 
-`scene`, `master`, and `preview` require `engine_id` and `engine_build`. `degraded`
+`master` and `preview` require `engine_id` and `engine_build`. A `scene` output is the
+persisted scene plan and `SceneSpec`; because assembly does not launch Blender, its
+`engine_id` and `engine_build` may both be absent. If either is supplied, both must be
+non-empty. `degraded`
 requires `profile_semver`, `filter_graph_hash`, and `pinned_binaries`. Other provenance
 fields must be `None`; `still` has no additional provenance fields in this entity.
 `content_sha256` is required for every kind. Hashes are 64 lowercase hexadecimal
@@ -110,8 +113,10 @@ corrupt and fails with `JobError(INVALID_MANIFEST)`.
 
 ## Provenance evidence and scope
 
-The Blender runner exposes the applied engine in worker metadata and its build hash;
-`GenerationRun.tool_version` also combines the version and build. The PostProfile runner
+The Blender runner exposes the applied engine in worker metadata and its build hash for
+rendered masters and previews; `GenerationRun.tool_version` also combines the version and
+build. A scene plan records the requested engine in its plan, not applied-engine
+provenance. The PostProfile runner
 emits profile semver, filter graph SHA-256, and FFmpeg identity, while its profile has
 `identity.pinned_binaries`. This entity records only the named fields above. The existing
 ComfyUI runner's generation metadata is not added as a new ShotOutput field by this

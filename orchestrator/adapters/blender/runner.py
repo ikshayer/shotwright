@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import stat
 import subprocess
 import threading
 import time
@@ -22,8 +23,6 @@ from orchestrator.platform.settings import Settings
 
 from .scene import RenderRequest, build_scene_plan
 
-BLENDER_STARTUP_ALLOWANCE_SECONDS = 74.0  # PRD §8.4: measured cold shader/kernel cache cost.
-
 
 @dataclass(frozen=True)
 class RenderResult:
@@ -31,7 +30,14 @@ class RenderResult:
     frame_paths: tuple[str, ...]
     metadata_path: str
     log_path: str
+    engine_id: str
+    engine_build: str
     generation_run: GenerationRun
+
+
+@dataclass(frozen=True)
+class SceneAssemblyResult:
+    scene_path: str
 
 
 def build_command(blender_exe: Path, script_path: Path, plan_path: Path) -> list[str]:
@@ -197,14 +203,41 @@ class BlenderAdapter:
     def worker(self) -> WorkerControl:
         return self._control
 
+    def assemble_scene(self, request: RenderRequest, job: Job) -> SceneAssemblyResult:
+        """Persist a contained scene plan without launching Blender or acquiring a lease."""
+        request = RenderRequest.model_validate(request.model_dump(mode="python"))
+        Job.model_validate(job.model_dump(mode="python"))
+        if job.shot_id != request.shot_id or job.run_id != request.run_id:
+            raise ValueError("job shot_id/run_id must match the scene request")
+
+        plan = build_scene_plan(request)
+        scene_rel = (
+            f"scenes/{request.shot_id}/v{request.shot_version:04d}/"
+            f"{request.run_id}/scene.json"
+        )
+        scene_dir = f"scenes/{request.shot_id}/v{request.shot_version:04d}/{request.run_id}"
+        self.root.make_dir(scene_dir)
+        artifact = {
+            "schema_version": 1,
+            "plan": plan,
+            "scene_spec": request.scene.model_dump(mode="json"),
+        }
+        self.root.write_text(
+            scene_rel,
+            json.dumps(artifact, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False),
+        )
+        return SceneAssemblyResult(scene_path=scene_rel)
+
     def render(self, request: RenderRequest, job: Job, *, queue: JobQueue,
-               cancel: Callable[[], bool] | None = None) -> RenderResult:
+               cancel: Callable[[], bool] | None = None,
+               queue_managed: bool = False) -> RenderResult:
         if not self._render_lock.acquire(blocking=False):
             raise RuntimeError("this BlenderAdapter already has an active render")
         epoch = None
         try:
             epoch = self._control.activate()
-            return self._render_locked(request, job, queue=queue, cancel=cancel, epoch=epoch)
+            return self._render_locked(request, job, queue=queue, cancel=cancel, epoch=epoch,
+                                       queue_managed=queue_managed)
         finally:
             if epoch is None or self._control.deactivate(epoch):
                 self._render_lock.release()
@@ -212,8 +245,14 @@ class BlenderAdapter:
                 raise JobError(JobErrorKind.WORKER_UNREACHABLE,
                                "Blender attempt supervisor did not quiesce; lease must remain held")
 
+    def render_managed(self, request: RenderRequest, job: Job, *, queue: JobQueue,
+                       cancel: Callable[[], bool] | None = None) -> RenderResult:
+        """Run beneath JobRunner's queue/lease while keeping Blender process supervision."""
+        return self.render(request, job, queue=queue, cancel=cancel, queue_managed=True)
+
     def _render_locked(self, request: RenderRequest, job: Job, *, queue: JobQueue,
-                       cancel: Callable[[], bool] | None = None, epoch: object) -> RenderResult:
+                       cancel: Callable[[], bool] | None = None, epoch: object,
+                       queue_managed: bool = False) -> RenderResult:
         # Revalidate snapshots to catch model_copy(update=...) and nested mutable edits.
         request = RenderRequest.model_validate(request.model_dump(mode="python"))
         Job.model_validate(job.model_dump(mode="python"))
@@ -222,6 +261,13 @@ class BlenderAdapter:
         if job.shot_id != request.shot_id or job.run_id != request.run_id:
             raise ValueError("job shot_id/run_id must match the render request")
         plan_base = build_scene_plan(request)
+        frame_end = plan_base.get("frame_end")
+        if isinstance(frame_end, bool) or not isinstance(frame_end, int) or frame_end <= 0:
+            raise JobError(
+                JobErrorKind.CORRUPT_ARTIFACT,
+                "cannot determine render progress: plan field 'frame_end' is missing or invalid",
+                job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id,
+            )
         base_rel = f"renders/{request.shot_id}/v{request.shot_version:04d}/{request.run_id}"
         base = self.root.resolve(base_rel)
         try:
@@ -232,7 +278,12 @@ class BlenderAdapter:
         error_box: list[BaseException] = []
         done = threading.Event()
         start_time = time.monotonic()
-        max_elapsed = 10.0 if request.mode == "preview" else self.settings.budget.per_shot_wall_clock_seconds
+        startup_allowance = self.settings.resources.startup_allowance_seconds
+        max_elapsed = (
+            (startup_allowance + 10.0 if queue_managed else 10.0)
+            if request.mode == "preview"
+            else self.settings.budget.per_shot_wall_clock_seconds
+        )
 
         def attempt_supervisor() -> None:
             try:
@@ -248,6 +299,16 @@ class BlenderAdapter:
                 count = plan_base["frame_end"]
                 ext = "png" if request.mode == "preview" else "exr"
                 frame_rels = tuple(f"{attempt_rel}/frames/frame_{i:06d}.{ext}" for i in range(1, int(count) + 1))
+                frames_rel = f"{attempt_rel}/frames"
+                try:
+                    frames_directory = self.root.resolve(frames_rel)
+                except Exception as exc:
+                    raise JobError(
+                        JobErrorKind.INVALID_MANIFEST,
+                        f"cannot determine render progress: could not resolve contained frames directory "
+                        f"{frames_rel!r}: {exc}",
+                        job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id, cause=exc,
+                    ) from exc
                 blend_rel = f"{attempt_rel}/scene.blend"
                 metadata_rel = f"{attempt_rel}/metadata.json"
                 log_rel = f"{attempt_rel}/blender.log"
@@ -299,8 +360,7 @@ class BlenderAdapter:
                     raise _CancelledBeforeLaunch("render stopped before Blender launch")
                 started = time.monotonic()
                 baseline = queue.lease.baseline_mb
-                with open(self.root.resolve(log_rel), "ab", buffering=0) as log_stream, \
-                        open(self.root.resolve(log_rel), "rb") as log_reader:
+                with open(self.root.resolve(log_rel), "ab", buffering=0) as log_stream:
                     try:
                         process = self._control.launch(argv, cwd=str(self.root.path), stdin=subprocess.DEVNULL,
                                                        stdout=log_stream, stderr=subprocess.STDOUT, env=env,
@@ -309,8 +369,6 @@ class BlenderAdapter:
                         raise JobError(JobErrorKind.WORKER_UNREACHABLE, f"could not launch Blender: {exc}",
                                        job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id, cause=exc) from exc
                     child_pid = process.pid
-                    log_offset = 0
-                    last_progress = 0.0
                     peak = None
                     hard_deadline = started + max_elapsed
                     while process.poll() is None:
@@ -326,17 +384,12 @@ class BlenderAdapter:
                         if now >= hard_deadline:
                             raise JobError(JobErrorKind.BUDGET_EXCEEDED, "Blender render deadline exceeded",
                                            job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
-                        log_stream.flush()
-                        log_reader.seek(log_offset)
-                        chunk = log_reader.read(256 * 1024)
-                        log_offset += len(chunk)
-                        addition = chunk.decode("utf-8", errors="replace")
-                        for match in re.finditer(r"CCTV_PROGRESS\s+([0-9.]+)", addition):
-                            last_progress = max(last_progress, min(0.99, float(match.group(1))))
-                        if not last_progress:
-                            produced = sum(self.root.resolve(rel).exists() for rel in frame_rels)
-                            last_progress = min(0.95, produced / max(1, len(frame_rels)))
-                        job.progress = max(job.progress, last_progress)
+                        produced = _completed_frame_count(
+                            frames_directory, ext, frame_end,
+                            job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id,
+                        )
+                        observed_progress = min(1.0, produced / frame_end)
+                        job.progress = min(1.0, max(job.progress, observed_progress))
                         memory = queue.nvml.device_memory()
                         peak = max(peak or memory.used_mb, memory.used_mb)
                         time.sleep(0.05)
@@ -353,7 +406,9 @@ class BlenderAdapter:
                 except (OSError, ValueError) as exc:
                     raise JobError(JobErrorKind.CORRUPT_ARTIFACT, f"worker metadata missing or malformed: {exc}",
                                    job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id) from exc
-                _verify_outputs(self.root, metadata, request, frame_rels, blend_rel, metadata_rel, child_pid)
+                engine_id, engine_build = _verify_outputs(
+                    self.root, metadata, request, frame_rels, blend_rel, metadata_rel, child_pid
+                )
                 if self._control.stopped():
                     raise _stopped_error(self._control, job)
                 elapsed = time.monotonic() - start_time
@@ -390,7 +445,11 @@ class BlenderAdapter:
                     status="completed", resource_metrics=run_metrics)
                 if self._control.stopped():
                     raise _stopped_error(self._control, job)
-                result_box.append(RenderResult(blend_rel, frame_rels, metadata_rel, log_rel, generation))
+                result_box.append(RenderResult(
+                    blend_path=blend_rel, frame_paths=frame_rels, metadata_path=metadata_rel,
+                    log_path=log_rel, engine_id=engine_id, engine_build=engine_build,
+                    generation_run=generation,
+                ))
             except Exception as exc:  # noqa: BLE001 - preserve the cause across the supervisor-thread boundary.
                 error_box.append(exc)
                 try:
@@ -441,8 +500,39 @@ class BlenderAdapter:
             return result_box[0]
 
         self._control.bind_lease(epoch, lambda: queue.lease)
+        if queue_managed:
+            return queued_worker(job)
         return queue.run(job, queued_worker, partial_artifacts=(base,),
-                         startup_allowance_seconds=BLENDER_STARTUP_ALLOWANCE_SECONDS)
+                         startup_allowance_seconds=startup_allowance)
+
+
+def _completed_frame_count(frames_directory: Path, extension: str, frame_end: int, *,
+                           job_id: str, shot_id: str, run_id: str) -> int:
+    """Count expected regular frame files from the already-contained directory."""
+    expected_names = {f"frame_{index:06d}.{extension}" for index in range(1, frame_end + 1)}
+    try:
+        directory_stat = frames_directory.stat()
+        if not stat.S_ISDIR(directory_stat.st_mode):
+            raise NotADirectoryError(f"{frames_directory} is not a directory")
+        completed = 0
+        for entry in frames_directory.iterdir():
+            if entry.name not in expected_names:
+                continue
+            try:
+                entry_stat = entry.stat()
+            except FileNotFoundError:
+                # Blender can replace an output between enumeration and stat.
+                continue
+            if stat.S_ISREG(entry_stat.st_mode):
+                completed += 1
+        return min(frame_end, completed)
+    except OSError as exc:
+        raise JobError(
+            JobErrorKind.CORRUPT_ARTIFACT,
+            f"cannot determine render progress by counting frame files in contained directory "
+            f"{frames_directory}: {exc}",
+            job_id=job_id, shot_id=shot_id, run_id=run_id, cause=exc,
+        ) from exc
 
 
 def _forward(path: Path) -> str:
@@ -465,7 +555,8 @@ def _file_sha256(path: Path) -> str:
 
 
 def _verify_outputs(root: ProjectRoot, metadata: dict[str, object], request: RenderRequest,
-                    frames: tuple[str, ...], blend: str, metadata_rel: str, child_pid: int) -> None:
+                    frames: tuple[str, ...], blend: str, metadata_rel: str,
+                    child_pid: int) -> tuple[str, str]:
     if not isinstance(metadata, dict):
         raise JobError(JobErrorKind.CORRUPT_ARTIFACT, "worker metadata is not a JSON object")
     if metadata.get("schema_version") != 1 or metadata.get("status") != "completed" \
@@ -525,6 +616,7 @@ def _verify_outputs(root: ProjectRoot, metadata: dict[str, object], request: Ren
             raise JobError(JobErrorKind.CORRUPT_ARTIFACT, "worker metadata is empty")
     except OSError as exc:
         raise JobError(JobErrorKind.CORRUPT_ARTIFACT, f"worker metadata missing: {exc}") from exc
+    return str(applied["engine"]), str(metadata["build_hash"])
 
 
 def _device_matches(actual: str, requested: str) -> bool:

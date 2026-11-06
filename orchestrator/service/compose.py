@@ -11,15 +11,17 @@ adapter-stage seeds.
 
 from __future__ import annotations
 
+import json
 from typing import Literal
 
-from orchestrator.adapters.blender.scene import RenderRequest, synthetic_interior
+from orchestrator.adapters.blender.scene import RenderRequest, SceneSpec, synthetic_interior
 from orchestrator.adapters.postprofile.profile import (
     EncodeSpec,
     OverlaySpec,
     PostProfileSpec,
 )
-from orchestrator.domain.entities import CameraProfile, PostProfile, Project, Shot
+from orchestrator.domain.entities import CameraProfile, PostProfile, Project, Shot, ShotOutputKind
+from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.store.json_store import ProjectStore, RecordNotFound
 
 
@@ -30,6 +32,7 @@ def compose_render_request(
     episode_id: str,
     run_id: str,
     mode: Literal["master", "preview"],
+    require_built_scene: bool = False,
 ) -> RenderRequest:
     """Build the typed Blender request from the current Shot and referenced profile."""
     shot, _mutation_token = store.load_with_version(Shot, shot_id, episode_id=episode_id)
@@ -40,6 +43,7 @@ def compose_render_request(
             f"Shot {shot.shot_id!r} references missing CameraProfile "
             f"{shot.camera_profile!r}"
         ) from exc
+    scene = _load_scene_spec(store, shot) if require_built_scene else synthetic_interior()
     return RenderRequest(
         shot_id=shot.shot_id,
         shot_version=shot.version,
@@ -47,10 +51,39 @@ def compose_render_request(
         degrade_seed=shot.degrade_seed,
         duration_sec=shot.duration_sec,
         camera_profile=camera_profile,
-        scene=synthetic_interior(),
+        scene=scene,
         mode=mode,
         engine="eevee",
     )
+
+
+def _load_scene_spec(store: ProjectStore, shot: Shot) -> SceneSpec:
+    outputs = store.list_shot_outputs(
+        shot.shot_id, episode_id=shot.episode_id,
+        record_version=shot.version, kind=ShotOutputKind.SCENE,
+    )
+    if not outputs:
+        raise JobError(
+            JobErrorKind.INVALID_MANIFEST,
+            f"Shot {shot.shot_id!r} version {shot.version} has no scene output; run build_scene first",
+        )
+    output = outputs[-1]
+    try:
+        artifact = json.loads(store._root.read_text(output.relative_path, encoding="utf-8"))
+        if not isinstance(artifact, dict):
+            raise TypeError("scene artifact root must be an object")
+        plan = artifact.get("plan")
+        if (not isinstance(plan, dict) or plan.get("shot_id") != shot.shot_id
+                or plan.get("shot_version") != shot.version):
+            raise ValueError("scene plan identity does not match the bound Shot content version")
+        return SceneSpec.model_validate(artifact.get("scene_spec"))
+    except (OSError, TypeError, ValueError) as exc:
+        raise JobError(
+            JobErrorKind.INVALID_MANIFEST,
+            f"scene output {output.relative_path!r} is not a valid persisted plan: {exc}",
+            shot_id=shot.shot_id,
+            cause=exc,
+        ) from exc
 
 
 def compose_post_profile_spec(store: ProjectStore) -> PostProfileSpec:

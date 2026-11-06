@@ -99,15 +99,17 @@ class _AdapterShim:
         payload = request.payload
         if isinstance(payload, dict):
             payload = payload.get("request", payload)
-        if self.kind in {AdapterKind.SCENE, AdapterKind.RENDER}:
+        if self.kind is AdapterKind.SCENE:
             model = RenderRequest.model_validate(payload)
-            result = self.adapter.render(
-                model, job, queue=queue,
-                cancel=self.cancel_check or _cancel_callback(request.payload),
-            )
-            artifact = result.blend_path if self.kind is AdapterKind.SCENE else (
-                result.frame_paths[0] if result.frame_paths else result.blend_path
-            )
+            result = self.adapter.assemble_scene(model, job)
+            artifact = result.scene_path
+        elif self.kind is AdapterKind.RENDER:
+            model = RenderRequest.model_validate(payload)
+            render_managed = getattr(self.adapter, "render_managed", None)
+            render = render_managed if callable(render_managed) else self.adapter.render
+            result = render(model, job, queue=queue,
+                            cancel=self.cancel_check or _cancel_callback(request.payload))
+            artifact = result.frame_paths[0] if result.frame_paths else result.blend_path
         elif self.kind is AdapterKind.GENERATE:
             result = self.adapter.generate(
                 ImageRequest.model_validate(payload), job, queue=queue,
@@ -195,7 +197,10 @@ class JobRunner:
             # Admission refusal is part of submit's synchronous contract. The id is
             # not persisted or returned until preflight succeeds.
             queue = _kind_queue(self.queue_for, project_id, request.kind)
-            queue.preflight(job)
+            preflight = queue.preflight_cpu if request.kind in {
+                AdapterKind.SCENE, AdapterKind.DEGRADE,
+            } else queue.preflight
+            preflight(job)
             root = store._root
             root.make_dir("state/jobs")
             append_job(root, job)
@@ -298,7 +303,7 @@ class JobRunner:
 
             if self._is_cancelled(key):
                 raise _job_error(JobErrorKind.CANCELLED, "job cancelled before adapter start", job)
-            if request.kind in {AdapterKind.SCENE, AdapterKind.RENDER, AdapterKind.GENERATE}:
+            if request.kind in {AdapterKind.RENDER, AdapterKind.GENERATE}:
                 with self._gpu_lock:
                     value = queue.run(
                         job, invoke_if_not_cancelled,
@@ -306,7 +311,10 @@ class JobRunner:
                     )
             else:
                 queue._transition(job, "queued")
-                queue.preflight(job)
+                preflight = queue.preflight_cpu if request.kind in {
+                    AdapterKind.SCENE, AdapterKind.DEGRADE,
+                } else queue.preflight
+                preflight(job)
                 if self._is_cancelled(key):
                     raise _job_error(JobErrorKind.CANCELLED, "job cancelled before adapter start", job)
                 job.attempts += 1
@@ -404,7 +412,7 @@ def _artifact_path(kind: AdapterKind, value: Any) -> str:
         return value.artifact_path
     if isinstance(value, str):
         return value
-    for name in {AdapterKind.SCENE: ("blend_path",), AdapterKind.RENDER: ("frame_paths", "blend_path"),
+    for name in {AdapterKind.SCENE: ("scene_path", "blend_path"), AdapterKind.RENDER: ("frame_paths", "blend_path"),
                  AdapterKind.GENERATE: ("image_paths",), AdapterKind.DEGRADE: ("output_path",)}[kind]:
         found = getattr(value, name, None)
         if isinstance(found, str):

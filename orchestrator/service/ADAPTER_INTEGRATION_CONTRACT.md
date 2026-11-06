@@ -506,3 +506,45 @@ would be worth less than this failing test.
 - `JobRunner` must select `preflight_cpu` for `AdapterKind.degrade`. That path landed in
   `6256a48` and the runner was explicitly barred from touching the jobs layer while it was
   in flight, so the two have not been joined up yet.
+
+## Amendment 6 — scene assembly is CPU-only; render reports frame progress
+
+This amendment supersedes Amendment 3's lease classification and Amendment 5's 74-second
+Blender startup allowance.
+
+- **`AdapterKind.SCENE` assembles a project-local scene plan.** It composes the
+  `RenderRequest`, calls `build_scene_plan()`, and writes one JSON artifact containing
+  the plan and its `SceneSpec`. It launches no Blender process, performs no render, and
+  acquires no GPU lease. The resulting `ShotOutput` kind is `scene`.
+- `render_preview` loads the latest `scene` output for the same Shot content version,
+  validates its `SceneSpec`, and uses it as the render input. Missing or invalid scene
+  output fails with `INVALID_MANIFEST`; render does not silently rebuild a synthetic
+  substitute.
+- **Scene admission is CPU-only.** `JobRunner.submit` and execution select
+  `JobQueue.preflight_cpu` for `scene` (as for `degrade`). Neither stage acquires a GPU
+  lease or takes the GPU serialization lock. `render` and `generate` keep GPU admission
+  and the lease.
+- A scene plan has not run Blender, so it records the requested engine in its plan and
+  may omit `ShotOutput.engine_id` and `engine_build`. If supplied by a legacy producer,
+  both fields must be present. Rendered `master` and `preview` outputs still require
+  actual applied-engine provenance.
+- **Render progress is the count of completed expected frame files divided by the
+  plan's `frame_end`.** The adapter updates the job on its monitor loop while Blender is
+  running, resolves the frames directory through `ProjectRoot`, and does not parse
+  stdout. Progress is monotonic and capped at 1.0; an unavailable plan field or
+  unresolvable/unreadable frames directory fails with a named `JobError`.
+- The startup allowance default is **150 seconds**, a derived watchdog bound rather
+  than a measurement: just over twice the measured ~74-second cold shader/kernel cache
+  cost in PRD §8.4. Progress reporting means this allowance only needs to reach the
+  first frame. Under the `JobRunner`-managed service path, the preview hard deadline is
+  the configured startup allowance plus its existing 10-second render/verification
+  window, so a cold first frame is not killed before the watchdog allowance expires.
+- Queue-raised failures default to diagnostic origin `job_queue` for every
+  `JobErrorKind`. An explicit lower-layer origin remains intact. The vocabulary remains
+  the existing `DIAGNOSTIC_ORIGINS` set.
+
+`ShotOutput`'s earlier domain contract required engine provenance even for a scene
+output. That requirement was narrowed for `scene` plans: their plan contains the desired
+engine, while only a rendered master or preview can report Blender's applied engine and
+build hash. The entity validator and `domain/SHOTOUTPUT_CONTRACT.md` now express this
+distinction.

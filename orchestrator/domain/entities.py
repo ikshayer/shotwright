@@ -216,7 +216,15 @@ class ShotOutput(Entity):
     def _provenance_matches_kind(self) -> ShotOutput:
         if not re.fullmatch(r"[0-9a-f]{64}", self.content_sha256):
             raise ValueError("content_sha256 must be 64 lowercase hexadecimal characters")
-        if self.kind in {ShotOutputKind.SCENE, ShotOutputKind.MASTER, ShotOutputKind.PREVIEW}:
+        if self.kind is ShotOutputKind.SCENE:
+            if (self.engine_id is None) != (self.engine_build is None):
+                raise ValueError("scene output must provide both engine_id and engine_build or neither")
+            if self.engine_id is not None and (not self.engine_id or not self.engine_build):
+                raise ValueError("scene engine provenance fields must be non-empty when provided")
+            if any(value is not None for value in
+                   (self.profile_semver, self.filter_graph_hash, self.pinned_binaries)):
+                raise ValueError("scene outputs may not carry degradation provenance")
+        elif self.kind in {ShotOutputKind.MASTER, ShotOutputKind.PREVIEW}:
             if not self.engine_id or not self.engine_build:
                 raise ValueError(f"{self.kind.value} output requires engine_id and engine_build")
             if any(value is not None for value in

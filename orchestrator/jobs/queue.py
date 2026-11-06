@@ -334,6 +334,10 @@ class JobQueue:
                     last_progress, last_change = job.progress, now
                     if progress_rate < configured_floor:
                         self._fail_throughput_stall()
+                elif job.progress >= 1.0:
+                    # All expected artifacts are complete; allow process teardown and
+                    # verification to finish under the hard deadline.
+                    pass
                 elif now - last_change >= 1.0 / configured_floor:
                     self._fail_throughput_stall()
             heartbeat_interval = max(1.0, self.lease.ttl_seconds / 3)
@@ -387,7 +391,7 @@ class JobQueue:
             job.error_traceback_truncated = False
             job.error_origin = None
         else:
-            origin = error.origin or ("job_queue" if error.kind is JobErrorKind.INTERNAL else None)
+            origin = error.origin or "job_queue"
             details = failure_diagnostics(
                 error, origin=origin, secrets=self.settings.diagnostic_secrets()
             )
