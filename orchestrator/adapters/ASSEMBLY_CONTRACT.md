@@ -106,3 +106,87 @@ Decision 1 is reversible and was taken by the orchestrator, not the creator. If 
 should instead remain a frame sequence addressed by a manifest file, only the artifact
 shape changes — Decision 3 stands either way. Say so if the implementation reveals a
 reason to prefer the manifest.
+
+## Amendment 1 — where the encode parameters are recorded
+
+Raised by the blind test author: Decision 2 requires the transfer function and bit depth to
+be "recorded in the output's provenance", but **`ShotOutput` has no fields for them**. Its
+provenance fields are `engine_id`, `engine_build`, `profile_semver`, `filter_graph_hash`
+and `pinned_binaries`, and `_provenance_matches_kind` constrains which may appear on a
+`master`. The contract asked for something the entity cannot hold. The test author was
+right; the contract was wrong.
+
+**Binding: record them on the `GenerationRun`, not on the `ShotOutput`.** `GenerationRun`
+already carries `invocation` (the exact argv) and `settings` (a typed bag), which is
+precisely what an encode's parameters are. Put the transfer function and bit depth in
+`settings`, where they are queryable, and let `invocation` hold the argv that proves them.
+
+**Do not add fields to `ShotOutput`.** Two reasons beyond the schema cost (FR-28 migration):
+its provenance fields answer "which engine identity produced this artifact", which codec
+parameters do not; and the `PostProfile` already owns encode settings for the delivery
+side, so a third home for the same kind of information invites the two to disagree.
+
+The requirement itself is unchanged and is not softened: the transfer function and bit
+depth must be **explicit in the argv** rather than left to an FFmpeg default, because the
+frames are linear-light float EXR and the master is integer video. A silent default makes
+the chain unreproducible and breaks FR-21's AT-05 acceptance.
+
+## Amendment 2 — the composer's signature
+
+Also raised by the test author: the contract names `compose_degrade_request` without
+giving its signature or saying where the overlay font comes from. Settle both:
+
+- **Signature:** keyword-only, matching `compose_render_request` —
+  `compose_degrade_request(store, *, shot_id, episode_id, run_id)`. Same purity rules.
+- **The font is not caller-supplied.** `DegradeRequest.font_relative` is resolved by the
+  composer from the `PostProfile`'s overlay model, which §FR-21 says "specifies clock
+  epoch, drift rate, format string, camera ID text, **font file**, placement". A caller
+  passing a font would be a second source of truth for a field the profile already owns,
+  and would let a caller silently change the burned-in overlay's appearance without a
+  profile revision. If the profile's overlay model does not currently carry a usable font
+  path, say so and report it rather than inventing a parameter.
+
+## Amendment 3 — the overlay font becomes a profile field, because AT-05 requires it
+
+Amendment 2 ruled that the composer resolves the overlay font from the `PostProfile`,
+citing FR-21, and told the implementer to report rather than invent if the entity could not
+carry it. It reported: **`PostProfileOverlay` has `camera_id`, `clock_epoch`, `fontsize`,
+`x`, `y` and `placement` — and no font path.** The adapter takes `font_path` as a separate
+caller-supplied argument. FR-21's normative text ("the overlay model specifies clock epoch,
+drift rate, format string, camera ID text, **font file**, placement") is simply not
+implemented. Amendment 2 asked for something that does not exist; the report was correct.
+
+**This is not a naming gap, it is a determinism hole.** FR-21's acceptance, AT-05, requires
+that re-applying profile version X to the same master with the same seed and the same
+pinned binaries reproduces a **byte-identical encode**. While the font is a caller
+argument, two runs with the same profile, same seed and same binaries can produce different
+burned-in overlays by passing a different font. The guarantee is unenforceable as built.
+
+**Binding:** add a font field to `PostProfileOverlay` — a project-relative path, validated
+for containment like every other path (FR-25), with the existing `schema_version` and
+FR-28 migration hooks carrying the change. The composer resolves it from the profile; the
+caller does not supply it. The adapter keeps its containment validation.
+
+Where an existing profile record has no font, fail loudly naming the profile and the
+missing field rather than substituting a default: a silently chosen font changes the
+recording's appearance, and FR-21 treats the overlay as part of the camera's identity.
+
+This is a domain schema change made under a sleeping creator's standing instruction to
+continue. It is small and reversible, and it moves the code **towards** the PRD rather
+than away from it, which is why it was taken rather than deferred.
+
+## Amendment 4 — clamping scene-linear highlights is correct, and must be stated
+
+The implementer reported that the linear-to-BT.709 conversion clamps scene-linear samples
+above the SDR range, and that the contract does not define tone mapping. It does not, and
+clamping is the right behaviour — but by argument, not by default.
+
+A DVR does not tone-map; it clips. §3.2's face identity-destruction rule depends on exactly
+this, naming "highlight clipping such that ≥60% of the face area lies within 5% of white"
+as one of its two accepted routes. A tone-mapped master would roll those highlights off and
+remove a mechanism the PRD relies on.
+
+**Binding:** clamp, do not tone-map, and record it as a deliberate choice in the
+`GenerationRun` settings alongside the transfer function and bit depth. If a future profile
+wants a filmic roll-off it belongs in the `PostProfile` stage list, where it is versioned
+and seeded, not in the master conversion.
