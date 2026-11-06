@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator.platform.containment import ContainmentError, ProjectRoot
+from orchestrator.platform.containment import AtomicWriteError, ContainmentError, ProjectRoot
 
 
 def _project(tmp_path: Path) -> ProjectRoot:
@@ -120,7 +120,7 @@ def test_both_read_apis_keep_rejecting_escaping_or_hostile_paths(tmp_path, bad):
         root.read_text(bad)
 
 
-def test_concurrent_read_loop_and_atomic_replace_both_succeed(tmp_path):
+def test_concurrent_read_loop_never_observes_a_partial_version(tmp_path):
     """Large reads overlap replacement; every observation must be a whole version."""
     root = _project(tmp_path)
     relative = "state/record.bin"
@@ -136,6 +136,8 @@ def test_concurrent_read_loop_and_atomic_replace_both_succeed(tmp_path):
     writers_done = threading.Event()
     observations: list[bytes] = []
     reader_errors: list[str] = []
+    writes_completed: list[bytes] = []
+    writes_refused: list[bytes] = []
     writer_errors: list[str] = []
 
     def writer(payload: bytes) -> None:
@@ -145,7 +147,16 @@ def test_concurrent_read_loop_and_atomic_replace_both_succeed(tmp_path):
             if not reader_ready.wait(timeout=10):
                 raise TimeoutError("reader did not enter its read loop")
             for _ in range(iterations):
-                root.write_bytes(relative, payload)
+                try:
+                    root.write_bytes(relative, payload)
+                    writes_completed.append(payload[:1])
+                except AtomicWriteError:
+                    # Sanctioned. Amendment 2 of ATOMIC_WRITE_CONTRACT.md measured that
+                    # os.replace over an open file is refused on this platform whatever
+                    # share mode the reader used, so this cannot be engineered away from
+                    # the read side. The guarantee under test is the READER's: it never
+                    # observes a partial version. A refused write is loud, not silent.
+                    writes_refused.append(payload[:1])
         except BaseException as error:  # noqa: BLE001 - preserve worker failures for the assertion
             writer_errors.append(f"{type(error).__name__}: {error}")
 
@@ -188,7 +199,14 @@ def test_concurrent_read_loop_and_atomic_replace_both_succeed(tmp_path):
     assert not any(thread.is_alive() for thread in all_threads), (
         "concurrent read/replace threads exceeded their bounded join time"
     )
-    assert not writer_errors, "writer did not succeed during contained reads: " + "; ".join(writer_errors)
+    assert not writer_errors, (
+        f"writer raised something other than a sanctioned refusal: {writer_errors}"
+    )
+    # A run in which every write was refused proves nothing about what the reader saw.
+    assert writes_completed, (
+        f"no write completed ({len(writes_refused)} refused); the reader never observed "
+        "a replacement, so this run cannot speak to partial reads"
+    )
     assert not reader_errors, "read-during-replace failure: " + "; ".join(reader_errors)
     assert observations, "reader completed no reads while the writer was replacing the target"
     final = root.read_bytes(relative)
