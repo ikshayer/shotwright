@@ -1,0 +1,18 @@
+{
+  "environment_note": "An initial focused run had 12 Windows temp-permission errors; retrying with a contained --basetemp resolved them. They were environment errors, not code failures.",
+  "final_120_frame_benchmark": "pending",
+  "final_test_suite": {
+    "duration_seconds": 278.03,
+    "log": "_work/final-pytest.log",
+    "passed": 1446,
+    "reported_by": "independent root execution",
+    "skipped": 34,
+    "status": "passed",
+    "warnings": 6
+  },
+  "ruff": {
+    "scope": "orchestrator/, tests/, spikes/09_low_key/",
+    "status": "passed"
+  },
+  "schema_version": 1
+}

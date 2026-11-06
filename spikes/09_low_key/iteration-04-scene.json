@@ -1,0 +1,4874 @@
+{
+  "materials": [
+    {
+      "name": "Warm drywall",
+      "color": [
+        0.7,
+        0.65,
+        0.57,
+        1.0
+      ],
+      "roughness": 0.88,
+      "surface": "plaster",
+      "panel_width": 0.18,
+      "seam_width": 0.003,
+      "texture_scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "variation": 0.06,
+      "bump_strength": 0.012,
+      "emission_strength": 0.0,
+      "metallic": 0.0
+    },
+    {
+      "name": "Ceiling paint",
+      "color": [
+        0.77,
+        0.74,
+        0.67,
+        1.0
+      ],
+      "roughness": 0.9,
+      "surface": "plaster",
+      "panel_width": 0.18,
+      "seam_width": 0.003,
+      "texture_scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "variation": 0.03,
+      "bump_strength": 0.008,
+      "emission_strength": 0.0,
+      "metallic": 0.0
+    },
+    {
+      "name": "Oak planks",
+      "color": [
+        0.3,
+        0.16,
+        0.075,
+        1.0
+      ],
+      "roughness": 0.4,
+      "surface": "wood",
+      "panel_width": 0.18,
+      "seam_width": 0.003,
+      "texture_scale": [
+        0.15,
+        7.0,
+        0.4
+      ],
+      "variation": 0.13,
+      "bump_strength": 0.025,
+      "emission_strength": 0.0,
+      "metallic": 0.0
+    },
+    {
+      "name": "Oak plank variation",
+      "color": [
+        0.34,
+        0.19,
+        0.09,
+        1.0
+      ],
+      "roughness": 0.42,
+      "surface": "wood",
+      "panel_width": 0.18,
+      "seam_width": 0.003,
+      "texture_scale": [
+        0.15,
+        7.0,
+        0.4
+      ],
+      "variation": 0.1,
+      "bump_strength": 0.02,
+      "emission_strength": 0.0,
+      "metallic": 0.0
+    },
+    {
+      "name": "Honey oak",
+      "color": [
+        0.34,
+        0.2,
+        0.1,
+        1.0
+      ],
+      "roughness": 0.43,
+      "surface": "wood",
+      "panel_width": 0.18,
+      "seam_width": 0.003,
+      "texture_scale": [
+        0.25,
+        5.0,
+        0.5
+      ],
+      "variation": 0.1,
+      "bump_strength": 0.02,
+      "emission_strength": 0.0,
+      "metallic": 0.0
+    },
+    {
+      "name": "White trim",
+      "color": [
+        0.83,
+        0.8,
+        0.73,
+        1.0
+      ],
+      "roughness": 0.68,
+      "surface": "plaster",
+      "panel_width": 0.18,
+      "seam_width": 0.003,
+      "texture_scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "variation": 0.02,
+      "bump_strength": 0.0,
+      "emission_strength": 0.0,
+      "metallic": 0.0
+    },
+    {
+      "name": "Sofa fabric",
+      "color": [
+        0.12,
+        0.12,
+        0.12,
+        1.0
+      ],
+      "roughness": 0.93,
+      "surface": "fabric",
+      "panel_width": 0.18,
+      "seam_width": 0.003,
+      "texture_scale": [
+        55.0,
+        55.0,
+        55.0
+      ],
+      "variation": 0.06,
+      "bump_strength": 0.07,
+      "emission_strength": 0.0,
+      "metallic": 0.0
+    },
+    {
+      "name": "Pillow fabric",
+      "color": [
+        0.47,
+        0.39,
+        0.3,
+        1.0
+      ],
+      "roughness": 0.94,
+      "surface": "fabric",
+      "panel_width": 0.18,
+      "seam_width": 0.003,
+      "texture_scale": [
+        55.0,
+        55.0,
+        55.0
+      ],
+      "variation": 0.08,
+      "bump_strength": 0.07,
+      "emission_strength": 0.0,
+      "metallic": 0.0
+    },
+    {
+      "name": "Rug weave",
+      "color": [
+        0.28,
+        0.18,
+        0.14,
+        1.0
+      ],
+      "roughness": 0.97,
+      "surface": "rug",
+      "panel_width": 0.18,
+      "seam_width": 0.003,
+      "texture_scale": [
+        24.0,
+        24.0,
+        24.0
+      ],
+      "variation": 0.12,
+      "bump_strength": 0.09,
+      "emission_strength": 0.0,
+      "metallic": 0.0
+    },
+    {
+      "name": "Walnut",
+      "color": [
+        0.095,
+        0.056,
+        0.032,
+        1.0
+      ],
+      "roughness": 0.34,
+      "surface": "wood",
+      "panel_width": 0.18,
+      "seam_width": 0.003,
+      "texture_scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "variation": 0.08,
+      "bump_strength": 0.015,
+      "emission_strength": 0.0,
+      "metallic": 0.0
+    },
+    {
+      "name": "Lamp shade",
+      "color": [
+        0.065,
+        0.055,
+        0.045,
+        1.0
+      ],
+      "roughness": 0.86,
+      "surface": "plain",
+      "panel_width": 0.18,
+      "seam_width": 0.003,
+      "texture_scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "variation": 0.0,
+      "bump_strength": 0.0,
+      "emission_strength": 0.0,
+      "metallic": 0.0
+    },
+    {
+      "name": "Window glass",
+      "color": [
+        0.12,
+        0.12,
+        0.12,
+        1.0
+      ],
+      "roughness": 1.0,
+      "surface": "plain",
+      "panel_width": 0.18,
+      "seam_width": 0.003,
+      "texture_scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "variation": 0.0,
+      "bump_strength": 0.0,
+      "emission_strength": 0.0,
+      "metallic": 0.0
+    },
+    {
+      "name": "TV screen",
+      "color": [
+        0.008,
+        0.009,
+        0.012,
+        1.0
+      ],
+      "roughness": 0.22,
+      "surface": "plain",
+      "panel_width": 0.18,
+      "seam_width": 0.003,
+      "texture_scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "variation": 0.0,
+      "bump_strength": 0.0,
+      "emission_strength": 0.0,
+      "metallic": 0.0
+    },
+    {
+      "name": "Ceramic",
+      "color": [
+        0.42,
+        0.38,
+        0.32,
+        1.0
+      ],
+      "roughness": 0.3,
+      "surface": "plain",
+      "panel_width": 0.18,
+      "seam_width": 0.003,
+      "texture_scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "variation": 0.0,
+      "bump_strength": 0.0,
+      "emission_strength": 0.0,
+      "metallic": 0.0
+    },
+    {
+      "name": "Lamp bulb",
+      "color": [
+        1.0,
+        0.92,
+        0.8,
+        1.0
+      ],
+      "roughness": 0.25,
+      "surface": "plain",
+      "panel_width": 0.18,
+      "seam_width": 0.003,
+      "texture_scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "variation": 0.0,
+      "bump_strength": 0.0,
+      "emission_strength": 4.0,
+      "metallic": 0.0
+    },
+    {
+      "name": "Dark wood panel",
+      "color": [
+        0.16,
+        0.14,
+        0.12,
+        1.0
+      ],
+      "roughness": 0.82,
+      "surface": "wood_panel",
+      "panel_width": 0.18,
+      "seam_width": 0.003,
+      "texture_scale": [
+        10.0,
+        10.0,
+        0.3
+      ],
+      "variation": 0.12,
+      "bump_strength": 0.025,
+      "emission_strength": 0.0,
+      "metallic": 0.0
+    },
+    {
+      "name": "Silhouette",
+      "color": [
+        0.002,
+        0.002,
+        0.002,
+        1.0
+      ],
+      "roughness": 1.0,
+      "surface": "plain",
+      "panel_width": 0.18,
+      "seam_width": 0.003,
+      "texture_scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "variation": 0.0,
+      "bump_strength": 0.0,
+      "emission_strength": 0.0,
+      "metallic": 0.0
+    }
+  ],
+  "objects": [
+    {
+      "name": "Floor plank",
+      "kind": "box",
+      "location": [
+        -1.8025000000000002,
+        -2.0125,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak plank variation",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 02",
+      "kind": "box",
+      "location": [
+        -0.0025000000000001688,
+        -2.0125,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 03",
+      "kind": "box",
+      "location": [
+        1.7974999999999999,
+        -2.0125,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 04",
+      "kind": "box",
+      "location": [
+        -2.2525000000000004,
+        -1.8375000000000001,
+        -0.024
+      ],
+      "dimensions": [
+        0.8949999999999996,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak plank variation",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 05",
+      "kind": "box",
+      "location": [
+        -0.9025000000000003,
+        -1.8375000000000001,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 06",
+      "kind": "box",
+      "location": [
+        0.8974999999999997,
+        -1.8375000000000001,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 07",
+      "kind": "box",
+      "location": [
+        2.25,
+        -1.8375000000000001,
+        -0.024
+      ],
+      "dimensions": [
+        0.9000000000000004,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 08",
+      "kind": "box",
+      "location": [
+        -1.8025000000000002,
+        -1.6625,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 09",
+      "kind": "box",
+      "location": [
+        -0.0025000000000001688,
+        -1.6625,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 10",
+      "kind": "box",
+      "location": [
+        1.7974999999999999,
+        -1.6625,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak plank variation",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 11",
+      "kind": "box",
+      "location": [
+        -2.2525000000000004,
+        -1.4875000000000003,
+        -0.024
+      ],
+      "dimensions": [
+        0.8949999999999996,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 12",
+      "kind": "box",
+      "location": [
+        -0.9025000000000003,
+        -1.4875000000000003,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 13",
+      "kind": "box",
+      "location": [
+        0.8974999999999997,
+        -1.4875000000000003,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak plank variation",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 14",
+      "kind": "box",
+      "location": [
+        2.25,
+        -1.4875000000000003,
+        -0.024
+      ],
+      "dimensions": [
+        0.9000000000000004,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 15",
+      "kind": "box",
+      "location": [
+        -1.8025000000000002,
+        -1.3125000000000002,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak plank variation",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 16",
+      "kind": "box",
+      "location": [
+        -0.0025000000000001688,
+        -1.3125000000000002,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 17",
+      "kind": "box",
+      "location": [
+        1.7974999999999999,
+        -1.3125000000000002,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 18",
+      "kind": "box",
+      "location": [
+        -2.2525000000000004,
+        -1.1375000000000002,
+        -0.024
+      ],
+      "dimensions": [
+        0.8949999999999996,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak plank variation",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 19",
+      "kind": "box",
+      "location": [
+        -0.9025000000000003,
+        -1.1375000000000002,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 20",
+      "kind": "box",
+      "location": [
+        0.8974999999999997,
+        -1.1375000000000002,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 21",
+      "kind": "box",
+      "location": [
+        2.25,
+        -1.1375000000000002,
+        -0.024
+      ],
+      "dimensions": [
+        0.9000000000000004,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 22",
+      "kind": "box",
+      "location": [
+        -1.8025000000000002,
+        -0.9625000000000004,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 23",
+      "kind": "box",
+      "location": [
+        -0.0025000000000001688,
+        -0.9625000000000004,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 24",
+      "kind": "box",
+      "location": [
+        1.7974999999999999,
+        -0.9625000000000004,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak plank variation",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 25",
+      "kind": "box",
+      "location": [
+        -2.2525000000000004,
+        -0.7875000000000003,
+        -0.024
+      ],
+      "dimensions": [
+        0.8949999999999996,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 26",
+      "kind": "box",
+      "location": [
+        -0.9025000000000003,
+        -0.7875000000000003,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 27",
+      "kind": "box",
+      "location": [
+        0.8974999999999997,
+        -0.7875000000000003,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak plank variation",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 28",
+      "kind": "box",
+      "location": [
+        2.25,
+        -0.7875000000000003,
+        -0.024
+      ],
+      "dimensions": [
+        0.9000000000000004,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 29",
+      "kind": "box",
+      "location": [
+        -1.8025000000000002,
+        -0.6125000000000003,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak plank variation",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 30",
+      "kind": "box",
+      "location": [
+        -0.0025000000000001688,
+        -0.6125000000000003,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 31",
+      "kind": "box",
+      "location": [
+        1.7974999999999999,
+        -0.6125000000000003,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 32",
+      "kind": "box",
+      "location": [
+        -2.2525000000000004,
+        -0.4375000000000002,
+        -0.024
+      ],
+      "dimensions": [
+        0.8949999999999996,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak plank variation",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 33",
+      "kind": "box",
+      "location": [
+        -0.9025000000000003,
+        -0.4375000000000002,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 34",
+      "kind": "box",
+      "location": [
+        0.8974999999999997,
+        -0.4375000000000002,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 35",
+      "kind": "box",
+      "location": [
+        2.25,
+        -0.4375000000000002,
+        -0.024
+      ],
+      "dimensions": [
+        0.9000000000000004,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 36",
+      "kind": "box",
+      "location": [
+        -1.8025000000000002,
+        -0.2625000000000002,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 37",
+      "kind": "box",
+      "location": [
+        -0.0025000000000001688,
+        -0.2625000000000002,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 38",
+      "kind": "box",
+      "location": [
+        1.7974999999999999,
+        -0.2625000000000002,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak plank variation",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 39",
+      "kind": "box",
+      "location": [
+        -2.2525000000000004,
+        -0.08750000000000036,
+        -0.024
+      ],
+      "dimensions": [
+        0.8949999999999996,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 40",
+      "kind": "box",
+      "location": [
+        -0.9025000000000003,
+        -0.08750000000000036,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 41",
+      "kind": "box",
+      "location": [
+        0.8974999999999997,
+        -0.08750000000000036,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak plank variation",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 42",
+      "kind": "box",
+      "location": [
+        2.25,
+        -0.08750000000000036,
+        -0.024
+      ],
+      "dimensions": [
+        0.9000000000000004,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 43",
+      "kind": "box",
+      "location": [
+        -1.8025000000000002,
+        0.08749999999999947,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak plank variation",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 44",
+      "kind": "box",
+      "location": [
+        -0.0025000000000001688,
+        0.08749999999999947,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 45",
+      "kind": "box",
+      "location": [
+        1.7974999999999999,
+        0.08749999999999947,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 46",
+      "kind": "box",
+      "location": [
+        -2.2525000000000004,
+        0.26249999999999973,
+        -0.024
+      ],
+      "dimensions": [
+        0.8949999999999996,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak plank variation",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 47",
+      "kind": "box",
+      "location": [
+        -0.9025000000000003,
+        0.26249999999999973,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 48",
+      "kind": "box",
+      "location": [
+        0.8974999999999997,
+        0.26249999999999973,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 49",
+      "kind": "box",
+      "location": [
+        2.25,
+        0.26249999999999973,
+        -0.024
+      ],
+      "dimensions": [
+        0.9000000000000004,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 50",
+      "kind": "box",
+      "location": [
+        -1.8025000000000002,
+        0.43749999999999956,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 51",
+      "kind": "box",
+      "location": [
+        -0.0025000000000001688,
+        0.43749999999999956,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 52",
+      "kind": "box",
+      "location": [
+        1.7974999999999999,
+        0.43749999999999956,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak plank variation",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 53",
+      "kind": "box",
+      "location": [
+        -2.2525000000000004,
+        0.6124999999999998,
+        -0.024
+      ],
+      "dimensions": [
+        0.8949999999999996,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 54",
+      "kind": "box",
+      "location": [
+        -0.9025000000000003,
+        0.6124999999999998,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 55",
+      "kind": "box",
+      "location": [
+        0.8974999999999997,
+        0.6124999999999998,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak plank variation",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 56",
+      "kind": "box",
+      "location": [
+        2.25,
+        0.6124999999999998,
+        -0.024
+      ],
+      "dimensions": [
+        0.9000000000000004,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 57",
+      "kind": "box",
+      "location": [
+        -1.8025000000000002,
+        0.7874999999999996,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak plank variation",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 58",
+      "kind": "box",
+      "location": [
+        -0.0025000000000001688,
+        0.7874999999999996,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 59",
+      "kind": "box",
+      "location": [
+        1.7974999999999999,
+        0.7874999999999996,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 60",
+      "kind": "box",
+      "location": [
+        -2.2525000000000004,
+        0.9624999999999995,
+        -0.024
+      ],
+      "dimensions": [
+        0.8949999999999996,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak plank variation",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 61",
+      "kind": "box",
+      "location": [
+        -0.9025000000000003,
+        0.9624999999999995,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 62",
+      "kind": "box",
+      "location": [
+        0.8974999999999997,
+        0.9624999999999995,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 63",
+      "kind": "box",
+      "location": [
+        2.25,
+        0.9624999999999995,
+        -0.024
+      ],
+      "dimensions": [
+        0.9000000000000004,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 64",
+      "kind": "box",
+      "location": [
+        -1.8025000000000002,
+        1.1374999999999997,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 65",
+      "kind": "box",
+      "location": [
+        -0.0025000000000001688,
+        1.1374999999999997,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 66",
+      "kind": "box",
+      "location": [
+        1.7974999999999999,
+        1.1374999999999997,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak plank variation",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 67",
+      "kind": "box",
+      "location": [
+        -2.2525000000000004,
+        1.3124999999999996,
+        -0.024
+      ],
+      "dimensions": [
+        0.8949999999999996,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 68",
+      "kind": "box",
+      "location": [
+        -0.9025000000000003,
+        1.3124999999999996,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 69",
+      "kind": "box",
+      "location": [
+        0.8974999999999997,
+        1.3124999999999996,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak plank variation",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 70",
+      "kind": "box",
+      "location": [
+        2.25,
+        1.3124999999999996,
+        -0.024
+      ],
+      "dimensions": [
+        0.9000000000000004,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 71",
+      "kind": "box",
+      "location": [
+        -1.8025000000000002,
+        1.4874999999999998,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak plank variation",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 72",
+      "kind": "box",
+      "location": [
+        -0.0025000000000001688,
+        1.4874999999999998,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 73",
+      "kind": "box",
+      "location": [
+        1.7974999999999999,
+        1.4874999999999998,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 74",
+      "kind": "box",
+      "location": [
+        -2.2525000000000004,
+        1.6624999999999996,
+        -0.024
+      ],
+      "dimensions": [
+        0.8949999999999996,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak plank variation",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 75",
+      "kind": "box",
+      "location": [
+        -0.9025000000000003,
+        1.6624999999999996,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 76",
+      "kind": "box",
+      "location": [
+        0.8974999999999997,
+        1.6624999999999996,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 77",
+      "kind": "box",
+      "location": [
+        2.25,
+        1.6624999999999996,
+        -0.024
+      ],
+      "dimensions": [
+        0.9000000000000004,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 78",
+      "kind": "box",
+      "location": [
+        -1.8025000000000002,
+        1.8374999999999995,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 79",
+      "kind": "box",
+      "location": [
+        -0.0025000000000001688,
+        1.8374999999999995,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 80",
+      "kind": "box",
+      "location": [
+        1.7974999999999999,
+        1.8374999999999995,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak plank variation",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 81",
+      "kind": "box",
+      "location": [
+        -2.2525000000000004,
+        2.0124999999999993,
+        -0.024
+      ],
+      "dimensions": [
+        0.8949999999999996,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 82",
+      "kind": "box",
+      "location": [
+        -0.9025000000000003,
+        2.0124999999999993,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 83",
+      "kind": "box",
+      "location": [
+        0.8974999999999997,
+        2.0124999999999993,
+        -0.024
+      ],
+      "dimensions": [
+        1.795,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak plank variation",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Floor plank 84",
+      "kind": "box",
+      "location": [
+        2.25,
+        2.0124999999999993,
+        -0.024
+      ],
+      "dimensions": [
+        0.9000000000000004,
+        0.1735,
+        0.048
+      ],
+      "material": "Oak planks",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Rear wall left",
+      "kind": "box",
+      "location": [
+        -2.16,
+        2.07,
+        1.22
+      ],
+      "dimensions": [
+        1.08,
+        0.16,
+        2.44
+      ],
+      "material": "Dark wood panel",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Rear wall between openings",
+      "kind": "box",
+      "location": [
+        0.14,
+        2.07,
+        1.22
+      ],
+      "dimensions": [
+        0.12,
+        0.16,
+        2.44
+      ],
+      "material": "Dark wood panel",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Rear wall right",
+      "kind": "box",
+      "location": [
+        1.94,
+        2.07,
+        1.22
+      ],
+      "dimensions": [
+        1.52,
+        0.16,
+        2.44
+      ],
+      "material": "Dark wood panel",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Wall below window",
+      "kind": "box",
+      "location": [
+        -0.77,
+        2.07,
+        0.44
+      ],
+      "dimensions": [
+        1.7,
+        0.16,
+        0.88
+      ],
+      "material": "Dark wood panel",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Wall above window",
+      "kind": "box",
+      "location": [
+        -0.77,
+        2.07,
+        2.3
+      ],
+      "dimensions": [
+        1.7,
+        0.16,
+        0.28
+      ],
+      "material": "Dark wood panel",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Hallway header",
+      "kind": "box",
+      "location": [
+        0.66,
+        2.07,
+        2.18
+      ],
+      "dimensions": [
+        1.04,
+        0.16,
+        0.52
+      ],
+      "material": "Dark wood panel",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Left wall",
+      "kind": "box",
+      "location": [
+        -2.67,
+        0.0,
+        1.22
+      ],
+      "dimensions": [
+        0.16,
+        4.2,
+        2.44
+      ],
+      "material": "Dark wood panel",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Right wall",
+      "kind": "box",
+      "location": [
+        2.67,
+        0.0,
+        1.22
+      ],
+      "dimensions": [
+        0.16,
+        4.2,
+        2.44
+      ],
+      "material": "Dark wood panel",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Ceiling",
+      "kind": "box",
+      "location": [
+        0.0,
+        0.0,
+        2.43
+      ],
+      "dimensions": [
+        5.4,
+        4.2,
+        0.1
+      ],
+      "material": "Ceiling paint",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Side baseboard",
+      "kind": "box",
+      "location": [
+        -2.57,
+        0.0,
+        0.075
+      ],
+      "dimensions": [
+        0.055,
+        4.0,
+        0.15
+      ],
+      "material": "White trim",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.012,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Side baseboard 02",
+      "kind": "box",
+      "location": [
+        2.57,
+        0.0,
+        0.075
+      ],
+      "dimensions": [
+        0.055,
+        4.0,
+        0.15
+      ],
+      "material": "White trim",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.012,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Rear baseboard",
+      "kind": "box",
+      "location": [
+        -2.16,
+        1.975,
+        0.075
+      ],
+      "dimensions": [
+        1.08,
+        0.055,
+        0.15
+      ],
+      "material": "White trim",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.012,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Rear baseboard 02",
+      "kind": "box",
+      "location": [
+        -0.77,
+        1.975,
+        0.075
+      ],
+      "dimensions": [
+        1.7,
+        0.055,
+        0.15
+      ],
+      "material": "White trim",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.012,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Rear baseboard 03",
+      "kind": "box",
+      "location": [
+        0.14,
+        1.975,
+        0.075
+      ],
+      "dimensions": [
+        0.12,
+        0.055,
+        0.15
+      ],
+      "material": "White trim",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.012,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Rear baseboard 04",
+      "kind": "box",
+      "location": [
+        1.94,
+        1.975,
+        0.075
+      ],
+      "dimensions": [
+        1.52,
+        0.055,
+        0.15
+      ],
+      "material": "White trim",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.012,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Window glass",
+      "kind": "box",
+      "location": [
+        -0.77,
+        2.0,
+        1.48
+      ],
+      "dimensions": [
+        1.52,
+        0.025,
+        1.12
+      ],
+      "material": "Window glass",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Window casing",
+      "kind": "box",
+      "location": [
+        -1.57,
+        1.91,
+        1.48
+      ],
+      "dimensions": [
+        0.09,
+        0.13,
+        1.3
+      ],
+      "material": "White trim",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.015,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Window casing 02",
+      "kind": "box",
+      "location": [
+        0.03,
+        1.91,
+        1.48
+      ],
+      "dimensions": [
+        0.09,
+        0.13,
+        1.3
+      ],
+      "material": "White trim",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.015,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Window head casing",
+      "kind": "box",
+      "location": [
+        -0.77,
+        1.91,
+        2.1
+      ],
+      "dimensions": [
+        1.69,
+        0.13,
+        0.1
+      ],
+      "material": "White trim",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.015,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Window sill",
+      "kind": "box",
+      "location": [
+        -0.77,
+        1.82,
+        0.89
+      ],
+      "dimensions": [
+        1.78,
+        0.28,
+        0.09
+      ],
+      "material": "Honey oak",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.025,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Window muntin",
+      "kind": "box",
+      "location": [
+        -0.77,
+        1.965,
+        1.48
+      ],
+      "dimensions": [
+        0.035,
+        0.04,
+        1.12
+      ],
+      "material": "White trim",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Window muntin 02",
+      "kind": "box",
+      "location": [
+        -0.77,
+        1.965,
+        1.48
+      ],
+      "dimensions": [
+        1.52,
+        0.04,
+        0.035
+      ],
+      "material": "White trim",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Curtain panel",
+      "kind": "box",
+      "location": [
+        -1.78,
+        1.82,
+        1.47
+      ],
+      "dimensions": [
+        0.34,
+        0.12,
+        1.34
+      ],
+      "material": "Pillow fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.06,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Curtain fold",
+      "kind": "box",
+      "location": [
+        -1.9,
+        1.745,
+        1.47
+      ],
+      "dimensions": [
+        0.025,
+        0.035,
+        1.28
+      ],
+      "material": "Pillow fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.01,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Curtain fold 02",
+      "kind": "box",
+      "location": [
+        -1.8199999999999998,
+        1.745,
+        1.47
+      ],
+      "dimensions": [
+        0.025,
+        0.035,
+        1.28
+      ],
+      "material": "Pillow fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.01,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Curtain fold 03",
+      "kind": "box",
+      "location": [
+        -1.74,
+        1.745,
+        1.47
+      ],
+      "dimensions": [
+        0.025,
+        0.035,
+        1.28
+      ],
+      "material": "Pillow fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.01,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Curtain fold 04",
+      "kind": "box",
+      "location": [
+        -1.66,
+        1.745,
+        1.47
+      ],
+      "dimensions": [
+        0.025,
+        0.035,
+        1.28
+      ],
+      "material": "Pillow fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.01,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Curtain panel 02",
+      "kind": "box",
+      "location": [
+        0.24,
+        1.82,
+        1.47
+      ],
+      "dimensions": [
+        0.34,
+        0.12,
+        1.34
+      ],
+      "material": "Pillow fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.06,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Curtain fold 05",
+      "kind": "box",
+      "location": [
+        0.12,
+        1.745,
+        1.47
+      ],
+      "dimensions": [
+        0.025,
+        0.035,
+        1.28
+      ],
+      "material": "Pillow fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.01,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Curtain fold 06",
+      "kind": "box",
+      "location": [
+        0.2,
+        1.745,
+        1.47
+      ],
+      "dimensions": [
+        0.025,
+        0.035,
+        1.28
+      ],
+      "material": "Pillow fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.01,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Curtain fold 07",
+      "kind": "box",
+      "location": [
+        0.28,
+        1.745,
+        1.47
+      ],
+      "dimensions": [
+        0.025,
+        0.035,
+        1.28
+      ],
+      "material": "Pillow fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.01,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Curtain fold 08",
+      "kind": "box",
+      "location": [
+        0.36,
+        1.745,
+        1.47
+      ],
+      "dimensions": [
+        0.025,
+        0.035,
+        1.28
+      ],
+      "material": "Pillow fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.01,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Curtain rod",
+      "kind": "cylinder",
+      "location": [
+        -0.77,
+        1.78,
+        2.17
+      ],
+      "dimensions": [
+        0.035,
+        0.035,
+        2.14
+      ],
+      "material": "Walnut",
+      "rotation": [
+        0.0,
+        1.5708,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Hall door casing",
+      "kind": "box",
+      "location": [
+        0.17,
+        1.91,
+        1.04
+      ],
+      "dimensions": [
+        0.085,
+        0.13,
+        2.08
+      ],
+      "material": "White trim",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.012,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Hall door casing 02",
+      "kind": "box",
+      "location": [
+        1.15,
+        1.91,
+        1.04
+      ],
+      "dimensions": [
+        0.085,
+        0.13,
+        2.08
+      ],
+      "material": "White trim",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.012,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Hall casing header",
+      "kind": "box",
+      "location": [
+        0.66,
+        1.91,
+        2.11
+      ],
+      "dimensions": [
+        1.06,
+        0.13,
+        0.09
+      ],
+      "material": "White trim",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.012,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Hall floor",
+      "kind": "box",
+      "location": [
+        0.66,
+        2.82,
+        0.01
+      ],
+      "dimensions": [
+        0.92,
+        1.55,
+        0.04
+      ],
+      "material": "Honey oak",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Hall left return",
+      "kind": "box",
+      "location": [
+        0.14,
+        2.78,
+        1.22
+      ],
+      "dimensions": [
+        0.12,
+        1.42,
+        2.44
+      ],
+      "material": "Dark wood panel",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Hall right return",
+      "kind": "box",
+      "location": [
+        1.18,
+        2.78,
+        1.22
+      ],
+      "dimensions": [
+        0.12,
+        1.42,
+        2.44
+      ],
+      "material": "Dark wood panel",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Hall end wall",
+      "kind": "box",
+      "location": [
+        0.66,
+        3.52,
+        1.22
+      ],
+      "dimensions": [
+        0.92,
+        0.12,
+        2.44
+      ],
+      "material": "Dark wood panel",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Sofa foot",
+      "kind": "cylinder",
+      "location": [
+        -1.96,
+        0.72,
+        0.05
+      ],
+      "dimensions": [
+        0.09,
+        0.09,
+        0.1
+      ],
+      "material": "Walnut",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Sofa foot 02",
+      "kind": "cylinder",
+      "location": [
+        -1.96,
+        1.68,
+        0.05
+      ],
+      "dimensions": [
+        0.09,
+        0.09,
+        0.1
+      ],
+      "material": "Walnut",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Sofa foot 03",
+      "kind": "cylinder",
+      "location": [
+        -0.43,
+        0.72,
+        0.05
+      ],
+      "dimensions": [
+        0.09,
+        0.09,
+        0.1
+      ],
+      "material": "Walnut",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Sofa foot 04",
+      "kind": "cylinder",
+      "location": [
+        -0.43,
+        1.68,
+        0.05
+      ],
+      "dimensions": [
+        0.09,
+        0.09,
+        0.1
+      ],
+      "material": "Walnut",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Sofa frame",
+      "kind": "box",
+      "location": [
+        -1.19,
+        1.2,
+        0.24
+      ],
+      "dimensions": [
+        1.95,
+        1.12,
+        0.28
+      ],
+      "material": "Walnut",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.08,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Sofa seat cushion",
+      "kind": "box",
+      "location": [
+        -1.77,
+        1.06,
+        0.43
+      ],
+      "dimensions": [
+        0.56,
+        0.91,
+        0.18
+      ],
+      "material": "Sofa fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.07,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Sofa back cushion",
+      "kind": "box",
+      "location": [
+        -1.77,
+        1.68,
+        0.75
+      ],
+      "dimensions": [
+        0.56,
+        0.24,
+        0.72
+      ],
+      "material": "Sofa fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.09,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Sofa seat cushion 02",
+      "kind": "box",
+      "location": [
+        -1.19,
+        1.06,
+        0.43
+      ],
+      "dimensions": [
+        0.56,
+        0.91,
+        0.18
+      ],
+      "material": "Sofa fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.07,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Sofa back cushion 02",
+      "kind": "box",
+      "location": [
+        -1.19,
+        1.68,
+        0.75
+      ],
+      "dimensions": [
+        0.56,
+        0.24,
+        0.72
+      ],
+      "material": "Sofa fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.09,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Sofa seat cushion 03",
+      "kind": "box",
+      "location": [
+        -0.61,
+        1.06,
+        0.43
+      ],
+      "dimensions": [
+        0.56,
+        0.91,
+        0.18
+      ],
+      "material": "Sofa fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.07,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Sofa back cushion 03",
+      "kind": "box",
+      "location": [
+        -0.61,
+        1.68,
+        0.75
+      ],
+      "dimensions": [
+        0.56,
+        0.24,
+        0.72
+      ],
+      "material": "Sofa fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.09,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Sofa arm",
+      "kind": "box",
+      "location": [
+        -1.96,
+        1.18,
+        0.57
+      ],
+      "dimensions": [
+        0.32,
+        1.12,
+        0.46
+      ],
+      "material": "Sofa fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.1,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Sofa arm 02",
+      "kind": "box",
+      "location": [
+        -0.43,
+        1.18,
+        0.57
+      ],
+      "dimensions": [
+        0.32,
+        1.12,
+        0.46
+      ],
+      "material": "Sofa fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.1,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Sofa throw pillow",
+      "kind": "box",
+      "location": [
+        -1.62,
+        1.36,
+        0.73
+      ],
+      "dimensions": [
+        0.49,
+        0.24,
+        0.4
+      ],
+      "material": "Pillow fabric",
+      "rotation": [
+        0.08,
+        -0.1,
+        -0.08
+      ],
+      "bevel": 0.12,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Sofa throw pillow 02",
+      "kind": "box",
+      "location": [
+        -0.91,
+        1.36,
+        0.73
+      ],
+      "dimensions": [
+        0.49,
+        0.24,
+        0.4
+      ],
+      "material": "Pillow fabric",
+      "rotation": [
+        -0.05,
+        0.09,
+        0.05
+      ],
+      "bevel": 0.12,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Living room rug",
+      "kind": "box",
+      "location": [
+        0.0,
+        -0.15,
+        0.025
+      ],
+      "dimensions": [
+        2.65,
+        1.85,
+        0.045
+      ],
+      "material": "Rug weave",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.008,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Rug border long",
+      "kind": "box",
+      "location": [
+        0.0,
+        -1.0,
+        0.05
+      ],
+      "dimensions": [
+        2.58,
+        0.035,
+        0.005
+      ],
+      "material": "Pillow fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Rug border long 02",
+      "kind": "box",
+      "location": [
+        0.0,
+        0.7,
+        0.05
+      ],
+      "dimensions": [
+        2.58,
+        0.035,
+        0.005
+      ],
+      "material": "Pillow fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Rug border short",
+      "kind": "box",
+      "location": [
+        -1.28,
+        -0.15,
+        0.05
+      ],
+      "dimensions": [
+        0.035,
+        1.7,
+        0.005
+      ],
+      "material": "Pillow fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Rug border short 02",
+      "kind": "box",
+      "location": [
+        1.28,
+        -0.15,
+        0.05
+      ],
+      "dimensions": [
+        0.035,
+        1.7,
+        0.005
+      ],
+      "material": "Pillow fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.001,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Coffee table leg",
+      "kind": "cylinder",
+      "location": [
+        -0.6,
+        -0.45,
+        0.2975
+      ],
+      "dimensions": [
+        0.075,
+        0.075,
+        0.5
+      ],
+      "material": "Walnut",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Coffee table leg 02",
+      "kind": "cylinder",
+      "location": [
+        -0.6,
+        0.15,
+        0.2975
+      ],
+      "dimensions": [
+        0.075,
+        0.075,
+        0.5
+      ],
+      "material": "Walnut",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Coffee table leg 03",
+      "kind": "cylinder",
+      "location": [
+        0.6,
+        -0.45,
+        0.2975
+      ],
+      "dimensions": [
+        0.075,
+        0.075,
+        0.5
+      ],
+      "material": "Walnut",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Coffee table leg 04",
+      "kind": "cylinder",
+      "location": [
+        0.6,
+        0.15,
+        0.2975
+      ],
+      "dimensions": [
+        0.075,
+        0.075,
+        0.5
+      ],
+      "material": "Walnut",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Coffee table top",
+      "kind": "box",
+      "location": [
+        0.0,
+        -0.15,
+        0.55
+      ],
+      "dimensions": [
+        1.48,
+        0.92,
+        0.12
+      ],
+      "material": "Honey oak",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.05,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Coffee table shelf",
+      "kind": "box",
+      "location": [
+        0.0,
+        -0.15,
+        0.32
+      ],
+      "dimensions": [
+        1.18,
+        0.7,
+        0.055
+      ],
+      "material": "Walnut",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.02,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Remote control",
+      "kind": "box",
+      "location": [
+        -0.42,
+        -0.15,
+        0.6275
+      ],
+      "dimensions": [
+        0.2,
+        0.075,
+        0.035
+      ],
+      "material": "Walnut",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.01,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Remote button",
+      "kind": "box",
+      "location": [
+        -0.48,
+        -0.15,
+        0.6495
+      ],
+      "dimensions": [
+        0.018,
+        0.035,
+        0.008
+      ],
+      "material": "Ceramic",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.002,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Remote button 02",
+      "kind": "box",
+      "location": [
+        -0.435,
+        -0.15,
+        0.6495
+      ],
+      "dimensions": [
+        0.018,
+        0.035,
+        0.008
+      ],
+      "material": "Ceramic",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.002,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Remote button 03",
+      "kind": "box",
+      "location": [
+        -0.39,
+        -0.15,
+        0.6495
+      ],
+      "dimensions": [
+        0.018,
+        0.035,
+        0.008
+      ],
+      "material": "Ceramic",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.002,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Coffee mug",
+      "kind": "cylinder",
+      "location": [
+        0.35,
+        -0.18,
+        0.68
+      ],
+      "dimensions": [
+        0.12,
+        0.12,
+        0.15
+      ],
+      "material": "Ceramic",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Coffee mug handle",
+      "kind": "torus",
+      "location": [
+        0.43,
+        -0.18,
+        0.68
+      ],
+      "dimensions": [
+        0.075,
+        0.06,
+        0.06
+      ],
+      "material": "Ceramic",
+      "rotation": [
+        1.5708,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "TV stand cabinet",
+      "kind": "box",
+      "location": [
+        2.34,
+        0.48,
+        0.24
+      ],
+      "dimensions": [
+        0.48,
+        1.68,
+        0.48
+      ],
+      "material": "Walnut",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.07,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "TV console top",
+      "kind": "box",
+      "location": [
+        2.3,
+        0.48,
+        0.49
+      ],
+      "dimensions": [
+        0.61,
+        1.78,
+        0.075
+      ],
+      "material": "Honey oak",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.025,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Television foot",
+      "kind": "box",
+      "location": [
+        2.39,
+        0.48,
+        0.72
+      ],
+      "dimensions": [
+        0.12,
+        0.3,
+        0.4
+      ],
+      "material": "Walnut",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.035,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Television screen",
+      "kind": "box",
+      "location": [
+        2.43,
+        0.48,
+        1.29
+      ],
+      "dimensions": [
+        0.1,
+        1.42,
+        0.82
+      ],
+      "material": "Walnut",
+      "rotation": [
+        0.0,
+        0.0,
+        -0.07
+      ],
+      "bevel": 0.025,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Television glass",
+      "kind": "box",
+      "location": [
+        2.365,
+        0.48,
+        1.29
+      ],
+      "dimensions": [
+        0.018,
+        1.31,
+        0.7
+      ],
+      "material": "TV screen",
+      "rotation": [
+        0.0,
+        0.0,
+        -0.07
+      ],
+      "bevel": 0.008,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Side table pedestal",
+      "kind": "box",
+      "location": [
+        0.1,
+        1.05,
+        0.31
+      ],
+      "dimensions": [
+        0.42,
+        0.42,
+        0.62
+      ],
+      "material": "Walnut",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.04,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Side table top",
+      "kind": "box",
+      "location": [
+        0.1,
+        1.05,
+        0.66
+      ],
+      "dimensions": [
+        0.54,
+        0.54,
+        0.08
+      ],
+      "material": "Honey oak",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.03,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Lamp shade",
+      "kind": "cone",
+      "location": [
+        -0.55,
+        0.6,
+        1.85
+      ],
+      "dimensions": [
+        0.38,
+        0.38,
+        0.28
+      ],
+      "material": "Lamp shade",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Lamp bulb",
+      "kind": "sphere",
+      "location": [
+        -0.55,
+        0.6,
+        1.65
+      ],
+      "dimensions": [
+        0.055,
+        0.055,
+        0.055
+      ],
+      "material": "Lamp bulb",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Bookcase side panel",
+      "kind": "box",
+      "location": [
+        1.35,
+        1.76,
+        1.01
+      ],
+      "dimensions": [
+        0.055,
+        0.36,
+        2.02
+      ],
+      "material": "Honey oak",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.012,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Bookcase side panel 02",
+      "kind": "box",
+      "location": [
+        2.45,
+        1.76,
+        1.01
+      ],
+      "dimensions": [
+        0.055,
+        0.36,
+        2.02
+      ],
+      "material": "Honey oak",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.012,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Bookcase back",
+      "kind": "box",
+      "location": [
+        1.9,
+        1.93,
+        1.01
+      ],
+      "dimensions": [
+        1.1,
+        0.045,
+        2.02
+      ],
+      "material": "Honey oak",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.008,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Bookcase top",
+      "kind": "box",
+      "location": [
+        1.9,
+        1.76,
+        2.01
+      ],
+      "dimensions": [
+        1.12,
+        0.36,
+        0.06
+      ],
+      "material": "Honey oak",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.012,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Bookcase bottom",
+      "kind": "box",
+      "location": [
+        1.9,
+        1.76,
+        0.03
+      ],
+      "dimensions": [
+        1.12,
+        0.36,
+        0.06
+      ],
+      "material": "Honey oak",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.012,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Bookcase shelf",
+      "kind": "box",
+      "location": [
+        1.9,
+        1.76,
+        0.43
+      ],
+      "dimensions": [
+        1.04,
+        0.32,
+        0.055
+      ],
+      "material": "Walnut",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.01,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Bookcase shelf 02",
+      "kind": "box",
+      "location": [
+        1.9,
+        1.76,
+        0.91
+      ],
+      "dimensions": [
+        1.04,
+        0.32,
+        0.055
+      ],
+      "material": "Walnut",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.01,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Bookcase shelf 03",
+      "kind": "box",
+      "location": [
+        1.9,
+        1.76,
+        1.39
+      ],
+      "dimensions": [
+        1.04,
+        0.32,
+        0.055
+      ],
+      "material": "Walnut",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.01,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Bookcase shelf 04",
+      "kind": "box",
+      "location": [
+        1.9,
+        1.76,
+        1.87
+      ],
+      "dimensions": [
+        1.04,
+        0.32,
+        0.055
+      ],
+      "material": "Walnut",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.01,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Bookshelf book",
+      "kind": "box",
+      "location": [
+        1.52,
+        1.69,
+        0.6075
+      ],
+      "dimensions": [
+        0.12,
+        0.15,
+        0.3
+      ],
+      "material": "Pillow fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        -0.07
+      ],
+      "bevel": 0.012,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Bookshelf book 02",
+      "kind": "box",
+      "location": [
+        1.69,
+        1.69,
+        0.6075
+      ],
+      "dimensions": [
+        0.12,
+        0.15,
+        0.3
+      ],
+      "material": "Pillow fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        -0.035
+      ],
+      "bevel": 0.012,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Bookshelf book 03",
+      "kind": "box",
+      "location": [
+        1.86,
+        1.69,
+        0.6075
+      ],
+      "dimensions": [
+        0.12,
+        0.15,
+        0.3
+      ],
+      "material": "Pillow fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.012,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Bookshelf book 04",
+      "kind": "box",
+      "location": [
+        2.0300000000000002,
+        1.69,
+        0.6075
+      ],
+      "dimensions": [
+        0.12,
+        0.15,
+        0.3
+      ],
+      "material": "Pillow fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.035
+      ],
+      "bevel": 0.012,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Bookshelf book 05",
+      "kind": "box",
+      "location": [
+        2.2,
+        1.69,
+        0.6075
+      ],
+      "dimensions": [
+        0.12,
+        0.15,
+        0.3
+      ],
+      "material": "Pillow fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.07
+      ],
+      "bevel": 0.012,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Side table book",
+      "kind": "box",
+      "location": [
+        -0.07,
+        0.86,
+        0.7125
+      ],
+      "dimensions": [
+        0.18,
+        0.14,
+        0.025
+      ],
+      "material": "Pillow fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        -0.08
+      ],
+      "bevel": 0.006,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Picture frame",
+      "kind": "box",
+      "location": [
+        -2.57,
+        -0.15,
+        1.62
+      ],
+      "dimensions": [
+        0.05,
+        0.82,
+        0.58
+      ],
+      "material": "Honey oak",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.025,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Framed picture",
+      "kind": "box",
+      "location": [
+        -2.535,
+        -0.15,
+        1.62
+      ],
+      "dimensions": [
+        0.012,
+        0.7,
+        0.46
+      ],
+      "material": "Pillow fabric",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.008,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Wall outlet plate",
+      "kind": "box",
+      "location": [
+        -2.57,
+        0.72,
+        0.3
+      ],
+      "dimensions": [
+        0.05,
+        0.12,
+        0.16
+      ],
+      "material": "White trim",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.01,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Pendant canopy",
+      "kind": "cylinder",
+      "location": [
+        -0.55,
+        0.6,
+        2.37
+      ],
+      "dimensions": [
+        0.16,
+        0.16,
+        0.03
+      ],
+      "material": "Walnut",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Pendant cord",
+      "kind": "cylinder",
+      "location": [
+        -0.55,
+        0.6,
+        2.1725
+      ],
+      "dimensions": [
+        0.018,
+        0.018,
+        0.365
+      ],
+      "material": "Walnut",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Pendant bulb socket",
+      "kind": "cylinder",
+      "location": [
+        -0.55,
+        0.6,
+        1.735
+      ],
+      "dimensions": [
+        0.022,
+        0.022,
+        0.16
+      ],
+      "material": "Walnut",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Hall silhouette torso",
+      "kind": "sphere",
+      "location": [
+        0.93,
+        2.45,
+        1.22
+      ],
+      "dimensions": [
+        0.28,
+        0.2,
+        0.8
+      ],
+      "material": "Silhouette",
+      "rotation": [
+        0.0,
+        0.0,
+        -0.04
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Hall silhouette head",
+      "kind": "sphere",
+      "location": [
+        0.94,
+        2.45,
+        1.72
+      ],
+      "dimensions": [
+        0.22,
+        0.22,
+        0.22
+      ],
+      "material": "Silhouette",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Hall silhouette left arm",
+      "kind": "box",
+      "location": [
+        0.78,
+        2.45,
+        1.2
+      ],
+      "dimensions": [
+        0.1,
+        0.18,
+        0.62
+      ],
+      "material": "Silhouette",
+      "rotation": [
+        0.0,
+        0.0,
+        -0.1
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Hall silhouette right arm",
+      "kind": "box",
+      "location": [
+        1.05,
+        2.45,
+        1.2
+      ],
+      "dimensions": [
+        0.1,
+        0.18,
+        0.62
+      ],
+      "material": "Silhouette",
+      "rotation": [
+        0.0,
+        0.0,
+        0.12
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Hall silhouette left leg",
+      "kind": "box",
+      "location": [
+        0.87,
+        2.45,
+        0.45
+      ],
+      "dimensions": [
+        0.11,
+        0.18,
+        0.84
+      ],
+      "material": "Silhouette",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Hall silhouette right leg",
+      "kind": "box",
+      "location": [
+        0.98,
+        2.45,
+        0.45
+      ],
+      "dimensions": [
+        0.11,
+        0.18,
+        0.84
+      ],
+      "material": "Silhouette",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Hall silhouette left foot",
+      "kind": "box",
+      "location": [
+        0.87,
+        2.34,
+        0.06
+      ],
+      "dimensions": [
+        0.16,
+        0.32,
+        0.06
+      ],
+      "material": "Silhouette",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    },
+    {
+      "name": "Hall silhouette right foot",
+      "kind": "box",
+      "location": [
+        0.98,
+        2.34,
+        0.06
+      ],
+      "dimensions": [
+        0.16,
+        0.32,
+        0.06
+      ],
+      "material": "Silhouette",
+      "rotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "bevel": 0.0,
+      "keyframes": [],
+      "visibility_keyframes": []
+    }
+  ],
+  "lights": [
+    {
+      "name": "Panel0",
+      "location": [
+        -0.5,
+        0.6,
+        1.65
+      ],
+      "energy": 145.0,
+      "color": [
+        1.0,
+        0.92,
+        0.8
+      ],
+      "size": 0.025,
+      "energy_keyframes": [],
+      "kind": "point",
+      "target": null
+    }
+  ],
+  "camera_location": [
+    -1.8,
+    -1.85,
+    1.95
+  ],
+  "camera_target": [
+    0.15,
+    1.4,
+    1.0
+  ],
+  "camera_keyframes": [],
+  "world_strength": 0.0
+}

@@ -1,0 +1,194 @@
+{
+  "generated_utc": "2026-11-06T19:26:03.755150+00:00",
+  "images": {
+    "bright-benchmark": {
+      "fraction_luma_ge_245_over_255": 0.0018782552083333333,
+      "fraction_luma_le_8_over_255": 0.0,
+      "height": 960,
+      "luma_definition": "0.2126 R + 0.7152 G + 0.0722 B on normalized sRGB code values",
+      "luma_percentiles_0_to_1": {
+        "1": 0.17107686400413513,
+        "25": 0.3498533368110657,
+        "5": 0.25848862528800964,
+        "50": 0.37143218517303467,
+        "75": 0.4002988338470459,
+        "95": 0.5496353507041931,
+        "99": 0.757572591304779
+      },
+      "pixel_count": 1228800,
+      "width": 1280
+    },
+    "current-rerender": {
+      "fraction_luma_ge_245_over_255": 0.0018782552083333333,
+      "fraction_luma_le_8_over_255": 0.0,
+      "height": 960,
+      "luma_definition": "0.2126 R + 0.7152 G + 0.0722 B on normalized sRGB code values",
+      "luma_percentiles_0_to_1": {
+        "1": 0.17107686400413513,
+        "25": 0.3498533368110657,
+        "5": 0.25848862528800964,
+        "50": 0.37143218517303467,
+        "75": 0.4002988338470459,
+        "95": 0.5496353507041931,
+        "99": 0.757572591304779
+      },
+      "pixel_count": 1228800,
+      "width": 1280
+    },
+    "current-room": {
+      "fraction_luma_ge_245_over_255": 0.0018782552083333333,
+      "fraction_luma_le_8_over_255": 0.0,
+      "height": 960,
+      "luma_definition": "0.2126 R + 0.7152 G + 0.0722 B on normalized sRGB code values",
+      "luma_percentiles_0_to_1": {
+        "1": 0.17107686400413513,
+        "25": 0.3498533368110657,
+        "5": 0.25848862528800964,
+        "50": 0.37143218517303467,
+        "75": 0.4002988338470459,
+        "95": 0.5496353507041931,
+        "99": 0.757572591304779
+      },
+      "pixel_count": 1228800,
+      "width": 1280
+    },
+    "diagnostic-no-mono": {
+      "fraction_luma_ge_245_over_255": 0.0,
+      "fraction_luma_le_8_over_255": 1.0,
+      "height": 960,
+      "luma_definition": "0.2126 R + 0.7152 G + 0.0722 B on normalized sRGB code values",
+      "luma_percentiles_0_to_1": {
+        "1": 0.0,
+        "25": 0.0,
+        "5": 0.0,
+        "50": 0.0,
+        "75": 0.0,
+        "95": 0.0,
+        "99": 0.0
+      },
+      "pixel_count": 1228800,
+      "width": 1280
+    },
+    "final": {
+      "fraction_luma_ge_245_over_255": 0.00015869140625,
+      "fraction_luma_le_8_over_255": 0.52381103515625,
+      "height": 960,
+      "luma_definition": "0.2126 R + 0.7152 G + 0.0722 B on normalized sRGB code values",
+      "luma_percentiles_0_to_1": {
+        "1": 0.0,
+        "25": 0.0,
+        "5": 0.0,
+        "50": 0.01568627543747425,
+        "75": 0.18431374430656433,
+        "95": 0.37143218517303467,
+        "99": 0.529411792755127
+      },
+      "pixel_count": 1228800,
+      "width": 1280
+    },
+    "final-benchmark": {
+      "fraction_luma_ge_245_over_255": 0.00015869140625,
+      "fraction_luma_le_8_over_255": 0.52381103515625,
+      "height": 960,
+      "luma_definition": "0.2126 R + 0.7152 G + 0.0722 B on normalized sRGB code values",
+      "luma_percentiles_0_to_1": {
+        "1": 0.0,
+        "25": 0.0,
+        "5": 0.0,
+        "50": 0.01568627543747425,
+        "75": 0.18431374430656433,
+        "95": 0.37143218517303467,
+        "99": 0.529411792755127
+      },
+      "pixel_count": 1228800,
+      "width": 1280
+    },
+    "iteration-01": {
+      "fraction_luma_ge_245_over_255": 0.0,
+      "fraction_luma_le_8_over_255": 1.0,
+      "height": 960,
+      "luma_definition": "0.2126 R + 0.7152 G + 0.0722 B on normalized sRGB code values",
+      "luma_percentiles_0_to_1": {
+        "1": 0.0,
+        "25": 0.0,
+        "5": 0.0,
+        "50": 0.0,
+        "75": 0.0,
+        "95": 0.0,
+        "99": 0.0
+      },
+      "pixel_count": 1228800,
+      "width": 1280
+    },
+    "iteration-02": {
+      "fraction_luma_ge_245_over_255": 0.00023356119791666667,
+      "fraction_luma_le_8_over_255": 0.90263916015625,
+      "height": 960,
+      "luma_definition": "0.2126 R + 0.7152 G + 0.0722 B on normalized sRGB code values",
+      "luma_percentiles_0_to_1": {
+        "1": 0.0,
+        "25": 0.0,
+        "5": 0.0,
+        "50": 0.0,
+        "75": 0.0,
+        "95": 0.07450980693101883,
+        "99": 0.250980406999588
+      },
+      "pixel_count": 1228800,
+      "width": 1280
+    },
+    "iteration-03": {
+      "fraction_luma_ge_245_over_255": 0.004837239583333333,
+      "fraction_luma_le_8_over_255": 0.4946695963541667,
+      "height": 960,
+      "luma_definition": "0.2126 R + 0.7152 G + 0.0722 B on normalized sRGB code values",
+      "luma_percentiles_0_to_1": {
+        "1": 0.0,
+        "25": 0.0,
+        "5": 0.0,
+        "50": 0.03921568766236305,
+        "75": 0.29019609093666077,
+        "95": 0.7019608020782471,
+        "99": 0.8705882430076599
+      },
+      "pixel_count": 1228800,
+      "width": 1280
+    },
+    "iteration-04": {
+      "fraction_luma_ge_245_over_255": 0.00015869140625,
+      "fraction_luma_le_8_over_255": 0.52381103515625,
+      "height": 960,
+      "luma_definition": "0.2126 R + 0.7152 G + 0.0722 B on normalized sRGB code values",
+      "luma_percentiles_0_to_1": {
+        "1": 0.0,
+        "25": 0.0,
+        "5": 0.0,
+        "50": 0.01568627543747425,
+        "75": 0.18431374430656433,
+        "95": 0.37143218517303467,
+        "99": 0.529411792755127
+      },
+      "pixel_count": 1228800,
+      "width": 1280
+    },
+    "reference": {
+      "fraction_luma_ge_245_over_255": 0.0006385122664192432,
+      "fraction_luma_le_8_over_255": 0.25486990312571706,
+      "height": 777,
+      "luma_definition": "0.2126 R + 0.7152 G + 0.0722 B on normalized sRGB code values",
+      "luma_percentiles_0_to_1": {
+        "1": 0.0,
+        "25": 0.0313725508749485,
+        "5": 0.003921568859368563,
+        "50": 0.1411764770746231,
+        "75": 0.26274511218070984,
+        "95": 0.603355348110199,
+        "99": 0.7915906310081482
+      },
+      "pixel_count": 801864,
+      "width": 1032
+    }
+  },
+  "measurement_note": "Image statistics describe pixel values only and are not a visual quality verdict.",
+  "schema_version": 1
+}
