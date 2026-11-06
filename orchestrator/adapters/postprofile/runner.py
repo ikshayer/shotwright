@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from orchestrator.domain.entities import CameraProfile
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.errors import JobError, JobErrorKind
+from orchestrator.platform.ffmpeg_identity import normalize_ffmpeg_identity
 from orchestrator.platform.settings import Settings
 
 from .profile import (
@@ -117,13 +118,14 @@ class PostProfileAdapter:
         if not font.is_file():
             raise JobError(JobErrorKind.MISSING_MODEL_ARTIFACT, f"overlay font is missing: {request.font_relative}",
                            shot_id=request.shot_id, run_id=request.run_id)
-        identity = self._capture([str(self.ffmpeg_exe), "-hide_banner", "-version"], request)
-        identity = identity.removesuffix("\r\n").removesuffix("\n")
+        identity = normalize_ffmpeg_identity(
+            self._capture([str(self.ffmpeg_exe), "-hide_banner", "-version"], request)
+        )
         if not identity.startswith("ffmpeg version "):
             raise JobError(JobErrorKind.WORKER_UNREACHABLE, "FFmpeg did not return a version banner",
                            shot_id=request.shot_id, run_id=request.run_id)
         pinned_identity = request.profile.identity.pinned_binaries.get("ffmpeg")
-        if pinned_identity is None or pinned_identity != identity:
+        if pinned_identity is None or normalize_ffmpeg_identity(pinned_identity) != identity:
             raise JobError(JobErrorKind.INVALID_MANIFEST,
                            "PostProfile FFmpeg pin does not exactly match installed `ffmpeg -version` output",
                            shot_id=request.shot_id, run_id=request.run_id)

@@ -332,6 +332,7 @@ def test_fresh_project_materializes_default_profiles_on_disk_and_composes_withou
     ffmpeg_identity = post_profile.pinned_binaries["ffmpeg"]
     ffmpeg_identity_lines = ffmpeg_identity.splitlines()
     assert ffmpeg_identity.startswith("ffmpeg version ")
+    assert "\r" not in ffmpeg_identity
     assert len(ffmpeg_identity_lines) > 1
     assert any(line.startswith("configuration: ") for line in ffmpeg_identity_lines)
     assert any(line.startswith("libav") for line in ffmpeg_identity_lines)

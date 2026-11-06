@@ -546,6 +546,35 @@ def test_ffmpeg_identity_mismatch_is_rejected_before_run_reservation(tmp_path):
     assert not any("-vf" in call for call in calls)
 
 
+@pytest.mark.parametrize("different_build", [False, True])
+def test_ffmpeg_identity_normalizes_line_endings_and_remains_exact(tmp_path, different_build):
+    root_path = tmp_path / "project"
+    root_path.mkdir()
+    root = ProjectRoot(root_path)
+    request = _run(root_path, "normalized-pin")
+    lf_pin = FFMPEG_VERSION.replace("\r\n", "\n").replace("\r", "\n")
+    if different_build:
+        # Keep the banner unchanged while changing a meaningful configuration value.
+        lf_pin = lf_pin.replace("--enable-cairo", "--disable-cairo")
+    pinned_identity = request.profile.identity.model_copy(
+        update={"pinned_binaries": {"ffmpeg": lf_pin}}
+    )
+    request = request.model_copy(update={
+        "profile": request.profile.model_copy(update={"identity": pinned_identity})
+    })
+
+    adapter = PostProfileAdapter(root, Settings(project_root=root.path),
+                                 popen=_fake_popen_factory())
+    if different_build:
+        with pytest.raises(JobError) as exc:
+            adapter.degrade(request)
+        assert exc.value.kind is JobErrorKind.INVALID_MANIFEST
+        assert not (root_path / "post" / "S003" / "v0001" / "normalized-pin").exists()
+    else:
+        result = adapter.degrade(request)
+        assert result.ffmpeg_identity == lf_pin
+
+
 @pytest.mark.parametrize("bad_output_pts", ["count_mismatch", "nonfinite"])
 def test_invalid_output_pts_evidence_is_corrupt_artifact(tmp_path, bad_output_pts):
     root_path = tmp_path / "project"

@@ -26,6 +26,7 @@ from orchestrator.domain.entities import (
 from orchestrator.domain.invalidation import revision_impact
 from orchestrator.domain.state import TransitionContext, check_revision, check_transition
 from orchestrator.platform.errors import JobError, JobErrorKind
+from orchestrator.platform.ffmpeg_identity import normalize_ffmpeg_identity
 from orchestrator.store.json_store import ProjectStore, VersionConflict
 
 _ENTITY_TYPES = {"Script": Script, "Location": Location, "CameraProfile": CameraProfile, "Shot": Shot}
@@ -338,7 +339,7 @@ def _measured_dvr_2005_defaults() -> tuple[CameraProfile, PostProfile]:
         name=measured["profile_id"],
         semver=measured["profile_version"],
         stages=stages,
-        pinned_binaries={"ffmpeg": results["ffmpeg_full_identity"]},
+        pinned_binaries={"ffmpeg": normalize_ffmpeg_identity(results["ffmpeg_full_identity"])},
         filter_graph_hash=results["filter_graph_hash"],
         output_fps=measured["output_fps"],
         storage_resolution=tuple(measured["storage_resolution"]),
