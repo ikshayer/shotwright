@@ -20,7 +20,14 @@ from orchestrator.adapters.postprofile.profile import (
     OverlaySpec,
     PostProfileSpec,
 )
-from orchestrator.domain.entities import CameraProfile, PostProfile, Project, Shot, ShotOutputKind
+from orchestrator.adapters.postprofile.runner import DegradeRequest
+from orchestrator.domain.entities import (
+    CameraProfile,
+    PostProfile,
+    Project,
+    Shot,
+    ShotOutputKind,
+)
 from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.store.json_store import ProjectStore, RecordNotFound
 
@@ -148,4 +155,49 @@ def compose_post_profile_spec(store: ProjectStore) -> PostProfileSpec:
         encode=EncodeSpec.model_validate(
             identity.encode.model_dump(mode="python", exclude={"schema_version"})
         ),
+    )
+
+
+def compose_degrade_request(
+    store: ProjectStore,
+    *,
+    shot_id: str,
+    episode_id: str,
+    run_id: str,
+    font_relative: str,
+) -> DegradeRequest:
+    """Build degradation from the current Shot, its master receipt, and project profile.
+
+    This is a read-only composition step. The caller supplies the run id and the
+    project-relative overlay font path; seed derivation remains inside the adapter.
+    """
+    shot, _mutation_token = store.load_with_version(Shot, shot_id, episode_id=episode_id)
+    masters = store.list_shot_outputs(
+        shot.shot_id,
+        episode_id=shot.episode_id,
+        record_version=shot.version,
+        kind=ShotOutputKind.MASTER,
+    )
+    if not masters:
+        raise JobError(
+            JobErrorKind.INVALID_MANIFEST,
+            f"Shot {shot.shot_id!r} version {shot.version} has no master output; run render_master first",
+            shot_id=shot.shot_id,
+        )
+    try:
+        camera_profile = store.load(CameraProfile, shot.camera_profile)
+    except RecordNotFound as exc:
+        raise RecordNotFound(
+            f"Shot {shot.shot_id!r} references missing CameraProfile {shot.camera_profile!r}"
+        ) from exc
+    profile = compose_post_profile_spec(store)
+    return DegradeRequest(
+        shot_id=shot.shot_id,
+        shot_version=shot.version,
+        run_id=run_id,
+        degrade_seed=shot.degrade_seed,
+        master_relative=masters[-1].relative_path,
+        font_relative=font_relative,
+        camera_profile=camera_profile,
+        profile=profile,
     )

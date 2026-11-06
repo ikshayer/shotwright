@@ -31,6 +31,7 @@ from orchestrator.jobs.queue import JobQueue
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.errors import JobError, JobErrorKind, failure_diagnostics
 from orchestrator.platform.settings import Settings
+from orchestrator.service.compose import compose_degrade_request
 from orchestrator.store.json_store import ProjectStore, RecordNotFound
 
 
@@ -109,7 +110,14 @@ class _AdapterShim:
             render = render_managed if callable(render_managed) else self.adapter.render
             result = render(model, job, queue=queue,
                             cancel=self.cancel_check or _cancel_callback(request.payload))
-            artifact = result.frame_paths[0] if result.frame_paths else result.blend_path
+            if model.mode == "master":
+                artifact = result.master_path
+                if not artifact:
+                    raise JobError(JobErrorKind.CORRUPT_ARTIFACT,
+                                   "master render returned no assembled master file",
+                                   job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
+            else:
+                artifact = result.frame_paths[0] if result.frame_paths else result.blend_path
         elif self.kind is AdapterKind.GENERATE:
             result = self.adapter.generate(
                 ImageRequest.model_validate(payload), job, queue=queue,
@@ -165,6 +173,46 @@ class JobRunner:
             required_ram_gb=request.required_ram_gb, required_disk_gb=request.required_disk_gb,
         )
         store = self.store_for(project_id)
+        if request.kind is AdapterKind.DEGRADE:
+            raw_payload = _payload_body(request.payload)
+            raw_shot_id = _payload_value(raw_payload, "shot_id")
+            raw_version = _payload_value(raw_payload, "shot_version")
+            if raw_shot_id is not None and raw_shot_id != request.record_id:
+                raise ValueError("adapter payload shot_id must match AdapterRequest.record_id")
+            if raw_version is not None and raw_version != request.record_version:
+                raise ValueError("adapter payload shot_version must match AdapterRequest.record_version")
+            font_relative = _payload_value(raw_payload, "font_relative")
+            if font_relative is None:
+                font_relative = _payload_value(request.payload, "font_relative")
+            if not isinstance(font_relative, str) or not font_relative:
+                raise ValueError("degrade request requires a project-relative font_relative path")
+            try:
+                bound_shot = store.load(Shot, request.record_id, episode_id=request.episode_id)
+            except RecordNotFound as exc:
+                raise RecordNotFound(f"bound Shot {request.record_id!r} does not exist") from exc
+            episode_id = bound_shot.episode_id
+            degradation = compose_degrade_request(
+                store,
+                shot_id=request.record_id,
+                episode_id=episode_id,
+                run_id=uuid.uuid4().hex,
+                font_relative=font_relative,
+            )
+            if request.record_version != degradation.shot_version:
+                raise ValueError(
+                    f"degrade request must target current Shot version {degradation.shot_version}; "
+                    f"got {request.record_version}"
+                )
+            request = AdapterRequest(
+                kind=request.kind,
+                payload=degradation,
+                record_id=request.record_id,
+                record_version=degradation.shot_version,
+                episode_id=episode_id,
+                required_vram_gb=request.required_vram_gb,
+                required_ram_gb=request.required_ram_gb,
+                required_disk_gb=request.required_disk_gb,
+            )
         with store.command():
             try:
                 shot = store.load(Shot, request.record_id, episode_id=request.episode_id)
@@ -191,7 +239,8 @@ class JobRunner:
                 required_ram_gb=request.required_ram_gb,
                 required_disk_gb=request.required_disk_gb,
                 shot_id=request.record_id, episode_id=episode_id,
-                run_id=(request.payload.run_id if isinstance(request.payload, RenderRequest)
+                run_id=(request.payload.run_id
+                        if isinstance(request.payload, (RenderRequest, DegradeRequest))
                         else uuid.uuid4().hex),
             )
             # Admission refusal is part of submit's synchronous contract. The id is
@@ -325,7 +374,7 @@ class JobRunner:
             if self._is_cancelled(key):
                 raise _job_error(JobErrorKind.CANCELLED, "job cancelled while adapter work was active", job)
             result = value if isinstance(value, AdapterResult) else AdapterResult(
-                artifact_path=_artifact_path(request.kind, value), value=value
+                artifact_path=_artifact_path(request.kind, value, request.payload), value=value
             )
             self._record_result(store, root, request, job, result)
         except JobError as exc:
@@ -407,11 +456,27 @@ def _payload_value(payload: Any, name: str) -> Any:
     return payload.get(name) if isinstance(payload, dict) else getattr(payload, name, None)
 
 
-def _artifact_path(kind: AdapterKind, value: Any) -> str:
+def _artifact_path(kind: AdapterKind, value: Any, payload: Any = None) -> str:
     if isinstance(value, AdapterResult):
         return value.artifact_path
     if isinstance(value, str):
         return value
+    if kind is AdapterKind.RENDER:
+        render_request = _payload_body(payload) if payload is not None else None
+        mode = _payload_value(render_request, "mode") if render_request is not None else None
+        master = getattr(value, "master_path", None)
+        if isinstance(master, str) and (mode == "master" or mode is None):
+            return master
+        if mode == "master":
+            raise JobError(JobErrorKind.CORRUPT_ARTIFACT,
+                           "master render result does not name an assembled master file")
+        frames = getattr(value, "frame_paths", None)
+        if frames:
+            return frames[0]
+        blend = getattr(value, "blend_path", None)
+        if isinstance(blend, str):
+            return blend
+        raise JobError(JobErrorKind.CORRUPT_ARTIFACT, "render result does not name an artifact")
     for name in {AdapterKind.SCENE: ("scene_path", "blend_path"), AdapterKind.RENDER: ("frame_paths", "blend_path"),
                  AdapterKind.GENERATE: ("image_paths",), AdapterKind.DEGRADE: ("output_path",)}[kind]:
         found = getattr(value, name, None)
@@ -436,8 +501,10 @@ def _output_kind(kind: AdapterKind, payload: Any) -> ShotOutputKind:
 
 def _provenance(kind: ShotOutputKind, value: Any) -> dict[str, Any]:
     """Project only declared, kind-appropriate provenance from the adapter result."""
-    if kind in {ShotOutputKind.SCENE, ShotOutputKind.MASTER, ShotOutputKind.PREVIEW}:
+    if kind in {ShotOutputKind.SCENE, ShotOutputKind.PREVIEW}:
         fields = ("engine_id", "engine_build")
+    elif kind is ShotOutputKind.MASTER:
+        fields = ("engine_id", "engine_build", "transfer_function", "bit_depth")
     elif kind is ShotOutputKind.DEGRADED:
         fields = ("profile_semver", "filter_graph_hash", "pinned_binaries")
     else:
