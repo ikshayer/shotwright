@@ -429,12 +429,14 @@ def build_filter_graph(
     *,
     shot_id: str,
     degrade_seed: int,
-    font_path: str,
+    font_path: str | None = None,
 ) -> str:
     """Build the deterministic filter graph, preserving spike 01 stage semantics."""
     if degrade_seed < 0:
         raise ProfileValidationError("degrade_seed must be nonnegative")
-    if PurePosixPath(font_path).is_absolute() or ".." in PurePosixPath(font_path).parts:
+    if font_path is not None and (
+        PurePosixPath(font_path).is_absolute() or ".." in PurePosixPath(font_path).parts
+    ):
         raise ProfileValidationError("font_path must be a contained project-relative path")
     stages = profile.profile.identity.stages
     by_filter: dict[str, list[PostStage]] = {}
@@ -469,6 +471,8 @@ def build_filter_graph(
             overlay = profile.profile.overlay
             if overlay is None:
                 raise ProfileValidationError("drawtext stage requires an overlay specification")
+            if font_path is None:
+                raise ProfileValidationError("drawtext stage requires a contained overlay font path")
             font = _escape_filter_value(font_path)
             element = p.get("element", "clock")
             if element == "clock":
