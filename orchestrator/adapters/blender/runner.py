@@ -146,11 +146,14 @@ class _Supervisor(WorkerControl):
             self._attempt.start()
             return self._attempt
 
-    def launch(self, command: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+    def launch(self, command: list[str], *,
+               popen: Callable[..., subprocess.Popen[bytes]] | None = None,
+               **kwargs: object) -> subprocess.Popen[bytes]:
         with self._lock:
             if self._stop.is_set():
                 raise _CancelledBeforeLaunch("render stopped before Blender launch")
-            process = self._popen(command, **kwargs)  # type: ignore[arg-type]
+            factory = self._popen if popen is None else popen
+            process = factory(command, **kwargs)  # type: ignore[arg-type]
             self._process = process
             return process
 
@@ -500,6 +503,8 @@ class BlenderAdapter:
                         frame_rate=frame_rate,
                         frame_count=frame_end,
                         job=job,
+                        hard_deadline=start_time + max_elapsed,
+                        cancel=cancel,
                     )
                     transfer_function = "bt709"
                     bit_depth = 16
@@ -622,6 +627,8 @@ class BlenderAdapter:
         frame_rate: int,
         frame_count: int,
         job: Job,
+        hard_deadline: float,
+        cancel: Callable[[], bool] | None,
     ) -> tuple[str, str, list[str]]:
         frames_rel = f"{attempt_rel}/frames"
         master_rel = f"{attempt_rel}/master.mkv"
@@ -640,9 +647,14 @@ class BlenderAdapter:
 
             def write_log(log_path: Path) -> None:
                 with log_path.open("wb") as log_stream:
+                    if time.monotonic() >= hard_deadline:
+                        self._control.stop_for(JobErrorKind.BUDGET_EXCEEDED)
+                    if self._control.stopped():
+                        raise _stopped_error(self._control, job)
                     try:
-                        process = self._ffmpeg_popen(
+                        process = self._control.launch(
                             command,
+                            popen=self._ffmpeg_popen,
                             stdin=subprocess.DEVNULL,
                             stdout=log_stream,
                             stderr=subprocess.STDOUT,
@@ -655,12 +667,33 @@ class BlenderAdapter:
                                        job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id,
                                        cause=exc) from exc
                     try:
-                        code = process.wait()
+                        while True:
+                            if cancel is not None and cancel():
+                                self._control.stop_for(JobErrorKind.CANCELLED)
+                            if self._control.stopped():
+                                raise _stopped_error(self._control, job)
+                            remaining = hard_deadline - time.monotonic()
+                            if remaining <= 0:
+                                self._control.stop_for(JobErrorKind.BUDGET_EXCEEDED)
+                                raise _stopped_error(self._control, job)
+                            try:
+                                code = process.wait(timeout=min(0.05, remaining))
+                                break
+                            except subprocess.TimeoutExpired:
+                                continue
                     except OSError as exc:
                         raise JobError(JobErrorKind.WORKER_UNREACHABLE,
                                        f"could not wait for FFmpeg master assembly: {exc}",
                                        job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id,
                                        cause=exc) from exc
+                    # Keep a child registered on interrupted/failed waits: teardown must
+                    # confirm its exit before the GPU lease can be released.
+                    self._control.clear_process(process)
+                    if self._control.stopped():
+                        raise _stopped_error(self._control, job)
+                    if time.monotonic() >= hard_deadline:
+                        self._control.stop_for(JobErrorKind.BUDGET_EXCEEDED)
+                        raise _stopped_error(self._control, job)
                     if code != 0:
                         raise _MasterEncodeExit(code)
 

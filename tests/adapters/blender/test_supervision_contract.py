@@ -6,6 +6,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -393,6 +394,180 @@ def test_cancellation_stops_child_before_queue_releases_lease_and_quarantines_ru
     assert quarantined and quarantined[0].is_dir()
     assert list(quarantined[0].rglob("attempt-*"))
     assert not root.resolve("renders/shot-1/v0002/run-1").exists()
+
+
+class _LiveMasterEncode(Child):
+    """A bounded fake even if the regression reintroduces an unbounded wait."""
+
+    def __init__(self, stop_on: str) -> None:
+        super().__init__(None)
+        self.stop_on = stop_on
+        self.waiting = threading.Event()
+        self.exited = threading.Event()
+        self.waits: list[float | None] = []
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.waits.append(timeout)
+        self.waiting.set()
+        self.exited.wait(min(timeout if timeout is not None else 0.05, 0.05))
+        if self.returncode is None:
+            raise subprocess.TimeoutExpired(cmd="ffmpeg", timeout=timeout)
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+        if self.stop_on == "terminate":
+            self.returncode = -15
+            self.exited.set()
+
+    def kill(self) -> None:
+        self.killed = True
+        if self.stop_on != "never":
+            self.returncode = -9
+            self.exited.set()
+
+
+@pytest.mark.parametrize("stop_on", ["terminate", "kill", "never"])
+def test_master_encode_cancellation_supervises_child_and_retains_lease_if_it_survives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop_on: str,
+) -> None:
+    child = _LiveMasterEncode(stop_on)
+    factory_calls: list[list[str]] = []
+
+    def ffmpeg(argv: list[str], **_kwargs: Any) -> Child:
+        factory_calls.append(argv)
+        return child
+
+    root, _settings, adapter, queue, job = setup(tmp_path, popen=FakePopen(), ffmpeg_popen=ffmpeg)
+    control = adapter._control
+    original_launch, original_stop, original_clear = control.launch, control._stop_and_join, control.clear_process
+    launched: list[tuple[object, object]] = []
+    stops: list[tuple[bool, bool]] = []
+    cleared_alive: list[bool] = []
+    release_survivors: list[bool] = []
+    original_release = queue.lease.release
+
+    def launch(argv: list[str], **kwargs: Any) -> Any:
+        process = original_launch(argv, **kwargs)
+        if process is child:
+            launched.append((kwargs.get("popen"), control._process))
+        return process
+
+    def stop(reason: Any) -> bool:
+        result = original_stop(reason)
+        stops.append((result, child.poll() is None))
+        return result
+
+    def clear(process: Any) -> None:
+        if process is child:
+            cleared_alive.append(child.poll() is None)
+        original_clear(process)
+
+    def release(*args: Any, **kwargs: Any) -> None:
+        try:
+            original_release(*args, **kwargs)
+        finally:
+            if not queue.lease._owned:
+                release_survivors.append(child.poll() is None)
+
+    monkeypatch.setattr(control, "launch", launch)
+    monkeypatch.setattr(control, "_stop_and_join", stop)
+    monkeypatch.setattr(control, "clear_process", clear)
+    monkeypatch.setattr(queue.lease, "release", release)
+    try:
+        with pytest.raises(JobError) as exc:
+            adapter.render(request(), job, queue=queue, cancel=child.waiting.is_set)
+        assert factory_calls, "cancellation never reached the FFmpeg master encode"
+        assert launched == [(ffmpeg, child)], f"encode bypassed supervisor registration: {launched!r}"
+        assert child.terminated, "supervisor never requested FFmpeg termination"
+        assert child.waits and all(t is not None and t > 0 for t in child.waits), (
+            f"FFmpeg received an unbounded or invalid wait: {child.waits!r}"
+        )
+        assert not any(cleared_alive), f"live FFmpeg registration was cleared: {cleared_alive!r}"
+        assert not any(quiesced and alive for quiesced, alive in stops), (
+            f"supervisor reported quiescence with a surviving FFmpeg: {stops!r}"
+        )
+        assert not any(release_survivors), f"lease released with live FFmpeg: {release_survivors!r}"
+        if stop_on == "never":
+            assert child.poll() is None and child.killed, "resistant fake did not exercise surviving kill"
+            assert control._process is child, "surviving FFmpeg lost its supervisor registration"
+            assert queue.lease._owned, "lease was released despite unconfirmed FFmpeg termination"
+            assert stops and not any(result for result, _alive in stops), f"false quiescence: {stops!r}"
+            assert exc.value.kind is JobErrorKind.WORKER_UNREACHABLE, f"wrong failure: {exc.value}"
+        else:
+            assert child.poll() is not None, "FFmpeg survived cancellation"
+            assert child.killed == (stop_on == "kill"), f"unexpected kill escalation for {stop_on}"
+            assert not queue.lease._owned, "lease stayed held after confirmed FFmpeg exit"
+            assert exc.value.kind is JobErrorKind.CANCELLED, f"encode exit masked cancellation: {exc.value}"
+            assert job.state == "cancelled", f"cancelled encode reported state {job.state!r}"
+            assert list(root.resolve("quarantine").rglob("*-run-1")), "partial run was not quarantined"
+    finally:
+        # Release the deliberately immortal fake and its test-only lease after assertions.
+        child.returncode = -9
+        child.exited.set()
+        if queue.lease._owned:
+            queue.lease.release(0, 0.1)
+
+
+@pytest.mark.parametrize("finishes_late", [False, True])
+def test_master_encode_wait_uses_remaining_budget_and_stops_on_expiry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, finishes_late: bool,
+) -> None:
+    import orchestrator.adapters.blender.runner as runner_module
+
+    clock = ManualClock()
+    clock.now = 104.98  # Rendering already consumed 4.98 of the five-second shot budget.
+    child = _LiveMasterEncode("terminate")
+    waits: list[float | None] = []
+
+    def wait(timeout: float | None = None) -> int:
+        waits.append(timeout)
+        if child.poll() is not None:
+            return child.returncode
+        assert timeout is not None and 0 < timeout <= 0.05, f"invalid encode wait: {timeout!r}"
+        clock.now += timeout
+        if finishes_late:
+            clock.now += 0.001
+            child.returncode = 0
+            child.exited.set()
+            _root.write_bytes("encode/master.mkv", b"late master")
+            return 0
+        raise subprocess.TimeoutExpired(cmd="ffmpeg", timeout=timeout)
+
+    monkeypatch.setattr(child, "wait", wait)
+    _root, _settings, adapter, _queue, job = setup(tmp_path, ffmpeg_popen=lambda *_a, **_k: child)
+    monkeypatch.setattr(runner_module, "time", SimpleNamespace(monotonic=clock))
+    epoch = adapter._control.activate()
+    try:
+        with pytest.raises(JobError) as exc:
+            adapter._assemble_master(attempt_rel="encode", frame_rate=60, frame_count=900, job=job,
+                                     hard_deadline=105.0, cancel=None)
+        assert waits == [pytest.approx(0.02)], f"encode received a fresh budget: waits={waits!r}"
+        assert exc.value.kind is JobErrorKind.BUDGET_EXCEEDED, f"wrong deadline error: {exc.value}"
+        assert child.poll() is not None, "expired encode child was left alive"
+        assert child.terminated != finishes_late, f"wrong termination behavior for late exit={finishes_late}"
+    finally:
+        adapter._control.deactivate(epoch)
+
+
+@pytest.mark.parametrize("reason", [JobErrorKind.CANCELLED, JobErrorKind.BUDGET_EXCEEDED])
+def test_master_encode_does_not_launch_after_stop_or_exhausted_budget(
+    tmp_path: Path, reason: JobErrorKind,
+) -> None:
+    calls: list[object] = []
+    _root, _settings, adapter, _queue, job = setup(tmp_path, ffmpeg_popen=lambda *args, **_k: calls.append(args))
+    epoch = adapter._control.activate()
+    if reason is JobErrorKind.CANCELLED:
+        adapter._control.stop_for(reason)
+    try:
+        with pytest.raises(JobError) as exc:
+            adapter._assemble_master(attempt_rel="encode", frame_rate=60, frame_count=900, job=job,
+                                     hard_deadline=0 if reason is JobErrorKind.BUDGET_EXCEEDED else float("inf"),
+                                     cancel=None)
+        assert exc.value.kind is reason, f"prelaunch stop classified as {exc.value.kind}"
+        assert calls == [], f"FFmpeg launched after {reason.value}: {calls!r}"
+    finally:
+        adapter._control.deactivate(epoch)
 
 
 def test_retry_retains_each_attempt_and_publishes_only_successful_result(tmp_path: Path) -> None:
