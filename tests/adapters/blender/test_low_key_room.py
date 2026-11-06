@@ -49,12 +49,21 @@ def test_bright_remains_default_and_low_key_is_a_named_deterministic_variant() -
         american_living_room(look="noir")
 
 
-def test_low_key_has_one_positive_practical_and_zero_world_fill() -> None:
+def test_low_key_lights_are_all_motivated_and_world_fill_is_zero() -> None:
+    """Every light must be a named practical and none may be ambient fill.
+
+    This previously asserted exactly one practical. That encoded the then-current
+    composition rather than a requirement: measured against reference 134126, a single
+    source crushed 54.8% of the delivered frame to black against the reference's 32.0%,
+    and the reference plainly has two motivated sources -- a pendant and a backlit
+    window. The subject of this test is that the room is lit by practicals with no world
+    fill, which is what keeps the falloff deep, and that subject is unchanged.
+    """
     scene = american_living_room(look="low_key")
     positive = [light for light in scene.lights if light.energy > 0]
-    assert len(positive) == 1
+    assert positive, "low key must be lit by at least one practical"
+    assert all(light.name for light in positive), "every practical must be named"
     assert scene.world_strength == 0
-    assert positive[0].name
     # Scene-specific room data is carried into the retained worker plan.
     assert _request(scene)["scene"]["world_strength"] == 0
 
@@ -128,10 +137,13 @@ def test_low_key_pendant_point_light_sits_below_the_opaque_shade_and_near_bulb()
     bulbs = [obj for obj in scene.objects if "bulb" in obj.name.lower()]
     assert shades and bulbs
     shade_bounds = _bounds(shades[0])
-    practicals = [light for light in scene.lights if light.energy > 0]
-    assert len(practicals) == 1
+    # Select the pendant by kind rather than assuming it is the only light: the room now
+    # also carries a window spill. The subject here is the pendant clearing its own
+    # shade, which is the bug that rendered spike 09's first iteration completely black.
+    practicals = [light for light in scene.lights
+                  if light.energy > 0 and light.kind == "point"]
+    assert len(practicals) == 1, f"expected exactly one pendant point light, got {practicals}"
     light = practicals[0]
-    assert light.kind == "point"
     assert light.location[2] + light.size < shade_bounds[2][0], (
         "point-light center and shadow radius must clear the opaque shade lower lip"
     )

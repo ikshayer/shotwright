@@ -962,7 +962,17 @@ def american_living_room(*, look: Literal["bright", "low_key"] = "bright") -> Sc
             roughness=0.86 if low_key else 0.8,
             emission_strength=0.0 if low_key else 0.65,
         ),
-        MaterialSpec(name="Window glass", color=(0.12, 0.12, 0.12, 1) if low_key else (0.35, 0.6, 0.82, 1), roughness=1.0 if low_key else 0.2),
+        # Low key makes the window itself the second source rather than placing a lamp
+        # behind it: the rear wall is solid and the glass is opaque, so an exterior light
+        # is simply occluded -- the same trap that rendered spike 09's first iteration
+        # black. Reference 134126's window glows behind its blinds, so an emissive pane
+        # is also the faithful model.
+        MaterialSpec(
+            name="Window glass",
+            color=(0.46, 0.52, 0.68, 1) if low_key else (0.35, 0.6, 0.82, 1),
+            roughness=1.0 if low_key else 0.2,
+            emission_strength=0.28 if low_key else 0.0,
+        ),
         MaterialSpec(name="TV screen", color=(0.008, 0.009, 0.012, 1), roughness=0.22),
         MaterialSpec(name="Ceramic", color=(0.42, 0.38, 0.32, 1), roughness=0.3),
     )
@@ -1180,7 +1190,19 @@ def american_living_room(*, look: Literal["bright", "low_key"] = "bright") -> Sc
             ObjectSpec(name="Hall silhouette left foot", kind="box", location=(0.87, 2.34, 0.06), dimensions=(0.16, 0.32, 0.06), material="Silhouette"),
             ObjectSpec(name="Hall silhouette right foot", kind="box", location=(0.98, 2.34, 0.06), dimensions=(0.16, 0.32, 0.06), material="Silhouette"),
         ))
-        lights = (LightSpec(name="Panel0", location=(-0.50, 0.6, 1.65), energy=145, color=(1.0, 0.92, 0.8), size=0.025, kind="point"),)
+        # Two motivated sources, not one. Measured against reference 134126: a single
+        # practical with world_strength 0 crushed 54.8% of the delivered frame to black
+        # where the reference crushes 32.0%, so the room lost its readable midtones. The
+        # reference has a second source -- its window is brightly backlit behind the
+        # blinds -- and restoring that as a real practical lifts the midtones without the
+        # flattening that ambient fill would cause. Clipping was never the shortfall: the
+        # delivered frame already clipped 0.256% against the reference's 0.068%.
+        lights = (
+            LightSpec(name="Panel0", location=(-0.50, 0.6, 1.65), energy=145,
+                      color=(1.0, 0.92, 0.8), size=0.025, kind="point"),
+            LightSpec(name="Window spill", location=(-0.77, 1.65, 1.65), energy=40,
+                      color=(0.60, 0.72, 1.0), size=1.45, target=(0, -0.3, 0.9)),
+        )
     return SceneSpec(
         materials=mats,
         objects=tuple(o),
