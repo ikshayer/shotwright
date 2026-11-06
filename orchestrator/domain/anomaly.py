@@ -4,7 +4,7 @@ from __future__ import annotations
 from itertools import pairwise
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
 Vec3 = tuple[float, float, float]
 
@@ -30,17 +30,6 @@ class _FigureAnomaly(_Anomaly):
     depth_m: float = Field(gt=0)
     minimum_distance_m: float = Field(gt=0)
     maximum_on_frame_height_px: StrictInt = Field(gt=0)
-    #: None means a featureless silhouette. When present this vertical face strip
-    #: is projected through the same camera model as the subject's full height.
-    face_height_m: float | None = Field(default=None, gt=0)
-
-    @model_validator(mode="after")
-    def face_fits_subject(self) -> _FigureAnomaly:
-        if self.face_height_m is not None and self.face_height_m > self.height_m:
-            raise ValueError(
-                f"face_height_m {self.face_height_m} exceeds subject height_m {self.height_m}"
-            )
-        return self
 
 
 class StaticSilhouette(_FigureAnomaly):

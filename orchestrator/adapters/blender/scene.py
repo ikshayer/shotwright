@@ -229,7 +229,6 @@ class RenderRequest(_FrozenModel):
 
 
 _CAMERA_SENSOR_WIDTH_MM = 36.0
-_FACE_HEIGHT_LIMIT_PX = 48.0
 
 
 def build_scene_plan(request: RenderRequest) -> dict[str, object]:
@@ -336,7 +335,6 @@ def _apply_anomaly(
             depth_m=anomaly.depth_m,
             minimum_distance_m=anomaly.minimum_distance_m,
             maximum_on_frame_height_px=anomaly.maximum_on_frame_height_px,
-            face_height_m=anomaly.face_height_m,
             camera=camera,
             width=width,
             height=height,
@@ -438,7 +436,6 @@ def _validate_figure_geometry(
     depth_m: float,
     minimum_distance_m: float,
     maximum_on_frame_height_px: int,
-    face_height_m: float | None,
     camera: dict[str, object],
     width: int,
     height: int,
@@ -467,19 +464,6 @@ def _validate_figure_geometry(
                 f"maximum_on_frame_height_px violation at {label}: projected height "
                 f"{subject_height_px:.2f} px exceeds {maximum_on_frame_height_px} px"
             )
-        if face_height_m is not None:
-            face_height_px = _projected_vertical_span_px(
-                (base[0], base[1], base[2] + height_m - face_height_m),
-                (base[0], base[1], base[2] + height_m),
-                camera_position=camera_position, basis=basis, lens_mm=lens_mm,
-                image_width=width, image_height=height,
-            )
-            if face_height_px > _FACE_HEIGHT_LIMIT_PX + 1e-9:
-                raise ValueError(
-                    f"face_height_px violation at {label} for face_height_m {face_height_m:.3f} m: "
-                    f"projected face height "
-                    f"{face_height_px:.2f} px exceeds {_FACE_HEIGHT_LIMIT_PX:.0f} px"
-                )
 
 
 def _camera_basis(
@@ -518,23 +502,6 @@ def _projected_box_height_px(
                     lens_mm=lens_mm, image_width=image_width, image_height=image_height,
                 ))
     return max(projected) - min(projected)
-
-
-def _projected_vertical_span_px(
-    bottom: Vec3,
-    top: Vec3,
-    *,
-    camera_position: Vec3 | tuple[float, float, float],
-    basis: tuple[Vec3, Vec3, Vec3],
-    lens_mm: float,
-    image_width: int,
-    image_height: int,
-) -> float:
-    low = _project_y_px(bottom, camera_position=camera_position, basis=basis,
-                        lens_mm=lens_mm, image_width=image_width, image_height=image_height)
-    high = _project_y_px(top, camera_position=camera_position, basis=basis,
-                         lens_mm=lens_mm, image_width=image_width, image_height=image_height)
-    return abs(high - low)
 
 
 def _project_y_px(

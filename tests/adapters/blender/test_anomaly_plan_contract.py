@@ -1,18 +1,10 @@
-"""Contract regressions for FR-20 and animated Blender worker plans.
-
-The contract intentionally leaves the Python API unnamed. These tests assume a
-discriminated union named ``AnomalySpec`` in
-``orchestrator.adapters.blender.anomaly``, attached to ``Shot.anomaly``. The
-``kind`` values and common parameter names below are the test author's concrete
-reading of the seven prose primitive names and parameter nouns in the contract.
-"""
+"""Contract regressions for FR-20 and animated Blender worker plans."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
@@ -22,17 +14,17 @@ from orchestrator.adapters.blender.scene import (
     build_scene_plan,
     synthetic_interior,
 )
+from orchestrator.domain.anomaly import AnomalySpec, AnomalyTiming
 from orchestrator.domain.entities import CameraProfile
-
 
 _ANOMALY_KINDS = (
     "static_silhouette",
     "linear_walk_path",
-    "appear_disappear_between_frames",
+    "appear_disappear",
     "partial_occlusion",
     "light_flicker",
     "door_or_object_movement",
-    "object_appearing_disappearing_between_frames",
+    "object_appearing_disappearing",
 )
 
 # This digest freezes today's canonical worker payload for the same fixture
@@ -63,31 +55,39 @@ def _canonical_plan_bytes(plan: dict[str, object]) -> bytes:
     ).encode("utf-8")
 
 
-def _spec_adapter() -> TypeAdapter[Any]:
-    """Load the contract-implied union at test time so missing code is a test failure."""
-    try:
-        from orchestrator.adapters.blender.anomaly import AnomalySpec
-    except ModuleNotFoundError as exc:
-        pytest.fail(
-            "FR-20 requires the anomaly union module; observed import failure: "
-            f"{exc}"
-        )
+def _spec_adapter() -> TypeAdapter[AnomalySpec]:
+    """Validate the real domain-level discriminated union."""
     return TypeAdapter(AnomalySpec)
 
 
-def _valid_anomaly(kind: str, **changes: object) -> Any:
-    # Assumed shared typed fields: path, distance, occluder, subtlety, face
-    # height, and on-frame height. event_sec stays on Shot and is deliberately
-    # not duplicated in this anomaly object.
-    values: dict[str, object] = {
-        "kind": kind,
-        "path": ((0.0, 0.0, 0.0), (0.5, 0.0, 0.0)),
-        "distance_m": 4.0,
-        "occluder": "RoomShell",
-        "subtlety": 0.25,
-        "face_height_px": 0,
-        "on_frame_height_px": 240,
-    }
+def _valid_anomaly(kind: str, **changes: object) -> AnomalySpec:
+    values: dict[str, object] = {"kind": kind, "timing": AnomalyTiming(), "subtlety": 2}
+    if kind in {"static_silhouette", "appear_disappear", "partial_occlusion"}:
+        values.update({
+            "position": (0.0, 1.0, 0.0),
+            "height_m": 1.8,
+            "width_m": 0.4,
+            "depth_m": 0.3,
+            "minimum_distance_m": 1.0,
+            "maximum_on_frame_height_px": 960,
+        })
+        if kind == "partial_occlusion":
+            values["occluder"] = "RoomShell"
+    if kind == "linear_walk_path":
+        values.update({
+            "path": ((-0.5, 0.8, 0.0), (0.5, 0.8, 0.0)),
+            "height_m": 1.8,
+            "width_m": 0.4,
+            "depth_m": 0.3,
+            "minimum_distance_m": 1.0,
+            "maximum_on_frame_height_px": 960,
+        })
+    if kind == "light_flicker":
+        values.update({"light_name": "Panel0", "flicker_fraction": 0.25, "frequency_hz": 2.0})
+    if kind == "door_or_object_movement":
+        values.update({"target_object": "RoomShell", "path": ((0.0, 0.0, 1.35), (0.5, 0.0, 1.35))})
+    if kind == "object_appearing_disappearing":
+        values["target_object"] = "RoomShell"
     values.update(changes)
     return _spec_adapter().validate_python(values)
 
@@ -128,6 +128,33 @@ def _keyframe_location_series(value: object) -> list[tuple[str, list[tuple[int, 
                     and isinstance(key.get("frame"), int)
                     and isinstance(key.get("location"), (list, tuple))
                     and all(isinstance(part, (int, float)) for part in key["location"])
+                ]
+                if samples:
+                    series.append((str(item.get("name", "unnamed")), samples))
+            for child in item.values():
+                visit(child)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return series
+
+
+def _visibility_keyframe_series(value: object) -> list[tuple[str, list[tuple[int, bool]]]]:
+    """Keep visibility changes grouped by their worker object."""
+    series: list[tuple[str, list[tuple[int, bool]]]] = []
+
+    def visit(item: object) -> None:
+        if isinstance(item, dict):
+            keys = item.get("visibility_keyframes")
+            if isinstance(keys, (list, tuple)):
+                samples = [
+                    (key["frame"], key["visible"])
+                    for key in keys
+                    if isinstance(key, dict)
+                    and isinstance(key.get("frame"), int)
+                    and isinstance(key.get("visible"), bool)
                 ]
                 if samples:
                     series.append((str(item.get("name", "unnamed")), samples))
@@ -202,15 +229,7 @@ def test_each_fr20_primitive_validates_and_reaches_worker_plan(kind: str, tmp_pa
 
 
 def test_anomaly_union_rejects_an_eighth_kind() -> None:
-    values = {
-        "kind": "teleport",
-        "path": ((0.0, 0.0, 0.0), (0.5, 0.0, 0.0)),
-        "distance_m": 4.0,
-        "occluder": "RoomShell",
-        "subtlety": 0.25,
-        "face_height_px": 0,
-        "on_frame_height_px": 240,
-    }
+    values = {"kind": "teleport"}
     with pytest.raises(ValidationError) as caught:
         _spec_adapter().validate_python(values)
     observed = str(caught.value)
@@ -222,33 +241,32 @@ def test_anomaly_union_rejects_an_eighth_kind() -> None:
 
 
 @pytest.mark.parametrize(
-    ("field", "bad_value"),
+    ("field", "bad_value", "diagnostic"),
     [
-        # The anomaly contract still requires <=48 px; current PRD §3.2 has
-        # replaced that rule with identity destruction on delivered frames.
-        ("face_height_px", 49),
-        # No numeric policy thresholds are specified. Zero distance is
-        # degenerate; 961 px exceeds this fixture's 960 px master frame.
-        ("distance_m", 0.0),
-        ("on_frame_height_px", 961),
+        ("minimum_distance_m", 100.0, "required at least 100.000 m"),
+        ("maximum_on_frame_height_px", 1, "exceeds 1 px"),
     ],
 )
 def test_scene_constraints_reject_and_name_the_offending_value(
-    field: str, bad_value: int | float,
+    field: str, bad_value: float, diagnostic: str, tmp_path: Path,
 ) -> None:
-    # Prove the field and otherwise-valid primitive are accepted first, so an
-    # unknown/extra field cannot masquerade as enforcement of its constraint.
-    _valid_anomaly("static_silhouette")
-    changes = {field: bad_value}
-    with pytest.raises(ValidationError) as caught:
-        _valid_anomaly("static_silhouette", **changes)
+    from tests.service.test_anomaly_composition_contract import _compose_plan
+
+    # Exercise actual projected geometry. Positive thresholds are valid model
+    # values; scene planning must reject them without silently clamping either.
+    anomaly = _valid_anomaly("static_silhouette", **{field: bad_value})
+    assert getattr(anomaly, field) == bad_value, (
+        f"valid {field} threshold changed before planning; observed {getattr(anomaly, field)!r}"
+    )
+    with pytest.raises(ValueError) as caught:
+        _compose_plan(tmp_path, anomaly, event_sec=0.5)
     observed = str(caught.value)
 
     assert field in observed, (
-        f"invalid {field} was rejected without naming the constraint; observed {observed!r}"
+        f"scene geometry violation did not name {field}; observed {observed!r}"
     )
-    assert str(bad_value) in observed, (
-        f"invalid {field} was rejected without naming value {bad_value!r}; "
+    assert diagnostic in observed, (
+        f"scene geometry violation did not name offending value {bad_value!r}; "
         f"observed {observed!r}"
     )
 
@@ -256,24 +274,54 @@ def test_scene_constraints_reject_and_name_the_offending_value(
 def test_event_sec_edits_reveal_timing_without_reauthoring_anomaly(tmp_path: Path) -> None:
     from tests.service.test_anomaly_composition_contract import _compose_plan
 
-    anomaly = _valid_anomaly("appear_disappear_between_frames")
+    anomaly = _valid_anomaly("appear_disappear")
     early = _compose_plan(tmp_path, anomaly, event_sec=0.5)
     late = _compose_plan(tmp_path, anomaly, event_sec=2.0)
-    early_samples = _keyframe_location_samples(early)
-    late_samples = _keyframe_location_samples(late)
-    early_frames = {frame for frame, _location in early_samples}
-    late_frames = {frame for frame, _location in late_samples}
+    early_series = _visibility_keyframe_series(early)
+    late_series = _visibility_keyframe_series(late)
+    early_samples = next((samples for name, samples in early_series if name == "FR20AnomalyFigure"), [])
+    late_samples = next((samples for name, samples in late_series if name == "FR20AnomalyFigure"), [])
 
     assert _canonical_plan_bytes(early) != _canonical_plan_bytes(late), (
         "changing typed Shot.event_sec did not change the worker plan; observed "
         f"the same SHA-256 {hashlib.sha256(_canonical_plan_bytes(early)).hexdigest()}"
     )
-    assert early_frames != late_frames, (
-        "event_sec changed serialized plan bytes but not keyframe timing; "
-        f"observed early frames {sorted(early_frames)} and late frames {sorted(late_frames)}"
+    assert early_samples and late_samples and early_samples != late_samples, (
+        "event_sec changed serialized plan bytes but not anomaly visibility timing; "
+        f"observed early {early_samples!r} and late {late_samples!r}"
+    )
+    assert early_samples[1][0] == 31 and late_samples[1][0] == 121, (
+        "Shot.event_sec did not set the anomaly reveal frame; "
+        f"observed early {early_samples!r} and late {late_samples!r}"
     )
     anomaly_values = anomaly.model_dump(mode="json")
     assert "event_sec" not in anomaly_values, (
         "event_sec was duplicated inside the anomaly specification; "
         f"observed anomaly fields {sorted(anomaly_values)}"
+    )
+
+
+def test_typed_anomaly_timing_duration_edits_reveal_window(tmp_path: Path) -> None:
+    from tests.service.test_anomaly_composition_contract import _compose_plan
+
+    original = _valid_anomaly("appear_disappear")
+    extended = original.model_copy(update={"timing": AnomalyTiming(duration_sec=1.5)})
+    assert original.model_dump(mode="json", exclude={"timing"}) == extended.model_dump(
+        mode="json", exclude={"timing"},
+    ), "editing AnomalyTiming.duration_sec changed fields outside the typed timing parameter"
+
+    short_plan = _compose_plan(tmp_path, original, event_sec=0.5)
+    long_plan = _compose_plan(tmp_path, extended, event_sec=0.5)
+    short_series = _visibility_keyframe_series(short_plan)
+    long_series = _visibility_keyframe_series(long_plan)
+    short_samples = next((samples for name, samples in short_series if name == "FR20AnomalyFigure"), [])
+    long_samples = next((samples for name, samples in long_series if name == "FR20AnomalyFigure"), [])
+
+    assert short_samples and long_samples and short_samples[0][0] == long_samples[0][0], (
+        "changing AnomalyTiming.duration_sec moved the reveal start; "
+        f"observed short {short_samples!r} and long {long_samples!r}"
+    )
+    assert short_samples[-1][0] != long_samples[-1][0], (
+        "changing typed AnomalyTiming.duration_sec did not change the reveal end; "
+        f"observed short {short_samples!r} and long {long_samples!r}"
     )
