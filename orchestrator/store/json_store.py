@@ -46,6 +46,7 @@ from orchestrator.domain.entities import (
     CameraProfile,
     Episode,
     Location,
+    PostProfile,
     Project,
     Review,
     Script,
@@ -125,6 +126,7 @@ _LAYOUTS: dict[type[Entity], _Layout] = {
     Shot: _Layout(True, "shot_id", lambda i, e: f"episodes/{e}/shots/{i}", True),
     Location: _Layout(True, "location_id", lambda i, _e: f"locations/{i}"),
     CameraProfile: _Layout(True, "camera_id", lambda i, _e: f"camera_profiles/{i}"),
+    PostProfile: _Layout(False, "name", lambda i, _e: f"post_profiles/{i}.json"),
     StyleBible: _Layout(True, "project_id", lambda _i, _e: "references/style_bible"),
     # Review is the only writer of approval state (10.1), so it must be
     # persistable: without a layout here every production approval failed with

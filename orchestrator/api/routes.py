@@ -8,7 +8,15 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from orchestrator.domain.entities import Episode, Project, RubricScores, Script, Shot
+from orchestrator.domain.entities import (
+    CameraProfile,
+    Episode,
+    PostProfile,
+    Project,
+    RubricScores,
+    Script,
+    Shot,
+)
 
 
 class OpenRequest(BaseModel):
@@ -33,6 +41,14 @@ class ShotRevision(BaseModel):
 
 class EpisodeCreation(BaseModel):
     episode: Episode
+
+
+class CameraProfileCreation(BaseModel):
+    camera_profile: CameraProfile
+
+
+class PostProfileCreation(BaseModel):
+    post_profile: PostProfile
 
 
 class ScriptDraft(BaseModel):
@@ -100,7 +116,9 @@ def path_parameters(path: str) -> list[str]:
 # are generated from these entries.
 OPERATIONS = (
     Operation("health", "GET", "/health", "Check API health", False, "api", None, _call("health")),
-    Operation("create_project", "POST", "/projects", "Create a project", True, "store", Project, _call("create_project")),
+    Operation("create_project", "POST", "/projects", "Create a project", True, "service.dependencies.create_project / store", Project, _call("create_project")),
+    Operation("create_camera_profile", "POST", "/projects/{project_id}/camera-profiles/{camera_id}", "Create a camera profile", True, "service.dependencies.create_camera_profile", CameraProfileCreation, _call("create_camera_profile")),
+    Operation("create_post_profile", "POST", "/projects/{project_id}/post-profiles/{profile_name}", "Create a post profile", True, "service.dependencies.create_post_profile", PostProfileCreation, _call("create_post_profile")),
     Operation("create_episode", "POST", "/projects/{project_id}/episodes", "Create an episode", True, "service.dependencies.create_episode", EpisodeCreation, _call("create_episode")),
     Operation("list_projects", "GET", "/projects", "List projects", False, "store", None, _call("list_projects")),
     Operation("load_project", "GET", "/projects/{project_id}", "Load a project", False, "store", None, _call("load_project")),

@@ -21,7 +21,10 @@ Every operation below must be reachable from **both** the HTTP API and the CLI.
 
 | Operation | Backed by |
 |---|---|
-| create / list / load project | `store` |
+| create project | `service.dependencies.create_project` / `store` |
+| list / load project | `store` |
+| create camera profile | `service.dependencies.create_camera_profile` / `store` |
+| create post profile | `service.dependencies.create_post_profile` / `store` |
 | create episode | `service.dependencies.create_episode` / `store` |
 | draft script | `service.dependencies.draft_script` / `store` |
 | propose shots | `service.dependencies.propose_shots` / `store` |
@@ -42,7 +45,11 @@ Every operation below must be reachable from **both** the HTTP API and the CLI.
 the missing adapter. They are NOT omitted: AT-10 requires the enumeration to be complete,
 and the UI is built against it.
 
-Creation requests wrap the persisted entity: `create_episode` accepts `{"episode": ...}`;
+Creation requests wrap the persisted entity: `create_camera_profile` accepts
+`{"camera_profile": ...}` at
+`POST /projects/{project_id}/camera-profiles/{camera_id}`;
+`create_post_profile` accepts `{"post_profile": ...}` at
+`POST /projects/{project_id}/post-profiles/{profile_name}`; `create_episode` accepts `{"episode": ...}`;
 `draft_script` accepts `{"script": ...}`; `propose_shots` accepts `{"shots": [...]}`.
 These operations persist the supplied, domain-validated content and do not generate
 content or run dependency invalidation. `Script` and `Shot` start at content version 1;
@@ -50,6 +57,11 @@ content or run dependency invalidation. `Script` and `Shot` start at content ver
 uses the store's absent-record token (`expected_version=0`); creating an existing record
 conflicts. Shot proposals append records. If an individual Shot write fails after earlier
 writes succeeded, the HTTP and CLI error names both the written and unwritten Shot identities.
+CameraProfile and PostProfile creation also runs under the project command lock and never
+revises or invalidates downstream records. Profile URL identifiers must match the body
+entity identifiers. `create_project` materializes project-local `dvr-2005` CameraProfile
+and PostProfile records from the measured spike profile; their provenance is stored on
+the records, and render-time composition reads those records.
 
 ## Security (FR-25, AT-17)
 

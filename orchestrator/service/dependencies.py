@@ -2,12 +2,27 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 
 from orchestrator.domain.base import ShotStatus, VersionedEntity
-from orchestrator.domain.entities import CameraProfile, Episode, Location, Project, Script, Shot
+from orchestrator.domain.entities import (
+    ArtifactScheduleEntry,
+    CameraProfile,
+    Episode,
+    Location,
+    PostProfile,
+    PostProfileEncode,
+    PostProfileOverlay,
+    PostStage,
+    Project,
+    Script,
+    Shot,
+)
 from orchestrator.domain.invalidation import revision_impact
 from orchestrator.domain.state import TransitionContext, check_revision, check_transition
 from orchestrator.platform.errors import JobError, JobErrorKind
@@ -270,6 +285,107 @@ def revise_shot(store: ProjectStore, revised: Shot, *, expected_version: int) ->
     with store.command():
         _revise(store, revised, expected_version, [revised.episode_id])
         return revised
+
+
+def _measured_dvr_2005_defaults() -> tuple[CameraProfile, PostProfile]:
+    """Materialize the spike's measured DVR profile without rebuilding its values."""
+    repository = Path(__file__).resolve().parents[2]
+    profile_path = repository / "spikes" / "01_postprofile_determinism" / "post_profile.json"
+    results_path = repository / "spikes" / "01_postprofile_determinism" / "results_dvr-2005.json"
+    profile_bytes = profile_path.read_bytes()
+    results_bytes = results_path.read_bytes()
+    measured = json.loads(profile_bytes)
+    results = json.loads(results_bytes)
+    if measured.get("profile_id") != "dvr-2005":
+        raise ValueError(f"measured default profile id is not dvr-2005: {measured.get('profile_id')!r}")
+
+    schedule = [ArtifactScheduleEntry.model_validate(item)
+                for item in measured["artifact_schedule"]]
+    stages: list[PostStage] = []
+    overlay: PostProfileOverlay | None = None
+    for source in measured["stages"]:
+        params = dict(source.get("params", {}))
+        if "from_schedule" in source:
+            params["from_schedule"] = source["from_schedule"]
+        is_overlay = source["filter"] == "drawtext"
+        if is_overlay:
+            overlay = PostProfileOverlay.model_validate({
+                **params,
+                "placement": "in_recording",
+            })
+        stages.append(PostStage(
+            name=source["name"],
+            filter=source["filter"],
+            params=params,
+            seed_source="shot_degrade_seed" if source.get("seeded") is True else None,
+            composite_stage="in_recording" if is_overlay else None,
+        ))
+
+    encode = PostProfileEncode.model_validate(measured["encode"])
+    profile_digest = hashlib.sha256(profile_bytes).hexdigest()
+    results_digest = hashlib.sha256(results_bytes).hexdigest()
+    provenance = (
+        "Measured 2026-11-03 in spikes/01_postprofile_determinism: "
+        f"post_profile.json sha256={profile_digest}; "
+        f"results_dvr-2005.json sha256={results_digest}. The project-local dvr-2005 "
+        "CameraProfile mirrors the measured post-only codec, dimensions, display ratio, "
+        "frame rate and schedule. Its rebuild-triggering camera optics, placement and "
+        "lighting are not measured by spike 01 and retain CameraProfile's declared "
+        "domain defaults."
+    )
+    post_profile = PostProfile(
+        name=measured["profile_id"],
+        semver=measured["profile_version"],
+        stages=stages,
+        pinned_binaries={"ffmpeg": results["ffmpeg"]},
+        filter_graph_hash=results["filter_graph_hash"],
+        output_fps=measured["output_fps"],
+        storage_resolution=tuple(measured["storage_resolution"]),
+        sample_aspect_ratio=measured["sample_aspect_ratio"],
+        artifact_schedule=schedule,
+        overlay=overlay,
+        encode=encode,
+        provenance=provenance,
+    )
+    camera_profile = CameraProfile(
+        camera_id=measured["profile_id"],
+        profile_name=measured["profile_id"],
+        codec=encode.codec,
+        storage_resolution=tuple(measured["storage_resolution"]),
+        display_aspect_ratio=measured["display_aspect_ratio"],
+        fps=measured["output_fps"],
+        frame_drop_schedule=schedule,
+    )
+    return camera_profile, post_profile
+
+
+def create_project(store: ProjectStore, project: Project) -> Project:
+    """Create a project and materialize its measured, project-local DVR defaults."""
+    camera_profile, post_profile = _measured_dvr_2005_defaults()
+    with store.command():
+        project = store.validate_entity_payload(project)
+        store.save(project, expected_version=0)
+        store.create(camera_profile)
+        store.save(post_profile, expected_version=0)
+        return project
+
+
+def create_camera_profile(store: ProjectStore, profile: CameraProfile) -> CameraProfile:
+    """Persist a new agent-authored CameraProfile without downstream invalidation."""
+    with store.command():
+        profile = store.validate_entity_payload(profile)
+        store.load(Project)
+        store.create(profile)
+        return profile
+
+
+def create_post_profile(store: ProjectStore, profile: PostProfile) -> PostProfile:
+    """Persist a new agent-authored PostProfile without overwriting an existing one."""
+    with store.command():
+        profile = store.validate_entity_payload(profile)
+        store.load(Project)
+        store.save(profile, expected_version=0)
+        return profile
 
 
 def create_episode(store: ProjectStore, episode: Episode) -> Episode:

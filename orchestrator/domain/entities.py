@@ -20,8 +20,9 @@ import re
 from datetime import date, datetime
 from enum import StrEnum
 from pathlib import PurePosixPath, PureWindowsPath
+from typing import Literal
 
-from pydantic import Field, field_serializer, field_validator, model_validator
+from pydantic import Field, StrictInt, field_serializer, field_validator, model_validator
 
 from .base import (
     Entity,
@@ -295,6 +296,27 @@ class PostStage(Entity):
     composite_stage: str | None = None  # in_recording | on_playback
 
 
+class PostProfileOverlay(Entity):
+    """Persisted overlay configuration, including its recorded/composited side."""
+
+    camera_id: str
+    clock_epoch: int
+    fontsize: StrictInt = Field(gt=0)
+    x: StrictInt | str = 8
+    y: StrictInt | str = "h-24"
+    placement: Literal["in_recording", "on_playback"] = "in_recording"
+
+
+class PostProfileEncode(Entity):
+    """Persisted encoder settings used to compose the PostProfile adapter request."""
+
+    codec: str = Field(min_length=1)
+    preset: str = "medium"
+    crf: StrictInt = Field(ge=0, le=51)
+    pix_fmt: str = Field(min_length=1)
+    threads: StrictInt = Field(ge=1)
+
+
 class PostProfile(Entity):
     name: str
     semver: str
@@ -302,6 +324,15 @@ class PostProfile(Entity):
     #: pinned identities of the binaries this profile was authored against
     pinned_binaries: dict[str, str] = Field(default_factory=dict)
     filter_graph_hash: str | None = None
+    #: Adapter configuration is persisted with this ordinary project-local record.
+    #: None means an authored record is incomplete and cannot yet be composed.
+    output_fps: StrictInt | None = Field(None, gt=0)
+    storage_resolution: tuple[StrictInt, StrictInt] | None = None
+    sample_aspect_ratio: str | None = None
+    artifact_schedule: list[ArtifactScheduleEntry] = Field(default_factory=list)
+    overlay: PostProfileOverlay | None = None
+    encode: PostProfileEncode | None = None
+    provenance: str = ""
 
     @field_validator("semver")
     @classmethod
@@ -559,7 +590,8 @@ _assert_camera_profile_fully_tagged()
 __all__ = [
     "ArtifactScheduleEntry", "Asset", "Attestation", "Beat", "CameraProfile",
     "Episode", "Export", "GenerationRun", "Invalidation", "Job", "Location",
-    "PostProfile", "PostStage", "Project", "Reference", "Review", "RubricScores",
+    "PostProfile", "PostProfileEncode", "PostProfileOverlay", "PostStage", "Project",
+    "Reference", "Review", "RubricScores",
     "Script", "Shot", "ShotOutput", "ShotOutputKind", "StyleBible", "StyleClaim",
     "Timeline", "TimelineEntry",
 ]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import math
+import uuid
 from typing import Annotated, Any
 from urllib.parse import urlsplit
 
@@ -12,14 +13,26 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from orchestrator.domain.entities import Episode, Project, RubricScores, Script, Shot
+from orchestrator.domain.entities import (
+    CameraProfile,
+    Episode,
+    PostProfile,
+    Project,
+    RubricScores,
+    Script,
+    Shot,
+)
 from orchestrator.jobs.journal import read_job_records
 from orchestrator.jobs.lease import GpuLease, PynvmlProbe
 from orchestrator.jobs.queue import JobQueue, ProjectQuarantine, SystemHostResources
 from orchestrator.platform.containment import ProjectRoot, validate_upload
 from orchestrator.platform.settings import Settings
+from orchestrator.service.compose import compose_render_request
 from orchestrator.service.dependencies import (
+    create_camera_profile,
     create_episode,
+    create_post_profile,
+    create_project,
     draft_script,
     propose_shots,
     revise_script,
@@ -97,8 +110,8 @@ class OperationContext:
         if operation == "create_project":
             project = Project.model_validate(data)
             store = self._store(project.project_id, create=True)
-            store.save(project, expected_version=0)
-            return project.model_dump(mode="json")
+            created = create_project(store, project)
+            return created.model_dump(mode="json")
         if operation == "list_projects":
             projects = []
             for path in sorted(self.root.path.iterdir(), key=lambda item: item.name):
@@ -119,6 +132,16 @@ class OperationContext:
             return projects
         if operation == "load_project":
             return self._store(data["project_id"]).load(Project).model_dump(mode="json")
+        if operation == "create_camera_profile":
+            profile = CameraProfile.model_validate(data["camera_profile"])
+            _require_path_match(data, "camera_id", profile.camera_id)
+            created = create_camera_profile(self._store(data["project_id"]), profile)
+            return created.model_dump(mode="json")
+        if operation == "create_post_profile":
+            profile = PostProfile.model_validate(data["post_profile"])
+            _require_path_match(data, "profile_name", profile.name)
+            created = create_post_profile(self._store(data["project_id"]), profile)
+            return created.model_dump(mode="json")
         if operation == "create_episode":
             episode = Episode.model_validate(data["episode"])
             _require_path_match(data, "project_id", episode.project_id)
@@ -180,15 +203,27 @@ class OperationContext:
             if not record_id:
                 raise AdapterRequestInvalid(f"{operation} requires shot_id")
             store = self._store(data["project_id"])
-            shot = store.load(Shot, record_id, episode_id=data.get("episode_id"))
-            payload = data.get("request", data)
-            record_version = data.get("record_version")
-            if record_version is None:
-                record_version = getattr(payload, "shot_version", None)
-            if record_version is None and isinstance(payload, dict):
-                record_version = payload.get("shot_version")
-            if record_version is None:
-                record_version = shot.version
+            if operation in {"build_scene", "render_preview"}:
+                payload = compose_render_request(
+                    store,
+                    shot_id=record_id,
+                    episode_id=data.get("episode_id"),
+                    run_id=uuid.uuid4().hex,
+                    mode="preview" if operation == "render_preview" else "master",
+                )
+                record_version = payload.shot_version
+                episode_id = data.get("episode_id")
+            else:
+                shot = store.load(Shot, record_id, episode_id=data.get("episode_id"))
+                payload = data.get("request", data)
+                record_version = data.get("record_version")
+                if record_version is None:
+                    record_version = getattr(payload, "shot_version", None)
+                if record_version is None and isinstance(payload, dict):
+                    record_version = payload.get("shot_version")
+                if record_version is None:
+                    record_version = shot.version
+                episode_id = shot.episode_id
             if type(record_version) is not int or record_version < 1:
                 raise AdapterRequestInvalid("record_version must be a positive content version")
             resources = data.get("resources", {})
@@ -201,7 +236,7 @@ class OperationContext:
                 raise AdapterRequestInvalid("required_vram_gb must be a finite nonnegative number")
             request = AdapterRequest(
                 kind=kind, payload=payload, record_id=record_id,
-                record_version=record_version, episode_id=shot.episode_id,
+                record_version=record_version, episode_id=episode_id,
                 required_vram_gb=required_vram,
                 required_ram_gb=data.get("required_ram_gb", resources.get("required_ram_gb", 0.0)),
                 required_disk_gb=data.get("required_disk_gb", resources.get("required_disk_gb", 0.0)),

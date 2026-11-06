@@ -188,7 +188,9 @@ class JobRunner:
                 required_vram_gb=request.required_vram_gb,
                 required_ram_gb=request.required_ram_gb,
                 required_disk_gb=request.required_disk_gb,
-                shot_id=request.record_id, episode_id=episode_id, run_id=uuid.uuid4().hex,
+                shot_id=request.record_id, episode_id=episode_id,
+                run_id=(request.payload.run_id if isinstance(request.payload, RenderRequest)
+                        else uuid.uuid4().hex),
             )
             # Admission refusal is part of submit's synchronous contract. The id is
             # not persisted or returned until preflight succeeds.
