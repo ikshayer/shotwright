@@ -51,11 +51,21 @@ def test_append_seals_truncated_tail_and_keeps_both_resumed_transitions(
         "recovery changed bytes belonging to complete entries written before the damaged tail"
     )
     parsed_lines: list[dict[str, Any]] = []
+    unparseable: list[int] = []
     for line_number, line in enumerate(after_recovery.splitlines(), start=1):
         try:
             parsed_lines.append(json.loads(line))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            pytest.fail(f"recovered journal line {line_number} is not parseable: {exc}")
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            # The sealed fragment is SUPPOSED to be unparseable. Amendment 1: a crash
+            # legitimately produces an unparseable interior line and readers skip it.
+            unparseable.append(line_number)
+    # Exactly one damaged line, which is stronger than tolerating any number: it proves the
+    # fragment was sealed as a line of its own rather than fused onto the next record.
+    assert len(unparseable) == 1, (
+        f"expected exactly the sealed fragment to be unparseable, got lines {unparseable}; "
+        "more than one means recovery damaged further records, none means the fragment was "
+        "fused into a neighbouring line"
+    )
 
     states = [record["state"] for record in parsed_lines]
     assert states[-2:] == ["completed", "failed"], (
@@ -124,7 +134,7 @@ def test_incomplete_journal_without_legacy_record_fails_loudly(tmp_path: Path) -
 
     try:
         result = read_job(root, "damaged")
-    except Exception:
+    except Exception:  # noqa: BLE001 - the contract requires a loud failure, not a named type
         return
     pytest.fail(f"damaged journal without a legacy fallback returned silently: {result!r}")
 
