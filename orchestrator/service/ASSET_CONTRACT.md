@@ -278,3 +278,49 @@ expressible, and widening the entity is out of scope here.
   files and new cases are required by the same amendment and were never in doubt.
 - `max_model_bytes = 500 MiB`, matching the video cap, is accepted; FR-23 makes it
   overridable in settings.
+
+---
+
+# Amendment 3 — A2.4 was wrong twice over
+
+A2.4 said "remove the default, `type` is required". That broke the suite from
+1,488 passed / 3 failed to **1,197 passed / 3 failed / 126 errors**, and the reason is
+worth recording because it was not the obvious one.
+
+## A3.1 — requiring it broke app construction, not 126 tests
+
+The dynamic multipart signature builder in `app.py` appends the defaulted `files`
+parameter **before** the request model's own fields. A required model field therefore
+produces `ValueError: non-default argument follows default argument`, and **the whole
+FastAPI app fails to construct** — so every test that builds the app errors at setup,
+across files that have nothing to do with assets.
+
+That is a latent landmine for every future upload operation, so it is fixed
+independently: non-defaulted parameters are partitioned ahead of defaulted ones, stably,
+preserving each group's declared order.
+
+## A3.2 — and requiring it was unnecessary
+
+The defect A2.4 set out to fix was that the default **guessed** `"model"`. Deriving from
+the already-validated magic bytes **measures** it. So:
+
+- **`type` is optional again** (`str | None = None`).
+- **Omitted → derived from the detected `MediaKind`.**
+- **Supplied → validated against that kind**, refused `422` naming both the declared
+  type and the detected kind.
+
+Verified: every `MediaKind`'s own name is a member of its permitted set
+(`model → {model}`, `image → {hdri, image, reference, texture}`,
+`video → {reference, video}`), so derivation can never produce a type the check rejects.
+A PNG registered without a declared type is recorded as an `image`, not a model, and the
+registry no longer asserts anything it has not measured.
+
+**Supersedes A2.4's "remove the default; `type` is required".** The rest of A2.4 — the
+kind-to-type mapping and the refusal naming both values — stands.
+
+## State at this amendment
+
+`worktree-asset` at `920d9e0`: **1,488 passed, 34 skipped, 3 failed**, ruff clean. The
+three failures are the stale `create_asset`-is-absent expectations that
+`worktree-asset-tests` fixes; neither branch can be green alone, so the combined tree is
+the only real gate.
