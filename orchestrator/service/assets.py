@@ -14,6 +14,7 @@ from typing import BinaryIO
 
 from orchestrator.domain.entities import Asset
 from orchestrator.platform.containment import (
+    MediaKind,
     ProjectRoot,
     UploadLimits,
     UploadRejected,
@@ -30,6 +31,11 @@ class AssetRegistrationInvalid(ValueError):
 _ASSET_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _GLB_MAGIC = b"glTF"
 _GLB_JSON_CHUNK = 0x4E4F534A
+_ASSET_TYPES_BY_MEDIA_KIND: dict[MediaKind, frozenset[str]] = {
+    "model": frozenset({"model"}),
+    "image": frozenset({"texture", "hdri", "reference", "image"}),
+    "video": frozenset({"reference", "video"}),
+}
 
 
 def register_asset(
@@ -38,7 +44,7 @@ def register_asset(
     *,
     filename: str,
     asset_id: str | None = None,
-    asset_type: str = "model",
+    asset_type: str | None = None,
     generated: bool = False,
     source_url: str | None = None,
     provider: str | None = None,
@@ -57,18 +63,27 @@ def register_asset(
     """
     if type(expected_version) is not int or expected_version != 0:
         raise AssetRegistrationInvalid("a new asset requires expected_version=0")
-    if not asset_type.strip():
+    if asset_type is not None and not asset_type.strip():
         raise AssetRegistrationInvalid("asset type must not be empty")
     if not reuse_scope.strip():
         raise AssetRegistrationInvalid("reuse_scope must not be empty")
 
-    validate_asset_source(
+    media_kind = validate_asset_source(
         source,
         filename=filename,
         license=license,
         source_url=source_url,
         generated=generated,
     )
+    # An omitted type is derived from the bytes rather than guessed: every media
+    # kind's own name is a member of its permitted set, so derivation never
+    # produces a type the check below would reject.
+    declared_type = asset_type.strip() if asset_type is not None else media_kind
+    if declared_type not in _ASSET_TYPES_BY_MEDIA_KIND[media_kind]:
+        raise AssetRegistrationInvalid(
+            f"declared asset type {declared_type!r} is incompatible with detected media kind "
+            f"{media_kind!r}"
+        )
     clean_license = license.strip() if isinstance(license, str) else ""
     clean_source_url = source_url.strip() if isinstance(source_url, str) else ""
     selected_id = asset_id or uuid.uuid4().hex
@@ -96,7 +111,7 @@ def register_asset(
         checksum = _sha256(root, relative_path)
         record = Asset(
             asset_id=selected_id,
-            type=asset_type.strip(),
+            type=declared_type,
             generated=generated,
             source_url=clean_source_url or None,
             provider=provider.strip() if isinstance(provider, str) and provider.strip() else None,
@@ -123,11 +138,11 @@ def validate_asset_source(
     license: str | None,
     source_url: str | None,
     generated: bool,
-) -> None:
+) -> MediaKind:
     """Validate format and provenance before looking up or writing project records."""
     clean_filename = sanitize_filename(filename)
     with _open_source(source) as stream:
-        _validate_format(stream, filename=clean_filename, size=_stream_size(stream))
+        media_kind = _validate_format(stream, filename=clean_filename, size=_stream_size(stream))
     clean_license = license.strip() if isinstance(license, str) else ""
     clean_source_url = source_url.strip() if isinstance(source_url, str) else ""
     if not clean_license:
@@ -137,11 +152,12 @@ def validate_asset_source(
             "source_url is required for externally sourced assets; set generated=true "
             "for a locally generated asset"
         )
+    return media_kind
 
 
 def _validate_format(
     stream: BinaryIO, *, filename: str, size: int
-) -> None:
+) -> MediaKind:
     if size <= 0:
         raise UploadRejected(f"Asset {filename!r} is empty")
 
@@ -155,7 +171,7 @@ def _validate_format(
     )
     upload = validate_upload(filename, head, size, limits)
     if upload.kind != "model":
-        return
+        return upload.kind
 
     try:
         header = stream.read(12)
@@ -198,6 +214,7 @@ def _validate_format(
                     f"Asset {filename!r} references an external {category} URI; "
                     "register a self-contained glTF or GLB"
                 )
+    return upload.kind
 
 
 @contextmanager

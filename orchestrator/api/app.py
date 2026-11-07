@@ -534,6 +534,16 @@ def _register_operation(app: FastAPI, operation: Operation, context: OperationCo
                 "payload", Parameter.POSITIONAL_OR_KEYWORD, default=None,
                 annotation=Annotated[operation.request_model | None, Body()],
             ))
+    # A parameter without a default may not follow one that has a default. The
+    # upload surface appends a defaulted `files` before the request model's own
+    # fields, so a single required model field previously raised
+    # "non-default argument follows default argument" and broke construction of
+    # every route at once, not just this one. A stable partition keeps each
+    # group's declared order while making the signature legal.
+    params = (
+        [p for p in params if p.default is Parameter.empty]
+        + [p for p in params if p.default is not Parameter.empty]
+    )
     endpoint.__signature__ = Signature(params, return_annotation=Any)  # type: ignore[attr-defined]
     endpoint.__name__ = operation.name
     endpoint.__doc__ = operation.summary

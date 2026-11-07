@@ -70,7 +70,7 @@ class AssetRegistration(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     asset_id: str | None = None
-    type: str = "model"
+    type: str | None = None
     generated: bool = False
     source_url: str | None = None
     provider: str | None = None
