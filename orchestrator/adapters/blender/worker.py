@@ -10,6 +10,30 @@ import sys
 import time
 
 
+def asset_fit_factors(source_min, source_max, desired) -> tuple[float, float, float]:
+    """Return per-axis scales that fit source bounds to the declared dimensions."""
+    axes = ("x", "y", "z")
+    minimum = tuple(float(value) for value in source_min)
+    maximum = tuple(float(value) for value in source_max)
+    target = tuple(float(value) for value in desired)
+    if len(minimum) != 3 or len(maximum) != 3 or len(target) != 3:
+        raise ValueError("source bounds and desired dimensions must each have three axes")
+
+    factors = []
+    for axis, low, high, dimension in zip(axes, minimum, maximum, target):
+        extent = high - low
+        if not math.isfinite(extent) or extent <= 1e-9:
+            raise ValueError(
+                f"source extent on {axis} axis is degenerate ({extent!r}); "
+                "declared dimensions cannot be applied"
+            )
+        factor = dimension / extent
+        if not math.isfinite(factor) or factor <= 0:
+            raise ValueError(f"scale factor on {axis} axis is invalid ({factor!r})")
+        factors.append(factor)
+    return tuple(factors)
+
+
 def _run(plan_path: str) -> None:
     with open(plan_path, encoding="utf-8") as stream:
         plan = json.load(stream)
@@ -23,7 +47,7 @@ def _run(plan_path: str) -> None:
     for key in ("TMP", "TEMP", "TMPDIR"):
         os.environ[key] = temp_dir
     import bpy
-    from mathutils import Vector
+    from mathutils import Euler, Matrix, Vector
 
     started = time.monotonic()
     scene_data = plan["scene"]
@@ -154,43 +178,49 @@ def _run(plan_path: str) -> None:
                 materials[spec["name"]] = mat
         for spec in scene_data["objects"]:
             kind = spec["kind"]
-            if kind == "box":
-                bpy.ops.mesh.primitive_cube_add(size=1, location=spec["location"])
-            elif kind == "cylinder":
-                bpy.ops.mesh.primitive_cylinder_add(
-                    vertices=32, radius=0.5, depth=1, location=spec["location"]
-                )
-            elif kind == "sphere":
-                bpy.ops.mesh.primitive_uv_sphere_add(
-                    segments=32, ring_count=16, radius=0.5, location=spec["location"]
-                )
-            elif kind == "cone":
-                bpy.ops.mesh.primitive_cone_add(
-                    vertices=32, radius1=0.5, radius2=0.12, depth=1, location=spec["location"]
-                )
-            elif kind == "torus":
-                bpy.ops.mesh.primitive_torus_add(
-                    major_segments=48, minor_segments=12, location=spec["location"]
+            if kind not in {"box", "cylinder", "sphere", "cone", "torus"}:
+                raise ValueError(f"unsupported object kind {kind!r}")
+            imported_objects = []
+            if spec.get("asset_id") is not None:
+                obj, imported_objects = _import_gltf_asset(
+                    bpy, Matrix, Euler, Vector, scene, spec
                 )
             else:
-                raise ValueError(f"unsupported object kind {kind!r}")
-            obj = bpy.context.object
-            obj.dimensions = tuple(spec["dimensions"])
-            bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
-            obj.rotation_euler = tuple(spec.get("rotation", (0, 0, 0)))
-            bevel = float(spec.get("bevel", 0))
-            if bevel and kind == "box":
-                mod = obj.modifiers.new(name="Soft edges", type="BEVEL")
-                mod.width = min(bevel, min(spec["dimensions"]) * 0.48)
-                mod.segments = 3
-                obj.modifiers.new(name="Weighted normals", type="WEIGHTED_NORMAL")
-            if kind == "sphere":
-                for poly in obj.data.polygons:
-                    poly.use_smooth = True
+                if kind == "box":
+                    bpy.ops.mesh.primitive_cube_add(size=1, location=spec["location"])
+                elif kind == "cylinder":
+                    bpy.ops.mesh.primitive_cylinder_add(
+                        vertices=32, radius=0.5, depth=1, location=spec["location"]
+                    )
+                elif kind == "sphere":
+                    bpy.ops.mesh.primitive_uv_sphere_add(
+                        segments=32, ring_count=16, radius=0.5, location=spec["location"]
+                    )
+                elif kind == "cone":
+                    bpy.ops.mesh.primitive_cone_add(
+                        vertices=32, radius1=0.5, radius2=0.12, depth=1, location=spec["location"]
+                    )
+                else:
+                    bpy.ops.mesh.primitive_torus_add(
+                        major_segments=48, minor_segments=12, location=spec["location"]
+                    )
+                obj = bpy.context.object
+                obj.dimensions = tuple(spec["dimensions"])
+                bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+                obj.rotation_euler = tuple(spec.get("rotation", (0, 0, 0)))
+                bevel = float(spec.get("bevel", 0))
+                if bevel and kind == "box":
+                    mod = obj.modifiers.new(name="Soft edges", type="BEVEL")
+                    mod.width = min(bevel, min(spec["dimensions"]) * 0.48)
+                    mod.segments = 3
+                    obj.modifiers.new(name="Weighted normals", type="WEIGHTED_NORMAL")
+                if kind == "sphere":
+                    for poly in obj.data.polygons:
+                        poly.use_smooth = True
             obj.name = spec["name"]
-            if plan["mode"] == "master":
+            if plan["mode"] == "master" and not imported_objects:
                 obj.data.materials.append(materials[spec["material"]])
-            if spec["name"] == "RoomShell":
+            if spec["name"] == "RoomShell" and not imported_objects:
                 bpy.ops.object.mode_set(mode="EDIT")
                 bpy.ops.mesh.select_all(action="SELECT")
                 bpy.ops.mesh.flip_normals()
@@ -198,11 +228,14 @@ def _run(plan_path: str) -> None:
             for key in spec["keyframes"]:
                 obj.location = tuple(key["location"])
                 obj.keyframe_insert(data_path="location", frame=key["frame"])
+            visibility_targets = imported_objects or [obj]
             for key in spec.get("visibility_keyframes", []):
-                obj.hide_render = not bool(key["visible"])
-                obj.keyframe_insert(data_path="hide_render", frame=key["frame"])
+                for target in visibility_targets:
+                    target.hide_render = not bool(key["visible"])
+                    target.keyframe_insert(data_path="hide_render", frame=key["frame"])
             _linearize_action(obj)
-            _constantize_action_path(obj, "hide_render")
+            for target in visibility_targets:
+                _constantize_action_path(target, "hide_render")
         for spec in scene_data["lights"]:
             light_kind = spec.get("kind", "area").upper()
             light = bpy.data.lights.new(spec["name"], type=light_kind)
@@ -786,6 +819,67 @@ def _fingerprint(scene: object) -> str:
             )
             rows[-1] += (tuple(keyframes),)
     return hashlib.sha256(json.dumps(rows, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _import_gltf_asset(bpy, Matrix, Euler, Vector, scene, spec):
+    """Import a glTF hierarchy and fit its world-space bounds to ObjectSpec.dimensions."""
+    path = spec.get("asset_path")
+    if not isinstance(path, str) or not os.path.isabs(path):
+        raise RuntimeError(f"Asset {spec.get('asset_id')!r} has no absolute worker path")
+    extension = os.path.splitext(path)[1].lower()
+    try:
+        with open(path, "rb") as stream:
+            header = stream.read(12)
+    except OSError as exc:
+        raise RuntimeError(f"Asset {spec.get('asset_id')!r} could not be read: {exc}") from exc
+    if extension == ".blend" or header.startswith(b"BLENDER"):
+        raise RuntimeError(
+            f"Asset {spec.get('asset_id')!r} is a Blender .blend file, which can execute "
+            "Python on load; only .glb files can be imported as geometry"
+        )
+    if extension != ".glb":
+        raise RuntimeError(
+            f"Asset {spec.get('asset_id')!r} has unsupported geometry format {extension!r}; "
+            "only .glb files can be imported as geometry"
+        )
+    if not hasattr(bpy.ops.import_scene, "gltf"):
+        raise RuntimeError("Blender's bundled glTF importer is unavailable under this startup mode")
+
+    existing = set(scene.objects)
+    result = bpy.ops.import_scene.gltf(filepath=path)
+    if "FINISHED" not in result:
+        raise RuntimeError(f"glTF importer did not finish for Asset {spec.get('asset_id')!r}")
+    imported = [obj for obj in scene.objects if obj not in existing]
+    meshes = [obj for obj in imported if obj.type == "MESH"]
+    if not meshes:
+        raise RuntimeError(f"Asset {spec.get('asset_id')!r} imported no mesh geometry")
+
+    corners = [obj.matrix_world @ Vector(corner) for obj in meshes for corner in obj.bound_box]
+    minimum = Vector(tuple(min(point[axis] for point in corners) for axis in range(3)))
+    maximum = Vector(tuple(max(point[axis] for point in corners) for axis in range(3)))
+    try:
+        factors = asset_fit_factors(minimum, maximum, spec["dimensions"])
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Asset {spec.get('asset_id')!r} cannot be fitted to declared dimensions: {exc}"
+        ) from exc
+    center = (minimum + maximum) * 0.5
+
+    root = bpy.data.objects.new(spec["name"], None)
+    scene.collection.objects.link(root)
+    root.matrix_world = Matrix.Identity(4)
+    imported_set = set(imported)
+    center_transform = Matrix.Translation(-center)
+    for obj in imported:
+        if obj.parent not in imported_set:
+            original_world = obj.matrix_world.copy()
+            obj.parent = root
+            obj.matrix_world = center_transform @ original_world
+    root.location = tuple(spec["location"])
+    root.scale = factors
+    root.rotation_euler = Euler(tuple(spec.get("rotation", (0, 0, 0))), "XYZ")
+    bpy.context.view_layer.update()
+    return root, imported
 
 
 if __name__ == "__main__":

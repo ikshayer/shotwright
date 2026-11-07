@@ -41,7 +41,12 @@ def _describe_file(path: Path) -> UploadedFile:
     """Describe a local file for upload validation without reading all of it."""
     with path.open("rb") as handle:
         head = handle.read(MAGIC_HEADER_BYTES)
-    return UploadedFile(filename=path.name, head=head, size_bytes=path.stat().st_size)
+    return UploadedFile(
+        filename=path.name,
+        head=head,
+        size_bytes=path.stat().st_size,
+        source_path=path,
+    )
 
 
 def _error_payload(exc: Exception) -> dict[str, Any]:

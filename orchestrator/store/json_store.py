@@ -9,6 +9,8 @@ and "the current record" is the highest version on disk. There is deliberately n
 head pointer or combined manifest to keep in sync with the version files:
 
     project.json
+    assets/registry/<asset_id>.json
+    assets/models/<asset_id>/<filename>
     episodes/<episode_id>/episode.json
     episodes/<episode_id>/edits/timeline.json
     episodes/<episode_id>/scripts/<script_id>/v0001.json
@@ -50,6 +52,7 @@ from orchestrator.domain.base import (
     VersionedEntity,
 )
 from orchestrator.domain.entities import (
+    Asset,
     CameraProfile,
     Episode,
     EpisodeOutput,
@@ -91,6 +94,7 @@ _LIFECYCLE_FIELDS = frozenset({
 })
 # Only declared filesystem references are paths; prose and identifiers are not.
 _PATH_FIELDS: dict[type[Entity], tuple[str, ...]] = {
+    Asset: ("file_path",),
     Location: ("blend_path",),
     Shot: ("audio_refs", "framing_panel_ref"),
     Timeline: ("audio_tracks",),
@@ -131,6 +135,7 @@ class _Layout:
 
 
 _LAYOUTS: dict[type[Entity], _Layout] = {
+    Asset: _Layout(False, "asset_id", lambda i, _e: f"assets/registry/{i}.json"),
     Project: _Layout(False, None, lambda _i, _e: "project.json"),
     Episode: _Layout(False, "episode_id", lambda i, _e: f"episodes/{i}/episode.json"),
     Timeline: _Layout(False, "episode_id", lambda i, _e: f"episodes/{i}/edits/timeline.json"),
@@ -425,10 +430,16 @@ class ProjectStore:
                 outputs.append(output)
             return tuple(outputs)
 
+    def verify_asset(self, asset_id: str) -> Asset:
+        """Load an asset record and verify its project-local bytes before use."""
+        asset = self.load(Asset, asset_id)
+        self._verify_asset_artifact(asset)
+        return asset
+
     # -- writes ----------------------------------------------------------------------
 
     def save(self, entity: Entity, *, expected_version: int) -> int:
-        """Save Project/Episode/Timeline with optimistic concurrency.
+        """Save an unversioned entity with optimistic concurrency.
 
         Use expected_version=0 to create. The returned token increments on each
         save and is persisted as `_store_version`, separate from domain fields.
@@ -856,6 +867,53 @@ class ProjectStore:
             raise _invalid(f"cannot hash ShotOutput artifact {output.relative_path}: {exc}", cause=exc) from exc
         if digest.hexdigest() != output.content_sha256:
             raise _invalid(f"ShotOutput artifact hash mismatch: {output.relative_path}")
+
+    def _verify_asset_artifact(self, asset: Asset) -> None:
+        if not asset.file_path or not asset.checksum:
+            raise _invalid(f"Asset {asset.asset_id!r} has no registered file path or checksum")
+        try:
+            artifact = self._root.resolve(asset.file_path)
+        except ContainmentError as exc:
+            raise _invalid(
+                f"Asset {asset.asset_id!r} path escapes the project: {exc}", cause=exc
+            ) from exc
+        if not artifact.is_file():
+            raise _invalid(
+                f"Asset {asset.asset_id!r} file is missing or not a file: {asset.file_path}"
+            )
+        extension = Path(asset.file_path).suffix.lower()
+        try:
+            with artifact.open("rb") as stream:
+                head = stream.read(12)
+        except OSError as exc:
+            raise _invalid(
+                f"cannot read Asset {asset.asset_id!r} file {asset.file_path}: {exc}", cause=exc
+            ) from exc
+        if extension == ".blend" or head.startswith(b"BLENDER"):
+            raise _invalid(
+                f"Asset {asset.asset_id!r} is a Blender .blend file, which can execute Python "
+                "on load; only .glb files can be imported as geometry"
+            )
+        if extension != ".glb":
+            raise _invalid(
+                f"Asset {asset.asset_id!r} has unsupported geometry format {extension!r}; "
+                "only .glb files can be imported as geometry"
+            )
+        digest = hashlib.sha256()
+        try:
+            with artifact.open("rb") as stream:
+                while block := stream.read(1024 * 1024):
+                    digest.update(block)
+        except OSError as exc:
+            raise _invalid(
+                f"cannot hash Asset {asset.asset_id!r} file {asset.file_path}: {exc}", cause=exc
+            ) from exc
+        actual = digest.hexdigest()
+        if actual != asset.checksum:
+            raise _invalid(
+                f"Asset {asset.asset_id!r} checksum mismatch: registered {asset.checksum}, "
+                f"actual {actual}"
+            )
 
     def _verify_episode_output_artifact(self, output: EpisodeOutput) -> None:
         try:

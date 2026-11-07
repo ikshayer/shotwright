@@ -15,6 +15,7 @@ import json
 from typing import Literal, cast
 
 from orchestrator.adapters.blender.scene import (
+    AssetBinding,
     RenderRequest,
     SceneSpec,
     american_living_room,
@@ -28,6 +29,7 @@ from orchestrator.adapters.postprofile.profile import (
 from orchestrator.adapters.postprofile.runner import DegradeRequest
 from orchestrator.domain.base import Invalidation
 from orchestrator.domain.entities import (
+    Asset,
     CameraProfile,
     PostProfile,
     Project,
@@ -56,7 +58,11 @@ def compose_render_request(
             f"Shot {shot.shot_id!r} references missing scene look {shot.scene_look!r}"
         )
     if require_built_scene:
-        scene, anomaly_precomposed = _load_scene_spec(store, shot)
+        loaded_scene = _load_scene_spec(store, shot)
+        # Retain compatibility with callers and test doubles written before the
+        # persisted scene artifact began carrying asset bindings.
+        scene, anomaly_precomposed = loaded_scene[:2]
+        saved_asset_bindings = loaded_scene[2] if len(loaded_scene) > 2 else {}
     else:
         # Temporary selection here; FR-15 (P0) belongs on Shot.location_id resolving to
         # a Location record for intra-episode location and camera reuse. Scene look also
@@ -68,6 +74,19 @@ def compose_render_request(
                 look=cast(Literal["bright", "low_key"], shot.scene_look)
             )
         anomaly_precomposed = False
+        saved_asset_bindings = {}
+    asset_bindings = _asset_bindings_for_scene(store, scene)
+    if require_built_scene:
+        current_asset_bindings = {
+            asset_id: (binding.checksum, binding.file_path)
+            for asset_id, binding in asset_bindings.items()
+        }
+        if current_asset_bindings != saved_asset_bindings:
+            raise JobError(
+                JobErrorKind.INVALID_MANIFEST,
+                f"built scene for Shot {shot.shot_id!r} has asset checksums or paths "
+                "that no longer match the project registry; rebuild the scene",
+            )
     request = RenderRequest(
         shot_id=shot.shot_id,
         shot_version=shot.version,
@@ -78,6 +97,7 @@ def compose_render_request(
         duration_sec=shot.duration_sec,
         camera_profile=camera_profile,
         scene=scene,
+        asset_bindings=asset_bindings,
         event_sec=shot.event_sec,
         anomaly=shot.anomaly,
         anomaly_precomposed=anomaly_precomposed,
@@ -120,7 +140,9 @@ def camera_profile_for_render(store: ProjectStore, shot: Shot) -> CameraProfile:
     return CameraProfile.model_validate(resolved.model_dump(mode="python"))
 
 
-def _load_scene_spec(store: ProjectStore, shot: Shot) -> tuple[SceneSpec, bool]:
+def _load_scene_spec(
+    store: ProjectStore, shot: Shot
+) -> tuple[SceneSpec, bool, dict[str, tuple[str, str]]]:
     outputs = store.list_shot_outputs(
         shot.shot_id, episode_id=shot.episode_id,
         record_version=shot.version, kind=ShotOutputKind.SCENE,
@@ -153,18 +175,47 @@ def _load_scene_spec(store: ProjectStore, shot: Shot) -> tuple[SceneSpec, bool]:
         # Dropping it here also means a changed `motion_seed` actually takes effect on a
         # re-render instead of being pinned by the stored scene.
         scene_payload = plan.get("scene")
+        saved_asset_bindings: dict[str, tuple[str, str]] = {}
         if isinstance(scene_payload, dict):
-            scene_payload = {k: v for k, v in scene_payload.items() if k != "camera_keyframes"}
+            object_payloads = scene_payload.get("objects", [])
+            if not isinstance(object_payloads, list):
+                raise TypeError("scene plan objects must be a list")
+            for item in object_payloads:
+                if not isinstance(item, dict) or item.get("asset_id") is None:
+                    continue
+                asset_id = item["asset_id"]
+                checksum = item.get("asset_checksum")
+                file_path = item.get("asset_file_path")
+                if not isinstance(asset_id, str) or not isinstance(checksum, str) or not isinstance(file_path, str):
+                    raise TypeError("scene plan asset reference is missing its checksum or file path")
+                identity = (checksum, file_path)
+                if asset_id in saved_asset_bindings and saved_asset_bindings[asset_id] != identity:
+                    raise ValueError(
+                        f"scene plan has inconsistent bindings for Asset {asset_id!r}"
+                    )
+                saved_asset_bindings[asset_id] = identity
+            scene_payload = {
+                key: value for key, value in scene_payload.items()
+                if key != "camera_keyframes"
+            }
+            scene_payload["objects"] = [
+                {
+                    key: value for key, value in item.items()
+                    if key not in {"asset_checksum", "asset_file_path", "asset_path"}
+                }
+                if isinstance(item, dict) else item
+                for item in object_payloads
+            ]
         scene = SceneSpec.model_validate(scene_payload)
         stored_anomaly = plan.get("anomaly")
         if shot.anomaly is None:
             if stored_anomaly is not None:
                 raise ValueError("scene plan carries an anomaly absent from the current Shot")
-            return scene, False
+            return scene, False, saved_asset_bindings
         expected_anomaly = shot.anomaly.model_dump(mode="json")
         if stored_anomaly != expected_anomaly or plan.get("event_sec") != shot.event_sec:
             raise ValueError("scene plan anomaly or event_sec does not match the current Shot")
-        return scene, True
+        return scene, True, saved_asset_bindings
     except (OSError, TypeError, ValueError) as exc:
         raise JobError(
             JobErrorKind.INVALID_MANIFEST,
@@ -172,6 +223,34 @@ def _load_scene_spec(store: ProjectStore, shot: Shot) -> tuple[SceneSpec, bool]:
             shot_id=shot.shot_id,
             cause=exc,
         ) from exc
+
+
+def _asset_bindings_for_scene(
+    store: ProjectStore, scene: SceneSpec
+) -> dict[str, AssetBinding]:
+    """Resolve referenced IDs to verified, immutable project asset identities."""
+    bindings: dict[str, AssetBinding] = {}
+    for asset_id in sorted({item.asset_id for item in scene.objects if item.asset_id is not None}):
+        assert asset_id is not None
+        try:
+            asset: Asset = store.verify_asset(asset_id)
+        except RecordNotFound as exc:
+            raise JobError(
+                JobErrorKind.INVALID_MANIFEST,
+                f"scene references missing Asset {asset_id!r}",
+                cause=exc,
+            ) from exc
+        if asset.file_path is None or asset.checksum is None:
+            raise JobError(
+                JobErrorKind.INVALID_MANIFEST,
+                f"Asset {asset_id!r} has no registered file path or checksum",
+            )
+        bindings[asset_id] = AssetBinding(
+            asset_id=asset.asset_id,
+            file_path=asset.file_path,
+            checksum=asset.checksum,
+        )
+    return bindings
 
 
 def compose_post_profile_spec(
