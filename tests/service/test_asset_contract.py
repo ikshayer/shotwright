@@ -169,7 +169,11 @@ def _asset(
     )
 
 
-def _create_asset_response(root: ProjectRoot, asset: Asset, source_path: Path):
+def _create_asset_response(
+    root: ProjectRoot,
+    asset: Asset | dict[str, Any],
+    source_path: Path,
+):
     app = create_app(settings=Settings(project_root=root.path.parent), token=_API_TOKEN)
     route = next((
         item for item in app.routes
@@ -181,7 +185,7 @@ def _create_asset_response(root: ProjectRoot, asset: Asset, source_path: Path):
         app,
         method="POST",
         path=route.path,
-        asset=asset.model_dump(mode="json"),
+        asset=asset.model_dump(mode="json") if isinstance(asset, Asset) else asset,
         filename=source_path.name,
         content=source_path.read_bytes(),
     )
@@ -195,11 +199,16 @@ def _create_asset_response(root: ProjectRoot, asset: Asset, source_path: Path):
 
 def _register_asset(root: ProjectRoot, asset: Asset, source_path: Path) -> Asset:
     response = _create_asset_response(root, asset, source_path)
-    assert response.status_code in {200, 201}, (
+    assert response.status_code == 200, (
         f"create_asset did not register {asset.asset_id!r}: "
         f"status={response.status_code}, body={response.text!r}"
     )
-    return ProjectStore(ProjectRoot(root.path)).load(Asset, asset.asset_id)
+    registered = ProjectStore(ProjectRoot(root.path)).load(Asset, asset.asset_id)
+    assert response.json() == registered.model_dump(mode="json"), (
+        f"create_asset success body was not the persisted Asset dump; "
+        f"observed {response.json()!r}, expected {registered.model_dump(mode='json')!r}"
+    )
+    return registered
 
 
 def _project_store(path: Path, *, asset_ids: list[str] | None = None) -> tuple[ProjectRoot, ProjectStore]:
@@ -365,9 +374,16 @@ def test_register_refuses_missing_reuse_right_or_source_without_writing(
         root.resolve("incoming/figure.glb"),
     )
     observed = response.text
-    assert response.status_code in {400, 422}, (
+    assert response.status_code == 422, (
         f"create_asset accepted missing {missing_field} provenance: "
         f"status={response.status_code}, body={observed!r}"
+    )
+    body = response.json()
+    assert body.get("error") == "validation_error", (
+        f"provenance refusal did not use validation_error; observed {body!r}"
+    )
+    assert body.get("field") == "asset", (
+        f"provenance refusal did not identify field 'asset'; observed {body!r}"
     )
     assert missing_field in observed.lower(), (
         "provenance rejection did not name the missing reuse right or source; "
@@ -401,6 +417,110 @@ def test_generated_asset_without_source_url_registers_with_license(tmp_path: Pat
     )
 
 
+@pytest.mark.parametrize(
+    ("filename", "payload", "expected_type"),
+    [
+        ("derived.glb", None, "model"),
+        ("derived.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 32, "image"),
+    ],
+)
+def test_registration_without_a_type_derives_it_from_the_bytes(
+    tmp_path: Path, filename: str, payload: bytes | None, expected_type: str
+) -> None:
+    """Amendment 3: an omitted type is measured from the magic bytes, never guessed.
+
+    The defect this guards is exact. ``type`` used to default to ``"model"``, so a PNG
+    registered without a declared type was recorded as a model and the registry asserted
+    something about its own contents that nothing had ever measured. Requiring the field
+    instead was the wrong correction -- it made the FastAPI app fail to construct -- so
+    the field is optional and derived. A declared type is still validated against the
+    detected kind; that is covered by the kind/type matrix test.
+    """
+    root, _store = _project_store(tmp_path / "project")
+    content = _tiny_glb((0.5, 1.0, 2.0)) if payload is None else payload
+    root.write_bytes(f"incoming/{filename}", content)
+    metadata = _asset(asset_id="derived-type").model_dump(mode="json")
+    metadata.pop("type")
+
+    response = _create_asset_response(
+        root, metadata, root.resolve(f"incoming/{filename}")
+    )
+    assert response.status_code == 200, (
+        f"create_asset refused {filename} carrying no declared type; a type is supposed "
+        f"to be derived: status={response.status_code}, body={response.text!r}"
+    )
+    registered = ProjectStore(ProjectRoot(root.path)).load(Asset, "derived-type")
+    assert registered.type == expected_type, (
+        f"{filename} registered with no declared type should derive {expected_type!r} "
+        f"from its magic bytes; observed {registered.type!r}"
+    )
+@pytest.mark.parametrize(
+    ("detected_kind", "asset_type", "accepted"),
+    [
+        ("model", "model", True),
+        ("model", "texture", False),
+        ("model", "hdri", False),
+        ("model", "reference", False),
+        ("model", "image", False),
+        ("model", "video", False),
+        ("image", "texture", True),
+        ("image", "hdri", True),
+        ("image", "reference", True),
+        ("image", "image", True),
+        ("image", "model", False),
+        ("image", "video", False),
+        ("video", "reference", True),
+        ("video", "video", True),
+        ("video", "model", False),
+        ("video", "texture", False),
+        ("video", "hdri", False),
+        ("video", "image", False),
+    ],
+)
+def test_registration_type_matches_detected_media_kind(
+    tmp_path: Path,
+    detected_kind: str,
+    asset_type: str,
+    accepted: bool,
+) -> None:
+    root, _store = _project_store(tmp_path / "project")
+    if detected_kind == "model":
+        filename = "fixture.glb"
+        content = _tiny_glb((0.5, 1.0, 2.0))
+    elif detected_kind == "image":
+        filename = "fixture.png"
+        content = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+    else:
+        filename = "fixture.mp4"
+        content = b"\x00\x00\x00\x18ftypisom" + b"\x00" * 24
+    source = root.resolve(f"incoming/{filename}")
+    root.write_bytes(f"incoming/{filename}", content)
+    asset = _asset(asset_id="typed-asset", asset_type=asset_type)
+
+    if accepted:
+        registered = _register_asset(root, asset, source)
+        assert registered.type == asset_type, (
+            f"accepted {detected_kind} asset lost declared type {asset_type!r}; "
+            f"observed {registered.type!r}"
+        )
+    else:
+        before = _tree_snapshot(root.path)
+        response = _create_asset_response(root, asset, source)
+        observed = response.text.lower()
+        assert response.status_code == 422, (
+            f"create_asset accepted {detected_kind} bytes declared as {asset_type!r}: "
+            f"status={response.status_code}, body={response.text!r}"
+        )
+        assert asset_type in observed and detected_kind in observed, (
+            f"type contradiction did not name declared type {asset_type!r} and detected "
+            f"kind {detected_kind!r}; observed {response.text!r}"
+        )
+        assert _tree_snapshot(root.path) == before, (
+            f"type contradiction wrote project files; observed before={before!r}, "
+            f"after={_tree_snapshot(root.path)!r}"
+        )
+
+
 def test_gltf_registration_is_refused_for_external_buffers(tmp_path: Path) -> None:
     root, _store = _project_store(tmp_path / "project")
     gltf = json.dumps({
@@ -416,9 +536,13 @@ def test_gltf_registration_is_refused_for_external_buffers(tmp_path: Path) -> No
         root.resolve("incoming/figure.gltf"),
     )
     observed = response.text.lower()
-    assert response.status_code in {400, 422}, (
+    assert response.status_code == 400, (
         f"create_asset accepted non-self-contained .gltf: "
         f"status={response.status_code}, body={response.text!r}"
+    )
+    body = response.json()
+    assert body.get("error") == "upload_rejected", (
+        f".gltf refusal did not use upload_rejected; observed {body!r}"
     )
     assert ".gltf" in observed and "external" in observed and "buffer" in observed, (
         f".gltf refusal did not name external buffers; observed {response.text!r}"
@@ -429,29 +553,34 @@ def test_gltf_registration_is_refused_for_external_buffers(tmp_path: Path) -> No
     )
 
 
-def test_blend_geometry_is_refused_for_executable_content(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root, store = _project_store(tmp_path / "project", asset_ids=["unsafe-blend"])
-    seeded = _seed_asset_file(
+def test_blend_registration_is_refused_for_executable_content(tmp_path: Path) -> None:
+    root, _store = _project_store(tmp_path / "project")
+    root.write_bytes("incoming/unsafe.blend", b"fixture blend content")
+    before = _tree_snapshot(root.path)
+
+    response = _create_asset_response(
         root,
         _asset(asset_id="unsafe-blend"),
-        "assets/models/unsafe-blend/unsafe.blend",
-        b"fixture blend content",
+        root.resolve("incoming/unsafe.blend"),
     )
-
-    observed = _refuse_asset_geometry(
-        store,
-        "unsafe-blend",
-        monkeypatch,
-        asset_record=seeded,
-    ).lower()
-    assert "unsafe-blend" in observed and ".blend" in observed, (
-        f"geometry refusal did not name the asset and .blend format; observed {observed!r}"
+    observed = response.text.lower()
+    assert response.status_code == 400, (
+        f"create_asset accepted executable .blend content: "
+        f"status={response.status_code}, body={response.text!r}"
+    )
+    body = response.json()
+    assert body.get("error") == "upload_rejected", (
+        f".blend refusal did not use upload_rejected; observed {body!r}"
+    )
+    assert ".blend" in observed, (
+        f".blend registration refusal did not name its format; observed {response.text!r}"
     )
     assert any(reason in observed for reason in ("python", "executable", "script")), (
-        f".blend refusal did not explain its executable-content risk; observed {observed!r}"
+        f".blend refusal did not explain executable content; observed {response.text!r}"
+    )
+    assert _tree_snapshot(root.path) == before, (
+        f".blend registration refusal wrote project files; observed before={before!r}, "
+        f"after={_tree_snapshot(root.path)!r}"
     )
 
 
