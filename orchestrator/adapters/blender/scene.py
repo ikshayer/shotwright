@@ -1024,9 +1024,23 @@ def _append_figure(
     keyframes: list[dict[str, object]],
     visibility_keyframes: list[dict[str, object]],
 ) -> None:
-    name = "FR20AnomalyFigure"
-    if any(item["name"] == name for item in (*scene["objects"], *scene["lights"])):
-        raise ValueError(f"anomaly figure object name {name!r} is already in the scene")
+    # UNMEASURED PLACEHOLDER: these normalized body proportions are chosen for
+    # visual review. The declared dimensions remain the authoritative envelope.
+    components = (
+        ("FR20AnomalyFigure", "sphere", (0.62, 0.72, 0.46), (0.0, 0.0, 0.15)),
+        ("FR20AnomalyFigureHead", "sphere", (0.42, 0.56, 0.14), (0.0, 0.0, 0.43)),
+        ("FR20AnomalyFigureLeftArm", "box", (0.20, 0.66, 0.34), (-0.40, 0.0, 0.15)),
+        ("FR20AnomalyFigureRightArm", "box", (0.20, 0.66, 0.34), (0.40, 0.0, 0.15)),
+        ("FR20AnomalyFigureLeftLeg", "box", (0.26, 0.58, 0.47), (-0.15, 0.0, -0.265)),
+        ("FR20AnomalyFigureRightLeg", "box", (0.26, 0.58, 0.47), (0.15, 0.0, -0.265)),
+        ("FR20AnomalyFigureLeftFoot", "box", (0.30, 1.0, 0.045), (-0.15, 0.0, -0.4775)),
+        ("FR20AnomalyFigureRightFoot", "box", (0.30, 1.0, 0.045), (0.15, 0.0, -0.4775)),
+    )
+    component_names = {component[0] for component in components}
+    existing_names = {item["name"] for item in (*scene["objects"], *scene["lights"])}
+    collisions = sorted(component_names & existing_names)
+    if collisions:
+        raise ValueError(f"anomaly figure object name {collisions[0]!r} is already in the scene")
     material_name = "FR20AnomalySilhouette"
     materials = scene["materials"]
     existing_material = next((item for item in materials if item["name"] == material_name), None)
@@ -1043,17 +1057,37 @@ def _append_figure(
             f"material {material_name!r} conflicts with the anomaly silhouette material"
         )
     base = (position[0], position[1], position[2] + height_m / 2)
-    scene["objects"].append(
-        {
-            "name": name,
-            "kind": "box",
-            "location": list(base),
-            "dimensions": [width_m, depth_m, height_m],
-            "material": material_name,
-            "keyframes": keyframes,
-            "visibility_keyframes": visibility_keyframes,
-        }
-    )
+    # Each constant offset is applied to the same derived path samples. No part
+    # has its own timing or transform, so the silhouette moves as one rigid body.
+    for part_name, kind, size_fractions, offset_fractions in components:
+        dimensions = (
+            size_fractions[0] * width_m,
+            size_fractions[1] * depth_m,
+            size_fractions[2] * height_m,
+        )
+        offset = (
+            offset_fractions[0] * width_m,
+            offset_fractions[1] * depth_m,
+            offset_fractions[2] * height_m,
+        )
+        part_keyframes = [
+            {
+                **key,
+                "location": [key["location"][axis] + offset[axis] for axis in range(3)],
+            }
+            for key in keyframes
+        ]
+        scene["objects"].append(
+            {
+                "name": part_name,
+                "kind": kind,
+                "location": [base[axis] + offset[axis] for axis in range(3)],
+                "dimensions": list(dimensions),
+                "material": material_name,
+                "keyframes": part_keyframes,
+                "visibility_keyframes": [dict(key) for key in visibility_keyframes],
+            }
+        )
 
 
 def _validate_figure_geometry(

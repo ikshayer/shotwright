@@ -171,6 +171,41 @@ def _keyframe_location_series(value: object) -> list[tuple[str, list[tuple[int, 
     return series
 
 
+def _anomaly_figure_objects(value: object) -> list[dict[str, object]]:
+    """Return worker objects emitted for the FR-20 figure, independent of scene nesting."""
+    figures: list[dict[str, object]] = []
+
+    def visit(item: object) -> None:
+        if isinstance(item, dict):
+            name = item.get("name")
+            if (
+                isinstance(name, str)
+                and name.startswith("FR20AnomalyFigure")
+                and isinstance(item.get("dimensions"), (list, tuple))
+                and isinstance(item.get("location"), (list, tuple))
+            ):
+                figures.append(item)
+            for child in item.values():
+                visit(child)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return figures
+
+
+def _triplet(item: object, field: str) -> tuple[float, float, float]:
+    value = item.get(field) if isinstance(item, dict) else None
+    assert isinstance(value, (list, tuple)) and len(value) == 3, (
+        f"figure object had no 3D {field}; observed {item!r}"
+    )
+    assert all(isinstance(part, (int, float)) for part in value), (
+        f"figure object had nonnumeric {field}; observed {value!r}"
+    )
+    return tuple(float(part) for part in value)  # type: ignore[return-value]
+
+
 def _visibility_keyframe_series(value: object) -> list[tuple[str, list[tuple[int, bool]]]]:
     """Keep visibility changes grouped by their worker object."""
     series: list[tuple[str, list[tuple[int, bool]]]] = []
@@ -220,6 +255,21 @@ def test_two_builds_of_one_render_request_are_byte_identical() -> None:
     )
 
 
+def test_two_builds_of_one_linear_walk_request_are_byte_identical() -> None:
+    request = _request().model_copy(update={
+        "anomaly": _valid_anomaly("linear_walk_path"),
+        "event_sec": 0.5,
+    })
+    first = _canonical_plan_bytes(build_scene_plan(request))
+    second = _canonical_plan_bytes(build_scene_plan(request))
+
+    assert first == second, (
+        "same linear_walk_path request produced different canonical worker plans; "
+        f"observed SHA-256 {hashlib.sha256(first).hexdigest()} and "
+        f"{hashlib.sha256(second).hexdigest()}"
+    )
+
+
 def test_linear_walk_plan_contains_distinct_effective_location_samples(tmp_path: Path) -> None:
     """Keyframe locations must differ; keyframe metadata alone is insufficient."""
     from tests.service.test_anomaly_composition_contract import _compose_plan
@@ -242,6 +292,160 @@ def test_linear_walk_plan_contains_distinct_effective_location_samples(tmp_path:
         "linear walk keyframes did not vary one worker object's location across frames; "
         f"observed grouped keyframes {series!r}"
     )
+
+
+def test_anomaly_figure_is_a_humanoid_silhouette_inside_its_declared_envelope(
+    tmp_path: Path,
+) -> None:
+    from tests.service.test_anomaly_composition_contract import _compose_plan
+
+    anomaly = _valid_anomaly("static_silhouette")
+    plan = _compose_plan(tmp_path, anomaly, event_sec=0.5)
+    figures = _anomaly_figure_objects(plan)
+
+    assert len(figures) >= 6, (
+        "FR-20 figure was not composed from a torso, head, two arms, and two legs; "
+        f"observed figure objects {[item.get('name') for item in figures]!r}"
+    )
+    kinds = [item.get("kind") for item in figures]
+    assert kinds.count("sphere") >= 2 and kinds.count("box") >= 4, (
+        "FR-20 humanoid silhouette did not use smooth sphere masses and simple limb boxes; "
+        f"observed kinds {kinds!r}"
+    )
+    part_names = [str(item.get("name", "")).casefold() for item in figures]
+    for part in ("torso", "head", "arm", "leg"):
+        is_named_part = any(part in name for name in part_names)
+        if part == "torso":
+            is_named_part = is_named_part or "fr20anomalyfigure" in part_names
+        assert is_named_part, (
+            f"FR-20 silhouette plan omitted a named {part} part; observed {part_names!r}"
+        )
+    forbidden_face_parts = ("face", "eye", "mouth", "nose")
+    assert not any(token in name for token in forbidden_face_parts for name in part_names), (
+        f"FR-20 silhouette plan included face detail; observed {part_names!r}"
+    )
+
+    position = anomaly.position
+    x_min = position[0] - anomaly.width_m / 2
+    x_max = position[0] + anomaly.width_m / 2
+    y_min = position[1] - anomaly.depth_m / 2
+    y_max = position[1] + anomaly.depth_m / 2
+    z_min = position[2]
+    z_max = position[2] + anomaly.height_m
+    observed_extents: list[tuple[float, float, float, float, float, float]] = []
+    for item in figures:
+        location = _triplet(item, "location")
+        dimensions = _triplet(item, "dimensions")
+        part_min = tuple(location[index] - dimensions[index] / 2 for index in range(3))
+        part_max = tuple(location[index] + dimensions[index] / 2 for index in range(3))
+        observed_extents.append((*part_min, *part_max))
+        assert part_min[0] >= x_min - 1e-6 and part_max[0] <= x_max + 1e-6, (
+            f"figure part exceeded declared width_m envelope: {item!r}"
+        )
+        assert part_min[1] >= y_min - 1e-6 and part_max[1] <= y_max + 1e-6, (
+            f"figure part exceeded declared depth_m envelope: {item!r}"
+        )
+        assert part_min[2] >= z_min - 1e-6 and part_max[2] <= z_max + 1e-6, (
+            f"figure part exceeded declared height_m envelope: {item!r}"
+        )
+
+    figure_z_min = min(extents[2] for extents in observed_extents)
+    figure_z_max = max(extents[5] for extents in observed_extents)
+    assert figure_z_min == pytest.approx(z_min, abs=1e-6), (
+        f"figure no longer rests at the declared position; observed bottom {figure_z_min}"
+    )
+    assert figure_z_max - figure_z_min == pytest.approx(anomaly.height_m, abs=1e-6), (
+        "humanoid figure height did not preserve the declared bounding-box envelope; "
+        f"observed {figure_z_max - figure_z_min:.6f} m, expected {anomaly.height_m:.6f} m"
+    )
+
+
+def test_linear_walk_moves_every_silhouette_part_as_one_rigid_body(tmp_path: Path) -> None:
+    from tests.service.test_anomaly_composition_contract import _compose_plan
+
+    anomaly = _valid_anomaly("linear_walk_path")
+    plan = _compose_plan(tmp_path, anomaly, event_sec=1.0)
+    figures = _anomaly_figure_objects(plan)
+
+    assert len(figures) >= 6, (
+        "linear walk plan did not contain all humanoid silhouette parts; observed "
+        f"{[item.get('name') for item in figures]!r}"
+    )
+    keyframes_by_name: dict[str, dict[int, tuple[float, float, float]]] = {}
+    visibility_by_name: dict[str, object] = {}
+    for item in figures:
+        name = str(item.get("name"))
+        raw_keys = item.get("keyframes")
+        assert isinstance(raw_keys, (list, tuple)), (
+            f"anomaly figure part {name!r} had no motion keyframes; observed {raw_keys!r}"
+        )
+        locations: dict[int, tuple[float, float, float]] = {}
+        for key in raw_keys:
+            assert isinstance(key, dict), f"invalid keyframe on {name!r}: {key!r}"
+            frame = key.get("frame")
+            assert isinstance(frame, int), f"invalid frame on {name!r}: {key!r}"
+            locations[frame] = _triplet(key, "location")
+        assert len(locations) >= 2, (
+            f"anomaly figure part {name!r} did not receive the full walk path; "
+            f"observed {locations!r}"
+        )
+        keyframes_by_name[name] = locations
+        visibility_by_name[name] = item.get("visibility_keyframes")
+
+    reference_name = next(iter(keyframes_by_name))
+    reference = keyframes_by_name[reference_name]
+    reference_frames = set(reference)
+    reference_first_frame = min(reference_frames)
+    reference_start = reference[reference_first_frame]
+    for name, locations in keyframes_by_name.items():
+        assert set(locations) == reference_frames, (
+            f"figure parts used different animation frames: {reference_name!r} has "
+            f"{sorted(reference_frames)!r}, {name!r} has {sorted(locations)!r}"
+        )
+        part_start = locations[reference_first_frame]
+        for frame in sorted(reference_frames):
+            expected_delta = tuple(
+                reference[frame][index] - reference_start[index] for index in range(3)
+            )
+            actual_delta = tuple(
+                locations[frame][index] - part_start[index] for index in range(3)
+            )
+            assert actual_delta == pytest.approx(expected_delta, abs=1e-6), (
+                f"figure part {name!r} moved independently at frame {frame}; "
+                f"expected shared translation {expected_delta!r}, got {actual_delta!r}"
+            )
+
+    assert len({repr(value) for value in visibility_by_name.values()}) == 1, (
+        "figure parts do not share one visibility window; observed "
+        f"{visibility_by_name!r}"
+    )
+    reference_last = reference[max(reference_frames)]
+    observed_walk = tuple(reference_last[index] - reference_start[index] for index in range(3))
+    expected_walk = tuple(anomaly.path[-1][index] - anomaly.path[0][index] for index in range(3))
+    assert observed_walk == pytest.approx(expected_walk, abs=1e-6), (
+        f"rigid anomaly figure did not traverse the declared path; "
+        f"observed {observed_walk!r}, expected {expected_walk!r}"
+    )
+
+
+def test_linear_walk_still_rejects_declared_geometry_constraint_violations(
+    tmp_path: Path,
+) -> None:
+    from tests.service.test_anomaly_composition_contract import _compose_plan
+
+    anomaly = _valid_anomaly("linear_walk_path", minimum_distance_m=100.0)
+    with pytest.raises(ValueError, match="minimum_distance_m"):
+        _compose_plan(tmp_path, anomaly, event_sec=1.0)
+
+
+def test_linear_walk_still_rejects_projected_height_over_the_declared_limit(
+    tmp_path: Path,
+) -> None:
+    from tests.service.test_anomaly_composition_contract import _compose_plan
+
+    anomaly = _valid_anomaly("linear_walk_path", maximum_on_frame_height_px=1)
+    with pytest.raises(ValueError, match="exceeds 1 px"):
+        _compose_plan(tmp_path, anomaly, event_sec=1.0)
 
 
 @pytest.mark.parametrize("kind", _ANOMALY_KINDS)
