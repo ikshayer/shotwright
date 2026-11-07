@@ -118,3 +118,50 @@ Baseline: **1529 passed, 34 skipped**, ruff clean.
 Say explicitly what this contract left ambiguous and anything you believe it got wrong. Four
 amendments were needed on the FR-03 contract and twelve defects were found; assume this one
 is wrong somewhere too, and say where.
+
+---
+
+# Amendment 1 — four gaps, resolved in flight
+
+Both agents found the same class of gap and the implementer resolved each sensibly. The
+merged tree was green on the first attempt — **1535 passed, 34 skipped, 0 failed** — which
+had not happened before in sixteen rounds here. That is not evidence the contract was right;
+it is evidence the gaps were resolved consistently by judgement. Recording them so they are
+decisions rather than accidents.
+
+## A1.1 — the figure's anchor is the declared envelope's centre
+
+"`location` exactly as the primitive path uses them" was ambiguous: the primitive body
+sphere sits at an internal offset of `(0, 0, 0.15)` within the figure, so the two readings
+place the mesh differently. **The anchor is the centre of the declared envelope**, which is
+also what `_validate_figure_geometry` measures against, so placement and the FR-20 geometric
+checks agree by construction. Any future keyframe convention must use the same anchor.
+
+## A1.2 — binding resolution runs after anomaly expansion
+
+Composition scans scene objects to build `asset_bindings`, but the anomaly figure is appended
+during anomaly expansion — so a naive ordering binds nothing. **Binding resolution runs
+against the final plan objects**, after expansion. `_asset_bindings_for_scene()` in
+`service/compose.py` includes the anomaly's asset id. This was the seam flagged as most
+likely to break, and it is the one that needed the ordering change.
+
+## A1.3 — `ObjectSpec.material` on an asset-backed figure
+
+Decision 2 said not to apply `FR20AnomalySilhouette` but did not say what to use instead,
+and `ObjectSpec` requires `kind` and `material`. The primitive material is omitted so the
+asset's own registered material and texture survive. A future change here must not
+reintroduce an override: discarding the asset's texture would silently undo what FR-03
+registered.
+
+## A1.4 — omitting `None` is explicit, not automatic
+
+The store serialises with `model_dump(mode="json")` and no `exclude_none`, so "omitted when
+`None`" needs a deliberate mechanism rather than being a property of pydantic. It is handled
+explicitly; do not assume a future optional field on these models is omitted for free.
+
+## Unverified
+
+Composition and plan output were exercised, but **no Blender render was run** against an
+asset-backed figure. The generated entity at
+`D:\Work\comfyui-trellis\ComfyUI\output\3D\entity_00001_.glb` has not been registered through
+FR-03 or placed in a shot. That end-to-end run is the obvious next proof and is still owed.
