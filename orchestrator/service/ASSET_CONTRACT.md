@@ -204,3 +204,77 @@ asset_fit_factors(source_min, source_max, desired) -> tuple[float, float, float]
 
 raising `ValueError` naming the degenerate axis when an extent is non-finite or <= 1e-9.
 Tests load `worker.py` by path and call it directly. Both agents bind to this name.
+
+---
+
+# Amendment 2 — pinning what Amendment 1 left open
+
+Amendment 1 fixed five defects and introduced four ambiguities, which both agents found.
+**Amendments supersede the text above them**; where Decision 1-4 still read otherwise,
+the amendments win and the original wording stands only as a record of what was wrong.
+
+## A2.1 — the registration wire shape, pinned to what exists
+
+The test author assumed provenance arrived as a JSON blob in a multipart field named
+`asset`; the implementer built a flat `Form()` field per model field. **The flat form wins**
+— it gives OpenAPI a real schema and per-field validation, and the CLI maps onto it
+directly. Pinned:
+
+- **Request:** `POST /projects/{project_id}/assets`, multipart. The file goes in the field
+  named **`files`**. Every `AssetRegistration` field is **its own form field**
+  (`license`, `source_url`, `provider`, `generated`, `type`, `attribution`,
+  `attribution_surface_required`, `reuse_scope`, `asset_id`, `expected_version`).
+- **Success: `200`**, body is the `Asset` dump.
+- **Provenance refusal: `422`**, `error: "validation_error"`, `field: "asset"`.
+- **Format or size refusal: `upload_rejected`**, raised by the shared upload allowlist.
+- **CLI:** `--file <path>` plus `--data '<flat JSON object>'`.
+
+## A2.2 — where each refusal lives
+
+Three distinct gates. Amendment 1 blurred them.
+
+| Format | Registration | Used as geometry |
+|---|---|---|
+| `.glb` | accepted | accepted |
+| `.png` / image, video | **accepted**, with provenance | **refused**, naming asset and format |
+| `.gltf` | **refused** — external buffers, not self-contained, not magic-verifiable | unreachable |
+| `.blend` | **refused** — executable content on load | unreachable |
+
+`.blend` and `.gltf` never register, so they can never reach the geometry seam; test their
+refusal **at registration**. Test the PNG-as-geometry refusal **at the geometry seam**.
+
+A1.3's "refused only if something imports it as geometry" was too absolute, as the
+implementer noted: provenance, magic-byte agreement and size caps still reject an upload.
+Registration is permissive **about kind**, not about validity.
+
+## A2.3 — `asset_fit_factors`, pinned exactly
+
+Tuples are `(x, y, z)` floats. Per axis,
+`factor[i] = desired[i] / (source_max[i] - source_min[i])`. A non-finite extent or one
+`<= 1e-9` raises `ValueError` naming the axis with the literal letter `x`, `y` or `z`.
+Verified by direct call: source extents `(0.5, 1.0, 2.0)` with declared `(0.4, 0.7, 1.8)`
+give `(0.8, 0.7, 0.9)`; a zero `y` extent reports
+`source extent on y axis is degenerate (0.0); declared dimensions cannot be applied`.
+
+## A2.4 — `type` must not default to `model`
+
+The implementer found this and it is a real defect: `AssetRegistration.type` defaults to
+`"model"`, so **a PNG registered without a declared type is recorded as a model**. The
+registry would then assert something false about its own contents, and `search_assets` and
+any future texture or HDRI consumer would read that lie. The validated `MediaKind` is
+already in hand and unused.
+
+- **Remove the default. `type` is required.** The caller must say what the asset is.
+- **Validate the claim against the detected kind**, refusing a contradiction with `422`:
+  kind `model` admits only `model`; kind `image` admits `texture`, `hdri`, `reference`,
+  `image`; kind `video` admits `reference`, `video`.
+
+`Asset.type` stays `str` rather than becoming an enum — `hdri` and `texture` must remain
+expressible, and widening the entity is out of scope here.
+
+## A2.5 — corrections to Amendment 1's wording
+
+- A1.1's "the only legitimate test changes" meant **modifications to existing tests**. New
+  files and new cases are required by the same amendment and were never in doubt.
+- `max_model_bytes = 500 MiB`, matching the video cap, is accepted; FR-23 makes it
+  overridable in settings.
