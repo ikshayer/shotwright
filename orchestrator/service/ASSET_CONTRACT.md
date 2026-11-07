@@ -185,3 +185,22 @@ stands.
 
 The pinned static-plan hash `92de3ed358ecc3bc4ef91127db9c6a12254e86a59f255645c03579b60b03788a`
 is unchanged, verified by a full local run, not by report.
+
+### A1.5 addendum — where the pure function lives, measured
+
+`worker.py` opens "Standalone Blender-side worker. Keep imports limited to Blender and
+stdlib", so it **cannot** import a helper from `orchestrator.*`. Nor can the factors be
+precomputed into the plan: they depend on the imported mesh's bounds, which are unknown
+until import. So the arithmetic must stay in `worker.py`.
+
+That is still testable. `import bpy` is **function-local**, not module-level, and I
+confirmed by loading the file with `importlib` under the project interpreter that
+`worker.py` imports cleanly outside Blender. The fit computation therefore becomes a
+**module-level pure function in `worker.py`**:
+
+```
+asset_fit_factors(source_min, source_max, desired) -> tuple[float, float, float]
+```
+
+raising `ValueError` naming the degenerate axis when an extent is non-finite or <= 1e-9.
+Tests load `worker.py` by path and call it directly. Both agents bind to this name.
