@@ -83,7 +83,7 @@ class ObjectSpec(_FrozenModel):
     asset_id: str | None = None
     location: Vec3
     dimensions: Vec3
-    material: str
+    material: str | None = None
     rotation: Vec3 = (0.0, 0.0, 0.0)
     bevel: float = Field(default=0.0, ge=0)
     keyframes: tuple[KeyframeSpec, ...] = ()
@@ -188,6 +188,8 @@ class SceneSpec(_FrozenModel):
             raise ValueError("material names must be unique")
         known = set(material_names)
         for obj in self.objects:
+            if obj.material is None and obj.asset_id is not None:
+                continue
             if obj.material not in known:
                 raise ValueError(
                     f"object {obj.name!r} references unknown material {obj.material!r}"
@@ -334,29 +336,6 @@ def build_scene_plan(request: RenderRequest) -> dict[str, object]:
     validate_camera_placement(request)
     frame_end = 1 if request.mode == "preview" else max(1, math.ceil(request.duration_sec * 60))
     scene_data = _scene_payload(request, camera)
-    referenced_assets: set[str] = set()
-    for spec, item in zip(request.scene.objects, scene_data["objects"], strict=True):
-        if spec.asset_id is None:
-            continue
-        referenced_assets.add(spec.asset_id)
-        binding = request.asset_bindings.get(spec.asset_id)
-        if binding is None:
-            raise ValueError(
-                f"object {spec.name!r} references unregistered asset {spec.asset_id!r}"
-            )
-        if binding.asset_id != spec.asset_id:
-            raise ValueError(
-                f"asset binding key {spec.asset_id!r} does not match its record id "
-                f"{binding.asset_id!r}"
-            )
-        item["asset_checksum"] = binding.checksum
-        item["asset_file_path"] = binding.file_path
-    unused_bindings = set(request.asset_bindings) - referenced_assets
-    if unused_bindings:
-        raise ValueError(
-            "render request carries unused asset binding(s): "
-            + ", ".join(sorted(unused_bindings))
-        )
     if profile.camera_mode == "non_cctv":
         scene_data["camera_keyframes"] = [
             keyframe.model_dump(mode="json")
@@ -393,6 +372,33 @@ def build_scene_plan(request: RenderRequest) -> dict[str, object]:
             )
         plan["event_sec"] = request.event_sec
         plan["anomaly"] = request.anomaly.model_dump(mode="json")
+
+    referenced_assets: set[str] = set()
+    for item in scene_data["objects"]:
+        asset_id = item.get("asset_id")
+        if asset_id is None:
+            continue
+        if not isinstance(asset_id, str):
+            raise TypeError(f"object {item.get('name')!r} has an invalid asset id")
+        referenced_assets.add(asset_id)
+        binding = request.asset_bindings.get(asset_id)
+        if binding is None:
+            raise ValueError(
+                f"object {item['name']!r} references unregistered asset {asset_id!r}"
+            )
+        if binding.asset_id != asset_id:
+            raise ValueError(
+                f"asset binding key {asset_id!r} does not match its record id "
+                f"{binding.asset_id!r}"
+            )
+        item["asset_checksum"] = binding.checksum
+        item["asset_file_path"] = binding.file_path
+    unused_bindings = set(request.asset_bindings) - referenced_assets
+    if unused_bindings:
+        raise ValueError(
+            "render request carries unused asset binding(s): "
+            + ", ".join(sorted(unused_bindings))
+        )
     return plan
 
 
@@ -937,6 +943,8 @@ def _scene_payload(request: RenderRequest, camera: dict[str, object]) -> dict[st
     for spec, item in zip(scene.objects, payload["objects"], strict=True):
         if spec.asset_id is None:
             item.pop("asset_id", None)
+        if spec.material is None:
+            item.pop("material", None)
         if not spec.visibility_keyframes:
             item.pop("visibility_keyframes", None)
         for key, default in (("rotation", [0.0, 0.0, 0.0]), ("bevel", 0.0)):
@@ -1028,6 +1036,7 @@ def _apply_anomaly(
             depth_m=anomaly.depth_m,
             keyframes=figure_keys,
             visibility_keyframes=visibility,
+            asset_id=anomaly.figure_asset_id,
         )
         return
 
@@ -1079,6 +1088,7 @@ def _append_figure(
     depth_m: float,
     keyframes: list[dict[str, object]],
     visibility_keyframes: list[dict[str, object]],
+    asset_id: str | None = None,
 ) -> None:
     # UNMEASURED PLACEHOLDER: these normalized body proportions are chosen for
     # visual review. The declared dimensions remain the authoritative envelope.
@@ -1092,27 +1102,50 @@ def _append_figure(
         ("FR20AnomalyFigureLeftFoot", "box", (0.30, 1.0, 0.045), (-0.15, 0.0, -0.4775)),
         ("FR20AnomalyFigureRightFoot", "box", (0.30, 1.0, 0.045), (0.15, 0.0, -0.4775)),
     )
-    component_names = {component[0] for component in components}
+    component_names = (
+        {"FR20AnomalyFigure"}
+        if asset_id is not None
+        else {component[0] for component in components}
+    )
     existing_names = {item["name"] for item in (*scene["objects"], *scene["lights"])}
     collisions = sorted(component_names & existing_names)
     if collisions:
         raise ValueError(f"anomaly figure object name {collisions[0]!r} is already in the scene")
     material_name = "FR20AnomalySilhouette"
-    materials = scene["materials"]
-    existing_material = next((item for item in materials if item["name"] == material_name), None)
-    if existing_material is None:
-        materials.append(
+    if asset_id is None:
+        materials = scene["materials"]
+        existing_material = next(
+            (item for item in materials if item["name"] == material_name), None
+        )
+        if existing_material is None:
+            materials.append(
+                {
+                    "name": material_name,
+                    "color": [0.015, 0.015, 0.015, 1.0],
+                    "roughness": 0.92,
+                }
+            )
+        elif existing_material["color"] != [0.015, 0.015, 0.015, 1.0]:
+            raise ValueError(
+                f"material {material_name!r} conflicts with the anomaly silhouette material"
+            )
+    base = (position[0], position[1], position[2] + height_m / 2)
+    if asset_id is not None:
+        scene["objects"].append(
             {
-                "name": material_name,
-                "color": [0.015, 0.015, 0.015, 1.0],
-                "roughness": 0.92,
+                "name": "FR20AnomalyFigure",
+                # The asset path bypasses primitive creation; this required closed-set
+                # discriminator remains inert for imported geometry.
+                "kind": "sphere",
+                "asset_id": asset_id,
+                "location": list(base),
+                "dimensions": [width_m, depth_m, height_m],
+                "keyframes": [dict(key) for key in keyframes],
+                "visibility_keyframes": [dict(key) for key in visibility_keyframes],
             }
         )
-    elif existing_material["color"] != [0.015, 0.015, 0.015, 1.0]:
-        raise ValueError(
-            f"material {material_name!r} conflicts with the anomaly silhouette material"
-        )
-    base = (position[0], position[1], position[2] + height_m / 2)
+        return
+
     # Each constant offset is applied to the same derived path samples. No part
     # has its own timing or transform, so the silhouette moves as one rigid body.
     for part_name, kind, size_fractions, offset_fractions in components:

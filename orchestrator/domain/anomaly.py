@@ -4,7 +4,7 @@ from __future__ import annotations
 from itertools import pairwise
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_serializer
 
 Vec3 = tuple[float, float, float]
 
@@ -28,8 +28,23 @@ class _FigureAnomaly(_Anomaly):
     height_m: float = Field(gt=0)
     width_m: float = Field(gt=0)
     depth_m: float = Field(gt=0)
+    figure_asset_id: str | None = None
     minimum_distance_m: float = Field(gt=0)
     maximum_on_frame_height_px: StrictInt = Field(gt=0)
+
+    @field_validator("figure_asset_id")
+    @classmethod
+    def nonempty_figure_asset_id(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("figure_asset_id must not be empty")
+        return value
+
+    @model_serializer(mode="wrap")
+    def omit_missing_figure_asset_id(self, handler) -> dict[str, object]:
+        payload = handler(self)
+        if self.figure_asset_id is None:
+            payload.pop("figure_asset_id", None)
+        return payload
 
 
 class StaticSilhouette(_FigureAnomaly):

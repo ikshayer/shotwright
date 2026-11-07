@@ -75,7 +75,11 @@ def compose_render_request(
             )
         anomaly_precomposed = False
         saved_asset_bindings = {}
-    asset_bindings = _asset_bindings_for_scene(store, scene)
+    asset_bindings = _asset_bindings_for_scene(
+        store,
+        scene,
+        figure_asset_id=getattr(shot.anomaly, "figure_asset_id", None),
+    )
     if require_built_scene:
         current_asset_bindings = {
             asset_id: (binding.checksum, binding.file_path)
@@ -226,11 +230,17 @@ def _load_scene_spec(
 
 
 def _asset_bindings_for_scene(
-    store: ProjectStore, scene: SceneSpec
+    store: ProjectStore,
+    scene: SceneSpec,
+    *,
+    figure_asset_id: str | None = None,
 ) -> dict[str, AssetBinding]:
     """Resolve referenced IDs to verified, immutable project asset identities."""
     bindings: dict[str, AssetBinding] = {}
-    for asset_id in sorted({item.asset_id for item in scene.objects if item.asset_id is not None}):
+    asset_ids = {item.asset_id for item in scene.objects if item.asset_id is not None}
+    if figure_asset_id is not None:
+        asset_ids.add(figure_asset_id)
+    for asset_id in sorted(asset_ids):
         assert asset_id is not None
         try:
             asset: Asset = store.verify_asset(asset_id)
