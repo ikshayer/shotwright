@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -16,9 +17,10 @@ from orchestrator.adapters.blender.scene import (
     build_scene_plan,
 )
 from orchestrator.domain import entities
-from orchestrator.domain.base import ShotStatus
-from orchestrator.domain.entities import CameraProfile, Location, Shot
+from orchestrator.domain.base import FramingStatus, ShotStatus
+from orchestrator.domain.entities import CameraProfile, Location, Review, Shot
 from orchestrator.platform.containment import ProjectRoot
+from orchestrator.service.approval import approve_shot
 from orchestrator.service.compose import compose_render_request
 from orchestrator.service.dependencies import revise_location
 from orchestrator.store.json_store import ProjectStore
@@ -73,21 +75,30 @@ def _placement(
 
 def _location(
     *,
-    look: str = "bright",
+    scene_look: str = "bright",
+    base_shell: str = "american_living_room",
     placements: list[Any] | None = None,
     asset_ids: list[str] | None = None,
     location_id: str = _ROOM_ID,
 ) -> Location:
-    """Use the assumed Location.look field; the contract leaves its name open."""
-    assert "look" in Location.model_fields, (
-        "this test assumes Location.look stores the base shell's bright/low_key choice; "
-        f"observed Location fields {sorted(Location.model_fields)!r}"
-    )
-    assert "placements" in Location.model_fields, (
-        "Location did not expose the contract's placements collection; "
-        f"observed Location fields {sorted(Location.model_fields)!r}"
-    )
-    values: dict[str, object] = {"location_id": location_id, "look": look}
+    """Build a Location and identify any missing contract fields clearly."""
+    required_fields = {
+        "location_id",
+        "base_shell",
+        "scene_look",
+        "placements",
+        "asset_ids",
+    }
+    for field in sorted(required_fields):
+        assert field in Location.model_fields, (
+            f"Location did not expose the required {field!r} field; "
+            f"observed Location fields {sorted(Location.model_fields)!r}"
+        )
+    values: dict[str, object] = {
+        "location_id": location_id,
+        "base_shell": base_shell,
+        "scene_look": scene_look,
+    }
     if placements is not None:
         values["placements"] = placements
     if asset_ids is not None:
@@ -150,20 +161,21 @@ def _location_asset_plan(
     return plan, registered.checksum
 
 
-@pytest.mark.parametrize("look", ["bright", "low_key"])
+@pytest.mark.parametrize("scene_look", ["bright", "low_key"])
 def test_empty_location_composes_the_direct_procedural_room_byte_for_byte(
     tmp_path: Path,
-    look: str,
+    scene_look: str,
 ) -> None:
-    _root, store = _project_store(tmp_path / look)
-    location = _location(look=look)
+    _root, store = _project_store(tmp_path / scene_look)
+    location = _location(scene_look=scene_look)
     _put_location_and_link_shot(store, location)
 
     observed = _canonical_scene_bytes(_compose(store).scene)
-    expected = _canonical_scene_bytes(american_living_room(look=look))
+    expected = _canonical_scene_bytes(american_living_room(look=scene_look))
 
     assert observed == expected, (
-        f"empty Location scene bytes differed from american_living_room(look={look!r}); "
+        f"empty Location scene bytes differed from "
+        f"american_living_room(look={scene_look!r}); "
         f"observed SHA-256 {hashlib.sha256(observed).hexdigest()}, "
         f"expected {hashlib.sha256(expected).hexdigest()}"
     )
@@ -322,23 +334,68 @@ def test_placement_revision_stales_only_approved_shots_using_that_location(
     _root, store = _project_store(tmp_path / "invalidation")
     before = _location(placements=[_placement()])
     store.create(before)
-    store.create(Shot(
-        shot_id="approved-dependent",
-        episode_id="ep1",
+
+    def create_approved_shot(
+        shot_id: str,
+        *,
+        location_id: str,
+        dependencies: list[str],
+        review_id: str,
+    ) -> None:
+        shot = Shot(
+            shot_id=shot_id,
+            episode_id="ep1",
+            location_id=location_id,
+            dependencies=dependencies,
+            duration_sec=4.0,
+        )
+        store.create(shot)
+        for status in (
+            ShotStatus.PLANNED,
+            ShotStatus.BLOCKING,
+            ShotStatus.BUILDING,
+            ShotStatus.REVIEW,
+        ):
+            changes: dict[str, object] = {"status": status}
+            if status is ShotStatus.BUILDING:
+                changes["framing_status"] = FramingStatus.APPROVED
+            shot = shot.model_copy(update=changes)
+            store.update(
+                shot,
+                expected_version=store.load_with_version(
+                    Shot, shot_id, episode_id="ep1"
+                )[1],
+            )
+        review = Review(
+            review_id=review_id,
+            target_id=shot_id,
+            target_version=shot.version,
+            created_at=datetime.now(UTC),
+            approval_state=ShotStatus.APPROVED,
+        )
+        store.save(review, expected_version=0)
+        approve_shot(
+            store,
+            shot_id,
+            episode_id="ep1",
+            review_id=review_id,
+            expected_version=store.load_with_version(
+                Shot, shot_id, episode_id="ep1"
+            )[1],
+        )
+
+    create_approved_shot(
+        "approved-dependent",
         location_id=_ROOM_ID,
         dependencies=[_ROOM_ID],
-        duration_sec=4.0,
-        status=ShotStatus.APPROVED,
-        approval_review_id="review-dependent",
-    ))
-    store.create(Shot(
-        shot_id="approved-unrelated",
-        episode_id="ep1",
+        review_id="review-dependent",
+    )
+    create_approved_shot(
+        "approved-unrelated",
         location_id="different-room",
-        duration_sec=4.0,
-        status=ShotStatus.APPROVED,
-        approval_review_id="review-unrelated",
-    ))
+        dependencies=[],
+        review_id="review-unrelated",
+    )
     current, token = store.load_with_version(Location, _ROOM_ID)
     moved = _placement(position=(4.5, 4.0, 0.0))
     revised = current.model_copy(update={
