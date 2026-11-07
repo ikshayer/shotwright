@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from orchestrator.domain.entities import (
     CameraProfile,
     Episode,
+    Location,
     PostProfile,
     Project,
     RubricScores,
@@ -42,6 +43,16 @@ class ShotRevision(BaseModel):
 
 class EpisodeCreation(BaseModel):
     episode: Episode
+
+
+class LocationCreation(BaseModel):
+    location: Location
+
+
+class LocationRevision(BaseModel):
+    location: Location
+    expected_version: int = Field(ge=1)
+    episode_ids: list[str]
 
 
 class CameraProfileCreation(BaseModel):
@@ -140,6 +151,8 @@ OPERATIONS = (
     Operation("create_camera_profile", "POST", "/projects/{project_id}/camera-profiles/{camera_id}", "Create a camera profile", True, "service.dependencies.create_camera_profile", CameraProfileCreation, _call("create_camera_profile")),
     Operation("create_post_profile", "POST", "/projects/{project_id}/post-profiles/{profile_name}", "Create a post profile", True, "service.dependencies.create_post_profile", PostProfileCreation, _call("create_post_profile")),
     Operation("create_episode", "POST", "/projects/{project_id}/episodes", "Create an episode", True, "service.dependencies.create_episode", EpisodeCreation, _call("create_episode")),
+    Operation("create_location", "POST", "/projects/{project_id}/locations/{location_id}", "Create a project Location with its base shell and placements", True, "service.dependencies.create_location", LocationCreation, _call("create_location")),
+    Operation("revise_location", "POST", "/projects/{project_id}/locations/{location_id}/revise", "Revise a Location and invalidate dependent shots", True, "service.dependencies.revise_location", LocationRevision, _call("revise_location")),
     Operation("list_projects", "GET", "/projects", "List projects", False, "store", None, _call("list_projects")),
     Operation("load_project", "GET", "/projects/{project_id}", "Load a project", False, "store", None, _call("load_project")),
     Operation("draft_script", "POST", "/projects/{project_id}/episodes/{episode_id}/scripts/draft", "Persist an agent-authored script", True, "service.dependencies.draft_script", ScriptDraft, _call("draft_script")),

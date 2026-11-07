@@ -576,6 +576,15 @@ def create_camera_profile(store: ProjectStore, profile: CameraProfile) -> Camera
         return profile
 
 
+def create_location(store: ProjectStore, location: Location) -> Location:
+    """Create a project-local Location record with placements at content version 1."""
+    with store.command():
+        location = store.validate_entity_payload(location)
+        store.load(Project)
+        store.create(location)
+        return location
+
+
 def create_post_profile(store: ProjectStore, profile: PostProfile) -> PostProfile:
     """Persist a new agent-authored PostProfile without overwriting an existing one."""
     with store.command():

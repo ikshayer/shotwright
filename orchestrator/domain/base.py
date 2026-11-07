@@ -82,12 +82,12 @@ class Invalidation(StrEnum):
 
 
 def post_only(default: Any = ..., **kwargs: Any) -> Any:
-    """Declare a CameraProfile field re-derivable without re-rendering (4.4)."""
+    """Declare a field re-derivable without a Blender render (4.4)."""
     return _tagged(default, Invalidation.POST_ONLY, **kwargs)
 
 
 def rebuild_triggering(default: Any = ..., **kwargs: Any) -> Any:
-    """Declare a CameraProfile field whose change invalidates renders (4.4)."""
+    """Declare a field whose change invalidates renders (4.4)."""
     return _tagged(default, Invalidation.REBUILD, **kwargs)
 
 
@@ -100,6 +100,14 @@ def _tagged(default: Any, kind: Invalidation, **kwargs: Any) -> Any:
     """
     extra = dict(kwargs.pop("json_schema_extra", {}) or {})
     extra["invalidation"] = kind.value
+    if "default_factory" in kwargs:
+        if default is not ...:
+            raise TypeError("a tagged field cannot specify both a default and a default_factory")
+        return Field(
+            default_factory=kwargs.pop("default_factory"),
+            json_schema_extra=extra,
+            **kwargs,
+        )
     return Field(default, json_schema_extra=extra, **kwargs)
 
 

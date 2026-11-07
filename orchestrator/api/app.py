@@ -16,6 +16,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from orchestrator.domain.entities import (
     CameraProfile,
     Episode,
+    Location,
     PostProfile,
     Project,
     RubricScores,
@@ -36,10 +37,12 @@ from orchestrator.service.compose import compose_render_request
 from orchestrator.service.dependencies import (
     create_camera_profile,
     create_episode,
+    create_location,
     create_post_profile,
     create_project,
     draft_script,
     propose_shots,
+    revise_location,
     revise_script,
     revise_shot,
 )
@@ -159,6 +162,21 @@ class OperationContext:
             _require_path_match(data, "project_id", episode.project_id)
             created = create_episode(self._store(data["project_id"]), episode)
             return created.model_dump(mode="json")
+        if operation == "create_location":
+            location = Location.model_validate(data["location"])
+            _require_path_match(data, "location_id", location.location_id)
+            created = create_location(self._store(data["project_id"]), location)
+            return created.model_dump(mode="json")
+        if operation == "revise_location":
+            location = Location.model_validate(data["location"])
+            _require_path_match(data, "location_id", location.location_id)
+            changed = revise_location(
+                self._store(data["project_id"]),
+                location,
+                expected_version=data["expected_version"],
+                episode_ids=data["episode_ids"],
+            )
+            return {"location": location.model_dump(mode="json"), "invalidated": list(changed)}
         if operation == "draft_script":
             script = Script.model_validate(data["script"])
             _require_path_match(data, "episode_id", script.episode_id)

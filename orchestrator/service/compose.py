@@ -16,6 +16,7 @@ from typing import Literal, cast
 
 from orchestrator.adapters.blender.scene import (
     AssetBinding,
+    ObjectSpec,
     RenderRequest,
     SceneSpec,
     american_living_room,
@@ -31,6 +32,7 @@ from orchestrator.domain.base import Invalidation
 from orchestrator.domain.entities import (
     Asset,
     CameraProfile,
+    Location,
     PostProfile,
     Project,
     Shot,
@@ -53,7 +55,11 @@ def compose_render_request(
     """Build the typed Blender request from the current Shot and referenced profile."""
     shot, _mutation_token = store.load_with_version(Shot, shot_id, episode_id=episode_id)
     camera_profile = camera_profile_for_render(store, shot)
-    if shot.scene_look is not None and shot.scene_look not in {"bright", "low_key"}:
+    if (
+        shot.location_id is None
+        and shot.scene_look is not None
+        and shot.scene_look not in {"bright", "low_key"}
+    ):
         raise ValueError(
             f"Shot {shot.shot_id!r} references missing scene look {shot.scene_look!r}"
         )
@@ -64,15 +70,7 @@ def compose_render_request(
         scene, anomaly_precomposed = loaded_scene[:2]
         saved_asset_bindings = loaded_scene[2] if len(loaded_scene) > 2 else {}
     else:
-        # Temporary selection here; FR-15 (P0) belongs on Shot.location_id resolving to
-        # a Location record for intra-episode location and camera reuse. Scene look also
-        # belongs on Location, not Shot: lighting is a property of place and time of day.
-        if shot.scene_look is None:
-            scene = american_living_room()
-        else:
-            scene = american_living_room(
-                look=cast(Literal["bright", "low_key"], shot.scene_look)
-            )
+        scene = _scene_for_shot(store, shot)
         anomaly_precomposed = False
         saved_asset_bindings = {}
     asset_bindings = _asset_bindings_for_scene(
@@ -110,6 +108,59 @@ def compose_render_request(
     )
     validate_camera_placement(request)
     return request
+
+
+def _scene_for_shot(store: ProjectStore, shot: Shot) -> SceneSpec:
+    """Build a Location's shell and placements, preserving legacy unbound shots."""
+    if shot.location_id is None:
+        if shot.scene_look is None:
+            return american_living_room()
+        if shot.scene_look not in {"bright", "low_key"}:
+            raise ValueError(
+                f"Shot {shot.shot_id!r} references missing scene look {shot.scene_look!r}"
+            )
+        return american_living_room(
+            look=cast(Literal["bright", "low_key"], shot.scene_look)
+        )
+
+    try:
+        location = store.load(Location, shot.location_id)
+    except RecordNotFound as exc:
+        raise JobError(
+            JobErrorKind.INVALID_MANIFEST,
+            f"Shot {shot.shot_id!r} references missing Location {shot.location_id!r}",
+            cause=exc,
+        ) from exc
+
+    if location.base_shell != "american_living_room":
+        raise JobError(
+            JobErrorKind.INVALID_MANIFEST,
+            f"Location {location.location_id!r} has unsupported base shell {location.base_shell!r}",
+        )
+    scene = american_living_room(look=location.scene_look)
+    if not location.placements:
+        return scene
+
+    objects = list(scene.objects)
+    names = {item.name for item in objects} | {item.name for item in scene.lights}
+    for index, placement in enumerate(location.placements, start=1):
+        name = f"LocationPlacement{index:03d}"
+        suffix = 2
+        while name in names:
+            name = f"LocationPlacement{index:03d}_{suffix:02d}"
+            suffix += 1
+        names.add(name)
+        objects.append(ObjectSpec(
+            name=name,
+            # ObjectSpec's closed primitive vocabulary is still required by the worker
+            # envelope; the worker imports the asset instead whenever asset_id is set.
+            kind="box",
+            asset_id=placement.asset_id,
+            location=placement.position,
+            dimensions=placement.dimensions,
+            rotation=placement.rotation,
+        ))
+    return scene.model_copy(update={"objects": tuple(objects)})
 
 
 def camera_profile_for_render(store: ProjectStore, shot: Shot) -> CameraProfile:

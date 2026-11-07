@@ -250,7 +250,19 @@ def revision_impact(
     elif isinstance(before, Location):
         if before.location_id != after.location_id:
             raise ValueError("cannot compare different Locations")
-        if before == after:
+        changed_fields = tuple(
+            name
+            for name in Location.model_fields
+            if name not in {"schema_version", "version", "supersedes"}
+            and getattr(before, name) != getattr(after, name)
+        )
+        # Untagged Location content remains conservatively rebuild-triggering. Explicit
+        # tags let the dependency graph honor a future post-only field without weakening
+        # the existing behavior for geometry provenance or camera rigs.
+        if not any(
+            field_invalidation(Location, name) is not Invalidation.POST_ONLY
+            for name in changed_fields
+        ):
             return ()
         candidates = (shot for shot in shots if before.location_id in shot.dependencies or shot.location_id == before.location_id)
     elif isinstance(before, CameraProfile):

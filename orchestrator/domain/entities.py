@@ -18,13 +18,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from datetime import date, datetime
 from enum import StrEnum
 from pathlib import PurePosixPath, PureWindowsPath
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import Field, StrictInt, field_serializer, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from .anomaly import AnomalySpec
 from .base import (
@@ -125,8 +134,7 @@ class Shot(VersionedEntity):
     # values still resolve from the latest profile for re-derivation.
     camera_profile_version: int | None = Field(None, ge=1)
     post_profile: str | None = None
-    # Placeholder until Location is implemented: scene look belongs on Location,
-    # because a room's lighting is a property of place and time of day, not Shot.
+    # Legacy scene look applies only when no Location is bound; a Location owns its look.
     scene_look: str | None = None
     camera_motion: str | None = None  # FR-30, non-CCTV profiles only
     beat_id: str | None = None
@@ -299,13 +307,68 @@ class ShotOutput(Entity):
         return self
 
 
+class AssetPlacement(BaseModel):
+    """A registered geometry asset's declared metre envelope and Location transform."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
+
+    asset_id: str
+    position: tuple[float, float, float]
+    dimensions: tuple[float, float, float]
+    rotation: tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+    @field_validator("asset_id")
+    @classmethod
+    def nonempty_asset_id(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("asset_id must not be empty")
+        return value
+
+    @field_validator("position", "dimensions", "rotation")
+    @classmethod
+    def finite_transform(
+        cls, value: tuple[float, float, float], info: Any,
+    ) -> tuple[float, float, float]:
+        if any(not math.isfinite(component) for component in value):
+            raise ValueError(f"{info.field_name} values must be finite")
+        if info.field_name == "dimensions" and any(component <= 0 for component in value):
+            raise ValueError("dimensions must be finite and strictly positive")
+        return value
+
+
 class Location(VersionedEntity):
     location_id: str
     blend_path: str | None = None
     geometry_provenance: str = ""
+    # Reserved for non-geometry resources such as textures or HDRIs.
     asset_ids: list[str] = Field(default_factory=list)
+    base_shell: Literal["american_living_room"] = rebuild_triggering(
+        "american_living_room"
+    )
+    scene_look: Literal["bright", "low_key"] = rebuild_triggering("bright")
+    placements: list[AssetPlacement] = rebuild_triggering(default_factory=list)
     camera_rigs: list[str] = Field(default_factory=list)
     approval_review_id: str | None = None
+
+    @field_validator("asset_ids")
+    @classmethod
+    def unique_nonempty_asset_ids(cls, value: list[str]) -> list[str]:
+        if any(not asset_id.strip() for asset_id in value):
+            raise ValueError("asset_ids must contain nonempty ids")
+        if len(value) != len(set(value)):
+            raise ValueError("asset_ids must be unique")
+        return value
+
+    @model_validator(mode="after")
+    def _asset_ids_exclude_placed_geometry(self) -> Location:
+        """Keep texture/HDRI references separate from geometry placements."""
+        overlaps = sorted(set(self.asset_ids) & {item.asset_id for item in self.placements})
+        if overlaps:
+            raise ValueError(
+                "asset_ids is reserved for non-geometry resources and cannot include placed "
+                f"geometry ids: {overlaps}"
+            )
+        return self
 
 
 class CameraProfile(VersionedEntity):
@@ -728,7 +791,7 @@ def _assert_camera_profile_fully_tagged() -> None:
 _assert_camera_profile_fully_tagged()
 
 __all__ = [
-    "ArtifactScheduleEntry", "Asset", "Attestation", "Beat", "CameraMode", "CameraProfile",
+    "ArtifactScheduleEntry", "Asset", "AssetPlacement", "Attestation", "Beat", "CameraMode", "CameraProfile",
     "Episode", "EpisodeOutput", "Export", "GenerationRun", "Invalidation", "Job", "Location",
     "PostProfile", "PostProfileEncode", "PostProfileOverlay", "PostStage", "Project",
     "Reference", "Review", "RubricScores",
