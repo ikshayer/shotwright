@@ -106,7 +106,7 @@ def build_assembly_command(
             output_receipt = shot_outputs.get(entry.ref)
             media = media_info.get(entry.ref)
             if output_receipt is None:
-                raise _invalid(f"Shot {entry.ref!r} has no delivered artifact; run degrade_shot first")
+                raise _invalid(f"Shot {entry.ref!r} has no delivered artifact; run degrade_media first")
             if output_receipt.kind is not ShotOutputKind.DEGRADED:
                 raise _invalid(f"Shot {entry.ref!r} receipt is not a delivered degraded output")
             if media is None:
@@ -275,7 +275,7 @@ class TimelineAssembler:
                 continue
             receipt = shot_outputs.get(entry.ref)
             if receipt is None:
-                raise _invalid(f"Shot {entry.ref!r} has no delivered artifact; run degrade_shot first")
+                raise _invalid(f"Shot {entry.ref!r} has no delivered artifact; run degrade_media first")
             source_path = self.root.resolve(receipt.relative_path)
             source_paths[entry.ref] = source_path
             media[entry.ref] = self._probe(source_path, deadline, entry.ref)

@@ -194,7 +194,7 @@ def _delivered_output(store: ProjectStore, shot: Shot) -> ShotOutput:
     )
     if not delivered:
         raise _invalid(
-            f"Shot {shot.shot_id!r} has no degraded output; run degrade_shot first"
+            f"Shot {shot.shot_id!r} has no degraded output; run degrade_media first"
         )
     return delivered[-1]
 

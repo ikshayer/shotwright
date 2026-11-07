@@ -1,11 +1,8 @@
 """Contract tests for mixed-profile episode assembly.
 
-API assumptions (the timeline contract leaves these names open):
+The service composes a timeline with ``compose_timeline(store, *, episode_id)``
+and persists/assembles it through ``assemble_episode(store, encoder, *, episode_id)``.
 
-* ``orchestrator.service.timeline.assemble_timeline(store, *, episode_id,
-  control)`` assembles synchronously. ``control`` implements the existing worker
-  supervisor shape: ``stopped()``, ``launch(argv, **kwargs)`` and
-  ``clear_process(process)``.
 * The timeline consumes each shot's current ``DEGRADED`` ShotOutput. Its source
   format is the PostProfile named by ``Shot.post_profile`` (or the project's
   output profile when that field is unset), and the artifact's encoded SAR agrees
@@ -16,27 +13,35 @@ API assumptions (the timeline contract leaves these names open):
   input clips conformed and re-encoded in one FFmpeg output pass, including a clip
   whose complete input spec already matches delivery.
 
-The fake supervisor captures composed argv and creates a deterministic output
-file. No FFmpeg binary, GPU, renderer, or network is used.
+The fake encoder runs the production command builder and creates a deterministic
+output file. No FFmpeg binary, GPU, renderer, or network is used.
 """
 
 from __future__ import annotations
 
 import hashlib
-import io
 import re
+from datetime import UTC, datetime
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from orchestrator.adapters.postprofile.profile import PostProfileSpec
+from orchestrator.adapters.timeline.runner import (
+    MediaInfo,
+    TimelineAssemblyResult,
+    build_assembly_command,
+)
+from orchestrator.domain.base import FramingStatus, ShotStatus
 from orchestrator.domain.entities import (
     Beat,
     Episode,
     PostProfile,
     PostProfileEncode,
     Project,
+    Review,
     Script,
     Shot,
     ShotOutput,
@@ -45,7 +50,8 @@ from orchestrator.domain.entities import (
 )
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.errors import JobError
-from orchestrator.store.json_store import ProjectStore
+from orchestrator.service.approval import approve_shot
+from orchestrator.store.json_store import ProjectStore, RecordNotFound
 
 _EPISODE_ID = "episode-1"
 _OUTPUT_BYTES = b"fake assembled episode bytes"
@@ -53,65 +59,62 @@ _LOWLIGHT_SHOT = "shot-lowlight"
 _SCRIPT_ORDER = (_LOWLIGHT_SHOT, "shot-dvr", "shot-consumer")
 
 
-class _CompletedProcess:
-    """Small Popen-compatible success result for the supervised FFmpeg call."""
-
-    pid = 4321
-
-    def __init__(self) -> None:
-        self.returncode = 0
-        self.stdout = io.BytesIO()
-        self.stderr = io.BytesIO()
-
-    def poll(self) -> int:
-        return self.returncode
-
-    def wait(self, timeout: float | None = None) -> int:
-        return self.returncode
-
-    def communicate(
-        self, input: bytes | None = None, timeout: float | None = None,
-    ) -> tuple[bytes, bytes]:
-        return b"", b""
-
-    def kill(self) -> None:
-        self.returncode = -9
-
-    def terminate(self) -> None:
-        self.returncode = -15
-
-
-class _FakeControl:
-    """Capture supervised argv and make the final MP4 exist for receipt hashing."""
+class _FakeEncoder:
+    """Exercise the real command builder and return a deterministic cut artifact."""
 
     def __init__(self, store: ProjectStore, root: ProjectRoot) -> None:
         self.store = store
         self.root = root
         self.commands: list[list[str]] = []
         self.timelines_at_encode: list[Timeline | None] = []
-        self.cleared: list[Any] = []
 
-    def stopped(self) -> bool:
-        return False
+    def run(
+        self,
+        *,
+        timeline: Timeline,
+        shot_outputs: dict[str, ShotOutput],
+        profile: PostProfileSpec,
+        output_relative: str,
+        log_relative: str,
+        font_relative: str | None = None,
+        budget_seconds: float | None = None,
+    ) -> TimelineAssemblyResult:
+        del font_relative, budget_seconds
+        try:
+            persisted = self.store.load(Timeline, _EPISODE_ID)
+        except RecordNotFound:
+            persisted = None
+        self.timelines_at_encode.append(persisted)
 
-    def launch(self, argv: list[str], **_kwargs: Any) -> _CompletedProcess:
-        command = [str(part) for part in argv]
+        media_info = {
+            "shot-dvr": MediaInfo(640, 480, Fraction(1), Fraction(12), Fraction(3)),
+            _LOWLIGHT_SHOT: MediaInfo(
+                352, 288, Fraction(12, 11), Fraction(10), Fraction(3),
+            ),
+            "shot-consumer": MediaInfo(640, 480, Fraction(1), Fraction(30), Fraction(3)),
+        }
+        source_paths = {
+            shot_id: self.root.resolve(receipt.relative_path)
+            for shot_id, receipt in shot_outputs.items()
+        }
+        command = build_assembly_command(
+            Path("ffmpeg"),
+            timeline=timeline,
+            shot_outputs=shot_outputs,
+            media_info=media_info,
+            source_paths=source_paths,
+            profile=profile,
+            output=self.root.resolve(output_relative),
+        )
         self.commands.append(command)
-        if self._is_encode(command):
-            try:
-                timeline = self.store.load(Timeline, _EPISODE_ID)
-            except Exception:
-                timeline = None
-            self.timelines_at_encode.append(timeline)
-
-            output = Path(command[-1])
-            if output.suffix.lower() == ".mp4":
-                output.parent.mkdir(parents=True, exist_ok=True)
-                output.write_bytes(_OUTPUT_BYTES)
-        return _CompletedProcess()
-
-    def clear_process(self, process: Any) -> None:
-        self.cleared.append(process)
+        self.root.write_bytes(output_relative, _OUTPUT_BYTES)
+        return TimelineAssemblyResult(
+            relative_path=output_relative,
+            log_path=log_relative,
+            content_sha256=hashlib.sha256(_OUTPUT_BYTES).hexdigest(),
+            ffmpeg_identity="fixture-build",
+            argv=tuple(command),
+        )
 
     @staticmethod
     def _is_encode(command: list[str]) -> bool:
@@ -135,6 +138,42 @@ def _profile(
             codec="libx264", preset="fast", crf=24,
             pix_fmt="yuv420p", threads=1,
         ),
+    )
+
+
+def _approve_fixture_shot(store: ProjectStore, shot: Shot) -> Shot:
+    for status in (
+        ShotStatus.PLANNED,
+        ShotStatus.BLOCKING,
+        ShotStatus.BUILDING,
+        ShotStatus.REVIEW,
+    ):
+        current, token = store.load_with_version(
+            Shot, shot.shot_id, episode_id=shot.episode_id,
+        )
+        changes: dict[str, Any] = {"status": status}
+        if status is ShotStatus.BUILDING:
+            changes["framing_status"] = FramingStatus.APPROVED
+        store.update(current.model_copy(update=changes), expected_version=token)
+
+    review_id = f"review-{shot.shot_id}"
+    store.save(
+        Review(
+            review_id=review_id,
+            target_id=shot.shot_id,
+            target_version=shot.version,
+            created_at=datetime.now(UTC),
+            approval_state=ShotStatus.APPROVED,
+        ),
+        expected_version=0,
+    )
+    _, token = store.load_with_version(Shot, shot.shot_id, episode_id=shot.episode_id)
+    return approve_shot(
+        store,
+        shot.shot_id,
+        episode_id=shot.episode_id,
+        review_id=review_id,
+        expected_version=token,
     )
 
 
@@ -199,11 +238,12 @@ def _fixture(
             duration_sec=3,
         )
         store.create(shot)
+        shot = _approve_fixture_shot(store, shot)
         if shot_id == omit_output_for:
             continue
 
         relative_path = f"delivered/{shot_id}.mp4"
-        clip_bytes = f"delivered clip for {shot_id}".encode("utf-8")
+        clip_bytes = f"delivered clip for {shot_id}".encode()
         root.write_bytes(relative_path, clip_bytes)
         store.append_shot_output(
             ShotOutput(
@@ -240,26 +280,25 @@ def _fixture(
     return {
         "root": root,
         "store": store,
-        "control": _FakeControl(store, root),
+        "encoder": _FakeEncoder(store, root),
         "delivery": delivery,
     }
 
 
 def _assemble(fixture: dict[str, Any]) -> Any:
-    # Lazy import keeps this test file collectable before the parallel implementation
-    # adds the API, so pytest reports individual contract failures rather than a
-    # collection error for the whole module.
-    from orchestrator.service.timeline import assemble_timeline
+    from orchestrator.service.timeline import assemble_episode, compose_timeline
 
-    return assemble_timeline(
+    timeline = compose_timeline(fixture["store"], episode_id=_EPISODE_ID)
+    return assemble_episode(
         fixture["store"],
+        fixture["encoder"],
         episode_id=_EPISODE_ID,
-        control=fixture["control"],
+        timeline=timeline,
     )
 
 
-def _encode_commands(control: _FakeControl) -> list[list[str]]:
-    return [command for command in control.commands if control._is_encode(command)]
+def _encode_commands(encoder: _FakeEncoder) -> list[list[str]]:
+    return [command for command in encoder.commands if encoder._is_encode(command)]
 
 
 def _graphs(commands: list[list[str]]) -> str:
@@ -275,37 +314,49 @@ def _graphs(commands: list[list[str]]) -> str:
 def test_mixed_profiles_conform_cif_by_display_aspect_ratio(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
     _assemble(fixture)
-    commands = _encode_commands(fixture["control"])
+    commands = _encode_commands(fixture["encoder"])
     graph = _graphs(commands)
 
     source_display_ar = Fraction(352 * 12, 288 * 11)
     delivery_display_ar = Fraction(640 * 1, 480 * 1)
+    source_storage_ar = Fraction(352, 288)
     assert source_display_ar == delivery_display_ar == Fraction(4, 3), (
         "the CIF source is 352x288 storage with SAR 12:11, so its display ratio is "
         f"4:3; observed source={source_display_ar}, delivery={delivery_display_ar}"
+    )
+    assert source_storage_ar != source_display_ar, (
+        "the fixture must distinguish storage aspect ratio from display aspect ratio"
     )
     assert len(commands) == 1, (
         f"expected one final encode for the mixed episode, observed {len(commands)}: "
         f"{commands!r}"
     )
-    assert "force_original_aspect_ratio=decrease" in graph, (
-        "the CIF branch must fit using the input display aspect ratio; observed filter "
-        f"graph {graph!r}"
+    command = commands[0]
+    inputs = [command[index + 1] for index, part in enumerate(command[:-1]) if part == "-i"]
+    cif_path = str(fixture["root"].resolve(f"delivered/{_LOWLIGHT_SHOT}.mp4"))
+    cif_input_index = inputs.index(cif_path)
+    cif_branch = next(
+        branch for branch in graph.split(";")
+        if branch.startswith(f"[{cif_input_index}:v:0]")
     )
-    assert re.search(r"scale\s*=\s*640\s*:\s*480", graph), (
+    assert re.search(r"scale\s*=\s*640\s*:\s*480", cif_branch), (
         "the 4:3 CIF source should fill the 640x480 delivery frame after SAR-aware "
-        f"conforming; observed filter graph {graph!r}"
+        f"conforming; observed CIF branch {cif_branch!r}"
     )
-    assert "setsar=1/1" in graph or re.search(r"setsar\s*=\s*1(?:[,;\]])", graph), (
+    assert "pad=640:480" not in cif_branch, (
+        "a CIF source with 4:3 display AR must not be letterboxed based on its "
+        f"11:9 storage dimensions; observed CIF branch {cif_branch!r}"
+    )
+    assert "setsar=1/1" in cif_branch or re.search(r"setsar\s*=\s*1(?:[,;\]])", cif_branch), (
         "the final square-pixel delivery must carry SAR 1:1; observed filter graph "
-        f"{graph!r}"
+        f"{cif_branch!r}"
     )
 
 
 def test_conforming_filter_graph_does_not_sharpen_or_denoise(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
     _assemble(fixture)
-    graph = _graphs(_encode_commands(fixture["control"]))
+    graph = _graphs(_encode_commands(fixture["encoder"]))
     forbidden = re.compile(
         r"(?:^|[,;\[])\s*(?:unsharp|cas|smartblur|hqdn3d|nlmeans|atadenoise|"
         r"bm3d|vaguedenoiser|removegrain|deband)\s*(?:=|[,;\]])",
@@ -321,7 +372,7 @@ def test_timeline_is_readable_in_script_order_before_encode(tmp_path: Path) -> N
     fixture = _fixture(tmp_path)
     _assemble(fixture)
 
-    observed = fixture["control"].timelines_at_encode
+    observed = fixture["encoder"].timelines_at_encode
     assert len(observed) == 1 and observed[0] is not None, (
         "the episode Timeline was not readable from project JSON at FFmpeg launch; "
         f"observed {observed!r}"
@@ -363,7 +414,7 @@ def test_delivery_spec_comes_from_projects_output_profile(tmp_path: Path) -> Non
     )
     fixture = _fixture(tmp_path, delivery_profile=custom_delivery)
     _assemble(fixture)
-    commands = _encode_commands(fixture["control"])
+    commands = _encode_commands(fixture["encoder"])
     graph = _graphs(commands)
     command_text = " ".join(" ".join(command) for command in commands)
 
@@ -386,7 +437,7 @@ def test_matching_and_nonmatching_inputs_share_the_pinned_reencode_policy(
 ) -> None:
     fixture = _fixture(tmp_path)
     _assemble(fixture)
-    commands = _encode_commands(fixture["control"])
+    commands = _encode_commands(fixture["encoder"])
     command_text = " ".join(" ".join(command) for command in commands)
 
     assert len(commands) == 1, (
