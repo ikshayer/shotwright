@@ -42,7 +42,10 @@ class Supervisor:
         return self._stop.is_set()
 
     def launch(self, argv, **kwargs):
-        self.process = subprocess.Popen(argv, **kwargs)
+        # The real supervisor accepts an injectable process factory; honour it rather
+        # than forwarding `popen` into Popen's own signature.
+        factory = kwargs.pop("popen", subprocess.Popen)
+        self.process = factory(argv, **kwargs)
         return self.process
 
     def clear_process(self, process) -> None:
@@ -61,17 +64,23 @@ def _approve_all(store: ProjectStore) -> None:
     episode = store.load(Episode, "ep1")
     for shot_id in episode.shot_ids:
         shot, token = store.load_with_version(Shot, shot_id, episode_id="ep1")
+        if shot.status.value == "approved":
+            print(f"{shot_id} already approved")
+            continue
         review_id = f"rv-{shot_id}"
-        store.save(
-            Review(
-                review_id=review_id,
-                target_id=shot_id,
-                target_version=shot.version,
-                created_at=datetime.now(timezone.utc),
-                approval_state="approved",
-            ),
-            expected_version=0,
-        )
+        try:
+            store.load(Review, review_id)
+        except Exception:
+            store.save(
+                Review(
+                    review_id=review_id,
+                    target_id=shot_id,
+                    target_version=shot.version,
+                    created_at=datetime.now(timezone.utc),
+                    approval_state="approved",
+                ),
+                expected_version=0,
+            )
         approve_shot(store, shot_id, episode_id="ep1", review_id=review_id,
                      expected_version=token)
         print(f"approved {shot_id} (content v{shot.version}) via {review_id}")

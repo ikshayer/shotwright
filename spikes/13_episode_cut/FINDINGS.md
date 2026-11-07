@@ -79,3 +79,46 @@ creator-in-the-loop step: `blocking -> building` requires `framing_status == app
 An episode that assembles itself end to end either needs that loop implemented, or an
 explicit route past it for shots that carry no framing panel. That is a scope question,
 not an implementation detail.
+
+## Resolved — the cut assembles
+
+All three blockers are closed, and a seventh defect surfaced and was fixed on the way.
+
+```
+approved a-dvr (content v1) via rv-a-dvr
+approved b-lowlight (content v1) via rv-b-lowlight
+timeline entries: 2
+  {'type': 'shot', 'ref': 'a-dvr',      'start_sec': 0.0, 'duration_sec': 4.5}
+  {'type': 'shot', 'ref': 'b-lowlight', 'start_sec': 4.5, 'duration_sec': 5.0}
+assembled in 4.11s
+receipt -> episodes/ep1/outputs/cuts/31fd6d57c8304e2180b8b1777ed2a7a6.mp4
+sha256     4975e48cbf84fd7bd51e7334f2cba619b6a84c1dbe808d811573cbd1a363870b
+```
+
+Probed: **h264, 640x480, SAR 1:1, DAR 4:3, 12 fps, 114 frames, 9.500 s, 150 KB.**
+
+A shot now travels `propose-shots -> build-scene -> render-master -> degrade-media ->
+review -> approved -> cut` in one run. Six separate defects had each blocked that path.
+
+**The per-shot look survives conforming.** `cut-lowlight-frame.png` is the 352x288 shot
+inside the 640x480 cut: correctly proportioned rather than stretched, and visibly softer
+and coarser than `cut-dvr-frame.png` beside it. That difference is the feature.
+
+**The timeline reports delivered durations, not intent.** `a-dvr` occupies 4.5 s, not its
+declared 5.0 s, because the DVR profile drops six frames at 12 fps. The seventh defect:
+`compose_timeline` had been building entries from `Shot.duration_sec`, so the Timeline
+described a cut that could not be built. Degraded receipts now record `frame_count` and
+`output_fps` as an exact integer pair, and the Timeline derives duration from them.
+
+## Still open
+
+- **No API or CLI operation** for `approve_shot`, framing approval, or `assemble_episode`.
+  This spike drives the services directly, so the cut is not yet reachable by the route
+  the Phase 1 exit clause names.
+- **Nothing creates `framing_panel_ref` or sets framing to `pending`**, so the FR-29 gate
+  can be passed but not entered.
+- **`review -> rejected` has no service writer.** A shot can be approved but never
+  rejected.
+- The degradation adapter checks produced frame count against the predicted schedule but
+  **never compares probed output FPS or duration against the profile**, so receipt timing
+  assumes those rates match rather than verifying it.
