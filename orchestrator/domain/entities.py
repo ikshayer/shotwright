@@ -225,6 +225,8 @@ class ShotOutput(Entity):
     profile_semver: str | None = None
     filter_graph_hash: str | None = None
     pinned_binaries: dict[str, str] | None = None
+    frame_count: StrictInt | None = Field(None, gt=0)
+    output_fps: StrictInt | None = Field(None, gt=0)
 
     @field_validator("relative_path")
     @classmethod
@@ -252,6 +254,12 @@ class ShotOutput(Entity):
             raise ValueError("content_sha256 must be 64 lowercase hexadecimal characters")
         if (self.camera_profile_id is None) != (self.camera_profile_version is None):
             raise ValueError("CameraProfile provenance must provide both id and version or neither")
+        if (self.frame_count is None) != (self.output_fps is None):
+            raise ValueError("degraded output timing must provide both frame_count and output_fps or neither")
+        if self.kind is not ShotOutputKind.DEGRADED and (
+            self.frame_count is not None or self.output_fps is not None
+        ):
+            raise ValueError(f"{self.kind.value} output may not carry degraded output timing")
         if self.kind not in {
             ShotOutputKind.SCENE, ShotOutputKind.MASTER, ShotOutputKind.PREVIEW,
         } and self.camera_profile_id is not None:

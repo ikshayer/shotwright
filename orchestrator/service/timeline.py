@@ -58,11 +58,17 @@ def compose_timeline(store: ProjectStore, *, episode_id: str) -> Timeline:
             raise _invalid(
                 f"Shot {shot_id!r} is {shot.status.value}; FR-09 only assembles approved shots"
             )
-        _delivered_output(store, shot)
+        delivered = _delivered_output(store, shot)
+        if delivered.frame_count is None or delivered.output_fps is None:
+            raise _invalid(
+                f"Shot {shot.shot_id!r} degraded output has no delivered frame timing; "
+                "run degrade_media again"
+            )
+        duration_sec = delivered.frame_count / delivered.output_fps
         entries.append(TimelineEntry(
-            type="shot", ref=shot_id, start_sec=cursor, duration_sec=shot.duration_sec,
+            type="shot", ref=shot_id, start_sec=cursor, duration_sec=duration_sec,
         ))
-        cursor += shot.duration_sec
+        cursor += duration_sec
     return Timeline(episode_id=episode_id, entries=entries)
 
 

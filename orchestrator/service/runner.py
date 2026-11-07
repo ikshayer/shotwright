@@ -437,6 +437,19 @@ class JobRunner:
                                  cause=exc) from exc
             kind = _output_kind(request.kind, request.payload)
             provenance = _provenance(kind, result.value)
+            if kind is ShotOutputKind.DEGRADED:
+                frame_count = provenance.get("frame_count")
+                output_fps = provenance.get("output_fps")
+                if (
+                    type(frame_count) is not int or frame_count < 1
+                    or type(output_fps) is not int or output_fps < 1
+                ):
+                    raise _job_error(
+                        JobErrorKind.CORRUPT_ARTIFACT,
+                        f"degradation result for Shot {request.record_id!r} must report positive "
+                        "frame_count and output_fps",
+                        job,
+                    )
             try:
                 bound_shot = store.load(
                     Shot, request.record_id, episode_id=shot.episode_id,
@@ -731,7 +744,9 @@ def _provenance(kind: ShotOutputKind, value: Any) -> dict[str, Any]:
     if kind in {ShotOutputKind.SCENE, ShotOutputKind.PREVIEW, ShotOutputKind.MASTER}:
         fields = ("engine_id", "engine_build")
     elif kind is ShotOutputKind.DEGRADED:
-        fields = ("profile_semver", "filter_graph_hash", "pinned_binaries")
+        fields = (
+            "profile_semver", "filter_graph_hash", "pinned_binaries", "frame_count", "output_fps",
+        )
     else:
         fields = ()
 

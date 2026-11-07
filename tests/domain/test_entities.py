@@ -21,6 +21,8 @@ from orchestrator.domain.entities import (
     RubricScores,
     Script,
     Shot,
+    ShotOutput,
+    ShotOutputKind,
     Timeline,
     TimelineEntry,
 )
@@ -91,6 +93,51 @@ def test_creator_authored_is_read_directly():
 def test_unknown_fields_are_refused():
     with pytest.raises(ValidationError):
         make_shot(bogus=1)
+
+
+def make_degraded_output(**overrides) -> ShotOutput:
+    values = {
+        "output_id": "degraded-1",
+        "episode_id": "EP1",
+        "shot_id": "S1",
+        "record_version": 1,
+        "kind": ShotOutputKind.DEGRADED,
+        "relative_path": "post/S1/degraded.mp4",
+        "content_sha256": "a" * 64,
+        "profile_semver": "1.0.0",
+        "filter_graph_hash": "b" * 64,
+        "pinned_binaries": {"ffmpeg": "fixture-build"},
+    }
+    return ShotOutput(**(values | overrides))
+
+
+def test_legacy_degraded_receipt_without_frame_timing_remains_readable():
+    receipt = make_degraded_output()
+    assert receipt.frame_count is None
+    assert receipt.output_fps is None
+
+
+@pytest.mark.parametrize("timing", [{"frame_count": 54}, {"output_fps": 12}])
+def test_degraded_receipt_rejects_partial_frame_timing(timing):
+    with pytest.raises(ValidationError):
+        make_degraded_output(**timing)
+
+
+def test_non_degraded_output_rejects_delivered_frame_timing():
+    with pytest.raises(ValidationError):
+        ShotOutput(
+            output_id="master-1",
+            episode_id="EP1",
+            shot_id="S1",
+            record_version=1,
+            kind=ShotOutputKind.MASTER,
+            relative_path="renders/S1/master.mp4",
+            content_sha256="c" * 64,
+            engine_id="BLENDER_EEVEE",
+            engine_build="fixture-build",
+            frame_count=60,
+            output_fps=12,
+        )
 
 
 # ---- Reference ----------------------------------------------------------

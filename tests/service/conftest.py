@@ -112,6 +112,8 @@ class FakeAdapter:
                     "profile_semver": "1.0.0",
                     "filter_graph_hash": "a" * 64,
                     "pinned_binaries": {"ffmpeg": "fake-build"},
+                    "frame_count": 60,
+                    "output_fps": 12,
                 }
             elif request.kind.value == "generate":
                 # ShotOutput STILL has no generation provenance fields.

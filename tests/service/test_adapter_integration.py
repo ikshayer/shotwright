@@ -6,11 +6,20 @@ import hashlib
 import json
 import threading
 from datetime import UTC, datetime
+from fractions import Fraction
+from pathlib import Path
 
 import pytest
 
+from orchestrator.adapters.postprofile.runner import DegradeRequest
+from orchestrator.adapters.timeline.runner import (
+    MediaInfo,
+    TimelineAssemblyResult,
+    build_assembly_command,
+)
 from orchestrator.domain.base import ShotStatus
 from orchestrator.domain.entities import (
+    ArtifactScheduleEntry,
     CameraProfile,
     Episode,
     PostProfile,
@@ -24,7 +33,9 @@ from orchestrator.domain.entities import (
 )
 from orchestrator.domain.state import TransitionContext, check_transition
 from orchestrator.platform.errors import JobError, JobErrorKind
+from orchestrator.service.compose import compose_degrade_request
 from orchestrator.service.dependencies import revise_shot
+from orchestrator.service.timeline import assemble_episode
 from orchestrator.store.json_store import ProjectStore
 
 
@@ -58,19 +69,26 @@ def _shot(
     shot_id: str = "s1",
     *,
     status: ShotStatus = ShotStatus.BLOCKING,
+    frame_drop_schedule: tuple[ArtifactScheduleEntry, ...] = (),
 ) -> Shot:
     store.save(Project(project_id="p1", title="Test project"), expected_version=0)
     store.save(Episode(episode_id="ep1", project_id="p1", number=1,
                        duration_target_sec=30), expected_version=0)
     store.create(CameraProfile(
         camera_id="dvr-2005", profile_name="Fixture DVR camera",
+        frame_drop_schedule=list(frame_drop_schedule),
     ))
     shot = Shot(shot_id=shot_id, episode_id="ep1", duration_sec=5)
     store.create(shot)
     return _advance_shot(store, shot, status)
 
 
-def _seed_degrade_inputs(store: ProjectStore, shot: Shot) -> None:
+def _seed_degrade_inputs(
+    store: ProjectStore,
+    shot: Shot,
+    *,
+    artifact_schedule: tuple[ArtifactScheduleEntry, ...] = (),
+) -> None:
     """Supply composition's project records without involving a real adapter."""
     root = store._root
     font_relative = "assets/fonts/fixture-overlay.ttf"
@@ -82,6 +100,7 @@ def _seed_degrade_inputs(store: ProjectStore, shot: Shot) -> None:
             output_fps=12,
             storage_resolution=(640, 480),
             sample_aspect_ratio="1/1",
+            artifact_schedule=list(artifact_schedule),
             overlay=PostProfileOverlay(
                 camera_id="CAM 03",
                 clock_epoch=1131984000,
@@ -261,6 +280,159 @@ def test_adapter_result_object_attributes_supply_declared_provenance(env) -> Non
     assert output.engine_build == "object-build"
     assert output.profile_semver is None
     assert not hasattr(output, "extra")
+
+
+def test_dropped_frames_flow_from_delivery_receipt_into_assembled_timeline(env) -> None:
+    from types import SimpleNamespace
+
+    from orchestrator.service.approval import approve_shot
+    from orchestrator.service.timeline import compose_timeline
+
+    drop = ArtifactScheduleEntry(type="drop", start_frame=24, count=6)
+    shot = _shot(env.store, status=ShotStatus.BUILDING, frame_drop_schedule=(drop,))
+    _seed_degrade_inputs(env.store, shot, artifact_schedule=(drop,))
+    profile = env.store.load(PostProfile, "dvr-2005")
+
+    planned_frames = int(shot.duration_sec * profile.output_fps)
+    dropped_frames = sum(
+        event.count for event in profile.artifact_schedule if event.type == "drop"
+    )
+    delivered_frames = planned_frames - dropped_frames
+    assert (shot.duration_sec, profile.output_fps, delivered_frames) == (5.0, 12, 54)
+
+    # The fake adapter stands in for PostProfileAdapter's measured result. Compose
+    # the actual typed request so the scheduled profile crosses the runner unchanged.
+    degrade_request = compose_degrade_request(
+        env.store,
+        shot_id=shot.shot_id,
+        episode_id=shot.episode_id,
+        run_id="run-dropped-frames",
+    )
+    assert isinstance(degrade_request, DegradeRequest)
+    assert degrade_request.profile.output_fps == 12
+    assert degrade_request.profile.artifact_schedule == (drop,)
+
+    # The profile schedule and adapter result meet at JobRunner's receipt writer.
+    env.adapter.result_value = SimpleNamespace(
+        profile_semver=profile.semver,
+        filter_graph_hash="a" * 64,
+        pinned_binaries={"ffmpeg": "fixture-build"},
+        artifact_schedule=tuple(profile.artifact_schedule),
+        frame_count=delivered_frames,
+        output_fps=profile.output_fps,
+    )
+    env.adapter.release.set()
+    job = env.runner.submit(
+        "p1",
+        env.request(
+            kind=env.AdapterKind.DEGRADE,
+            payload=degrade_request,
+        ),
+    )
+    env.runner.drain()
+    assert env.persisted_job(job.job_id).state == "completed"
+    captured_request = env.adapter.requests[-1].payload
+    assert isinstance(captured_request, DegradeRequest)
+    assert captured_request.profile.output_fps == 12
+    assert captured_request.profile.artifact_schedule == (drop,)
+
+    receipt, = env.store.list_shot_outputs(
+        shot.shot_id, episode_id=shot.episode_id, kind=ShotOutputKind.DEGRADED,
+    )
+    assert (receipt.frame_count, receipt.output_fps) == (54, 12)
+
+    review_id = "review-s1"
+    env.store.save(
+        Review(
+            review_id=review_id,
+            target_id=shot.shot_id,
+            target_version=shot.version,
+            created_at=datetime.now(UTC),
+            approval_state=ShotStatus.APPROVED,
+        ),
+        expected_version=0,
+    )
+    episode, episode_token = env.store.load_with_version(Episode, "ep1")
+    env.store.save(
+        episode.model_copy(update={"shot_ids": [shot.shot_id]}),
+        expected_version=episode_token,
+    )
+    _, shot_token = env.store.load_with_version(
+        Shot, shot.shot_id, episode_id=shot.episode_id,
+    )
+    approve_shot(
+        env.store,
+        shot.shot_id,
+        episode_id=shot.episode_id,
+        review_id=review_id,
+        expected_version=shot_token,
+    )
+
+    timeline = compose_timeline(env.store, episode_id="ep1")
+    entry, = timeline.entries
+    assert entry.ref == shot.shot_id
+    assert entry.duration_sec == pytest.approx(4.5)
+    assert entry.duration_sec != shot.duration_sec
+
+    class _DeliveredMediaEncoder:
+        def __init__(self) -> None:
+            self.command: list[str] | None = None
+            self.media: MediaInfo | None = None
+
+        def run(
+            self,
+            *,
+            timeline,
+            shot_outputs,
+            profile,
+            output_relative,
+            log_relative,
+            font_relative=None,
+            budget_seconds=None,
+        ) -> TimelineAssemblyResult:
+            del font_relative, budget_seconds
+            output = shot_outputs[shot.shot_id]
+            assert output.frame_count == 54 and output.output_fps == 12
+            self.media = MediaInfo(
+                width=640,
+                height=480,
+                sample_aspect_ratio=Fraction(1),
+                frame_rate=Fraction(output.output_fps),
+                duration=Fraction(output.frame_count, output.output_fps),
+            )
+            command = build_assembly_command(
+                Path("ffmpeg"),
+                timeline=timeline,
+                shot_outputs=shot_outputs,
+                media_info={shot.shot_id: self.media},
+                source_paths={
+                    shot_id: env.root.resolve(receipt.relative_path)
+                    for shot_id, receipt in shot_outputs.items()
+                },
+                profile=profile,
+                output=env.root.resolve(output_relative),
+            )
+            self.command = command
+            cut_bytes = b"deterministic assembled episode"
+            env.root.write_bytes(output_relative, cut_bytes)
+            return TimelineAssemblyResult(
+                relative_path=output_relative,
+                log_path=log_relative,
+                content_sha256=hashlib.sha256(cut_bytes).hexdigest(),
+                ffmpeg_identity="fixture-build",
+                argv=tuple(command),
+            )
+
+    encoder = _DeliveredMediaEncoder()
+    episode_output = assemble_episode(
+        env.store, encoder, episode_id="ep1", timeline=timeline,
+    )
+    assert encoder.media is not None
+    assert encoder.media.duration == Fraction(54, 12)
+    assert encoder.media.frame_rate == 12
+    assert encoder.command is not None
+    assert "trim=duration=4.5" in " ".join(encoder.command)
+    assert env.root.resolve(episode_output.relative_path).is_file()
 
 
 # A missing PROJECT is not detectable at this layer and is deliberately not tested here.

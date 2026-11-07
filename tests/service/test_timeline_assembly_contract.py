@@ -184,6 +184,7 @@ def _fixture(
     *,
     delivery_profile: PostProfile | None = None,
     omit_output_for: str | None = None,
+    legacy_output_for: str | None = None,
 ) -> dict[str, Any]:
     root = ProjectRoot(root_path)
     store = ProjectStore(root)
@@ -247,6 +248,10 @@ def _fixture(
         relative_path = f"delivered/{shot_id}.mp4"
         clip_bytes = f"delivered clip for {shot_id}".encode()
         root.write_bytes(relative_path, clip_bytes)
+        output_timing = {} if shot_id == legacy_output_for else {
+            "frame_count": int(shot.duration_sec * profiles[profile_name].output_fps),
+            "output_fps": profiles[profile_name].output_fps,
+        }
         store.append_shot_output(
             ShotOutput(
                 output_id=f"delivered-{shot_id}",
@@ -259,6 +264,7 @@ def _fixture(
                 profile_semver="1.0.0",
                 filter_graph_hash="a" * 64,
                 pinned_binaries={"ffmpeg": "fixture-build"},
+                **output_timing,
             ),
             expected_version=0,
         )
@@ -356,6 +362,8 @@ def test_proposed_shots_persist_episode_order_for_timeline_composition(
                 profile_semver="1.0.0",
                 filter_graph_hash="a" * 64,
                 pinned_binaries={"ffmpeg": "fixture-build"},
+                frame_count=36,
+                output_fps=12,
             ),
             expected_version=0,
         )
@@ -469,6 +477,20 @@ def test_shot_without_delivered_output_fails_with_shot_and_remediation(
         "a missing delivered clip must name its shot and the next pipeline action in "
         f"the established 'has no output; run ... first' shape; observed {message!r}"
     )
+
+
+def test_legacy_delivered_receipt_without_timing_fails_with_rerun_remediation(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(tmp_path, legacy_output_for="shot-dvr")
+
+    with pytest.raises(JobError) as caught:
+        compose_timeline(fixture["store"], episode_id=_EPISODE_ID)
+
+    message = str(caught.value)
+    assert "Shot 'shot-dvr'" in message
+    assert "duration" in message or "timing" in message
+    assert "run degrade_media again" in message
 
 
 def test_delivery_spec_comes_from_projects_output_profile(tmp_path: Path) -> None:

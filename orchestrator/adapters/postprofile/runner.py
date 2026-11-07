@@ -87,6 +87,7 @@ class DegradeResult:
     filter_graph_hash: str
     output_sha256: str
     frame_count: int
+    output_fps: int
     pts_delta_distribution: dict[str, int]
     ffmpeg_identity: str
     profile_semver: str
@@ -285,6 +286,7 @@ class PostProfileAdapter:
             filter_graph_hash=metadata["filter_graph_hash"],
             output_sha256=digest,
             frame_count=output_probe["frame_count"],
+            output_fps=request.profile.output_fps,
             pts_delta_distribution=output_probe["pts_delta_distribution"],
             ffmpeg_identity=identity,
             profile_semver=request.profile.identity.semver,
