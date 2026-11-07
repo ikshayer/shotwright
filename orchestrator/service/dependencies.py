@@ -608,8 +608,9 @@ def propose_shots(store: ProjectStore, shots: list[Shot]) -> tuple[Shot, ...]:
     with store.command():
         validated = tuple(store.validate_entity_payload(shot) for shot in shots)
         episode_ids = {shot.episode_id for shot in validated}
+        episodes: dict[str, tuple[Episode, int]] = {}
         for episode_id in sorted(episode_ids):
-            store.load(Episode, episode_id)
+            episodes[episode_id] = store.load_with_version(Episode, episode_id)
         # Resolve all ordinary create conflicts before the first append. A pre-existing
         # Shot therefore keeps the normal VersionConflict/409 mapping and cannot leave
         # earlier proposals from the same request written just before the conflict.
@@ -621,6 +622,23 @@ def propose_shots(store: ProjectStore, shots: list[Shot]) -> tuple[Shot, ...]:
                 raise VersionConflict(
                     f"episodes/{shot.episode_id}/shots/{shot.shot_id}", 0, token, current,
                 )
+
+        def append_to_episode_manifest(proposed: Iterable[Shot]) -> None:
+            additions: dict[str, list[str]] = {}
+            for shot in proposed:
+                additions.setdefault(shot.episode_id, []).append(shot.shot_id)
+            for episode_id, shot_ids_to_add in additions.items():
+                episode, token = episodes[episode_id]
+                shot_ids = list(episode.shot_ids)
+                known_ids = set(shot_ids)
+                for shot_id in shot_ids_to_add:
+                    if shot_id not in known_ids:
+                        shot_ids.append(shot_id)
+                        known_ids.add(shot_id)
+                if shot_ids != episode.shot_ids:
+                    updated = episode.model_copy(update={"shot_ids": shot_ids})
+                    store.save(updated, expected_version=token)
+
         written: list[Shot] = []
         for index, shot in enumerate(validated):
             try:
@@ -628,6 +646,9 @@ def propose_shots(store: ProjectStore, shots: list[Shot]) -> tuple[Shot, ...]:
             except Exception as exc:
                 pending = [f"{item.episode_id}/{item.shot_id}" for item in validated[index:]]
                 completed = [f"{item.episode_id}/{item.shot_id}" for item in written]
+                append_to_episode_manifest(written)
                 raise ShotProposalWriteFailure(completed, pending, exc) from exc
             written.append(shot)
+
+        append_to_episode_manifest(written)
         return tuple(written)

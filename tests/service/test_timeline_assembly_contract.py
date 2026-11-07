@@ -51,7 +51,9 @@ from orchestrator.domain.entities import (
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.errors import JobError
 from orchestrator.service.approval import approve_shot
-from orchestrator.store.json_store import ProjectStore, RecordNotFound
+from orchestrator.service.dependencies import propose_shots
+from orchestrator.service.timeline import compose_timeline
+from orchestrator.store.json_store import ProjectStore, RecordNotFound, VersionConflict
 
 _EPISODE_ID = "episode-1"
 _OUTPUT_BYTES = b"fake assembled episode bytes"
@@ -309,6 +311,67 @@ def _graphs(commands: list[list[str]]) -> str:
             if option in filter_options:
                 values.append(command[index + 1])
     return "\n".join(values).lower()
+
+
+def test_proposed_shots_persist_episode_order_for_timeline_composition(
+    tmp_path: Path,
+) -> None:
+    root = ProjectRoot(tmp_path)
+    store = ProjectStore(root)
+    store.save(
+        Episode(
+            episode_id=_EPISODE_ID,
+            project_id="project-1",
+            number=1,
+            duration_target_sec=9,
+        ),
+        expected_version=0,
+    )
+
+    proposed_ids = ("shot-proposed-first", "shot-proposed-second", "shot-proposed-third")
+    first_proposal = [
+        Shot(shot_id=shot_id, episode_id=_EPISODE_ID, duration_sec=3)
+        for shot_id in proposed_ids[:2]
+    ]
+    later_proposal = [
+        Shot(shot_id=proposed_ids[2], episode_id=_EPISODE_ID, duration_sec=3)
+    ]
+    propose_shots(store, first_proposal)
+    propose_shots(store, later_proposal)
+
+    for shot_id in proposed_ids:
+        shot = _approve_fixture_shot(store, store.load(Shot, shot_id, episode_id=_EPISODE_ID))
+        relative_path = f"delivered/{shot_id}.mp4"
+        clip_bytes = f"delivered clip for {shot_id}".encode()
+        root.write_bytes(relative_path, clip_bytes)
+        store.append_shot_output(
+            ShotOutput(
+                output_id=f"delivered-{shot_id}",
+                episode_id=_EPISODE_ID,
+                shot_id=shot_id,
+                record_version=shot.version,
+                kind=ShotOutputKind.DEGRADED,
+                relative_path=relative_path,
+                content_sha256=hashlib.sha256(clip_bytes).hexdigest(),
+                profile_semver="1.0.0",
+                filter_graph_hash="a" * 64,
+                pinned_binaries={"ffmpeg": "fixture-build"},
+            ),
+            expected_version=0,
+        )
+
+    timeline = compose_timeline(store, episode_id=_EPISODE_ID)
+    assert tuple(entry.ref for entry in timeline.entries) == proposed_ids
+
+    episode = store.load(Episode, _EPISODE_ID)
+    assert tuple(episode.shot_ids) == proposed_ids
+
+    with pytest.raises(VersionConflict):
+        propose_shots(
+            store,
+            [Shot(shot_id=proposed_ids[0], episode_id=_EPISODE_ID, duration_sec=3)],
+        )
+    assert tuple(store.load(Episode, _EPISODE_ID).shot_ids) == proposed_ids
 
 
 def test_mixed_profiles_conform_cif_by_display_aspect_ratio(tmp_path: Path) -> None:
