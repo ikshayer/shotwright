@@ -22,6 +22,8 @@ from orchestrator.domain.entities import Asset, Project
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.store.json_store import ProjectStore
 
+from .asset_requests import asset_registration_data
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"\x00" * 32
@@ -145,7 +147,10 @@ def test_well_formed_png_upload_registers_with_provenance(project_root: Path, tm
         "--file",
         str(upload),
         "--data",
-        json.dumps({"asset": asset.model_dump(mode="json")}, separators=(",", ":")),
+        json.dumps(
+            asset_registration_data(asset.model_dump(mode="json")),
+            separators=(",", ":"),
+        ),
         "--json",
     )
 

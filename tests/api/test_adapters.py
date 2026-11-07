@@ -183,7 +183,9 @@ def test_adapter_operation_returns_contract_status(
         if operation == "create asset":
             asset = Asset(
                 asset_id="route-asset",
-                type="model",
+                # PNG bytes: declaring "model" is correctly refused, so this
+                # exercises a declared type that agrees with the detected kind.
+                type="texture",
                 generated=False,
                 source_url="https://assets.example.invalid/route.png",
                 provider="fixture-provider",
@@ -210,7 +212,8 @@ def test_adapter_operation_returns_contract_status(
             assert resp.status_code in {200, 201}, (
                 f"{op.key} did not register a valid PNG: {resp.status_code} {resp.text}"
             )
-            asset_store = ProjectStore(ProjectRoot(app.state.settings.project_root).resolve("x"))
+            project_dir = ProjectRoot(app.state.settings.project_root).resolve("x")
+            asset_store = ProjectStore(ProjectRoot(project_dir))
             registered = asset_store.load(Asset, "route-asset")
             assert registered.license == "CC0", (
                 f"create_asset lost the supplied license; observed {registered.license!r}"

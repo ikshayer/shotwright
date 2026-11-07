@@ -463,6 +463,24 @@ _EXTENSION_KIND: dict[str, MediaKind] = {
 }
 
 
+#: Formats refused with their own reason instead of the generic allowlist
+#: message. The allowlist above is still the gate and still default-deny; this
+#: only means a caller who sends one of these is told why this project will not
+#: take it, which Decision 2 of the asset contract requires.
+_REFUSED_REASONS: dict[str, str] = {
+    ".blend": (
+        "Extension '.blend' is not accepted: a .blend can carry executable "
+        "Python that runs on load, and this project never enables script "
+        "auto-run. Convert the asset to .glb."
+    ),
+    ".gltf": (
+        "Extension '.gltf' is not accepted: glTF JSON references external "
+        "buffer and texture files, so it is neither self-contained nor "
+        "verifiable by a single checksum. Use .glb, which embeds them."
+    ),
+}
+
+
 def _extensions_matching_magic(head: bytes) -> frozenset[str] | None:
     """Extensions consistent with the leading bytes; None if unrecognised."""
     if head.startswith(b"glTF"):
@@ -508,6 +526,9 @@ def validate_upload(
     extension = os.path.splitext(safe_name)[1].lower()
     kind = _EXTENSION_KIND.get(extension)
     if kind is None:
+        reason = _REFUSED_REASONS.get(extension)
+        if reason is not None:
+            raise UploadRejected(reason)
         allowed = ", ".join(sorted(_EXTENSION_KIND))
         raise UploadRejected(f"Extension {extension or '(none)'!r} is not accepted; allowed: {allowed}")
 

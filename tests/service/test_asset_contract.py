@@ -382,7 +382,7 @@ def test_register_refuses_missing_reuse_right_or_source_without_writing(
     assert body.get("error") == "validation_error", (
         f"provenance refusal did not use validation_error; observed {body!r}"
     )
-    assert body.get("field") == "asset", (
+    assert body.get("details", {}).get("field") == "asset", (
         f"provenance refusal did not identify field 'asset'; observed {body!r}"
     )
     assert missing_field in observed.lower(), (

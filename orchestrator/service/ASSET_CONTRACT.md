@@ -324,3 +324,66 @@ kind-to-type mapping and the refusal naming both values — stands.
 three failures are the stale `create_asset`-is-absent expectations that
 `worktree-asset-tests` fixes; neither branch can be green alone, so the combined tree is
 the only real gate.
+
+---
+
+# Amendment 4 — what merging the two halves found
+
+Each branch was green on its own terms. Merging them produced **six failures**, which is
+the point of the exercise: five were disagreements the seam exposed, and one was a dead
+seam in the implementation.
+
+## A4.1 — the `.blend` and `.gltf` refusals were unreachable
+
+Decision 2 requires `.blend` be refused "with a message saying why". The implementation
+had a good message in `service/assets.py` — "a .blend can carry executable Python that
+runs on load" — and it **never ran**. The transport-layer upload allowlist refuses the
+extension first, with the generic `Extension '.blend' is not accepted; allowed: ...`.
+
+Two correct halves, nothing exercising the path between them. The eighth instance of this
+codebase's signature defect, and neither agent could see it: the implementer only read its
+own refusal, and the test author could not read the implementation at all. **Only running
+both together surfaced it.**
+
+Fixed by giving specifically-known-hostile formats their own reason in
+`platform/containment.py`, while the closed allowlist remains the gate — default-deny is
+unchanged, and an unknown extension still gets the generic message. `.gltf` likewise now
+explains external buffers rather than merely being absent from a list.
+
+## A4.2 — the error body nests extras
+
+The contract said provenance refusals carry `field: "asset"`. They carry
+`details: {"field": "asset"}` — the project's existing `error_body()` convention, which
+A2.1 failed to look at. Contract defect, not an implementation defect.
+
+## A4.3 — two test defects the seam exposed
+
+- A PNG declared `type="model"` is **correctly refused**, so the route test had to declare
+  `texture`. The test was asserting that a contradiction should succeed.
+- The CLI test sent a whole `Asset` dump, including `schema_version` and `checksum`, which
+  `AssetRegistration` forbids as extra inputs. It must send the flat registration subset.
+- `ProjectStore(ProjectRoot(...).resolve(id))` passes a `Path` where a `ProjectRoot` is
+  wanted. Wrapped.
+
+## Final state
+
+**`1529 passed, 34 skipped, 0 failed`**, ruff clean on `orchestrator/` and `tests/`, from a
+1,491-test baseline — 38 new tests. The pinned static-plan hash
+`92de3ed358ecc3bc4ef91127db9c6a12254e86a59f255645c03579b60b03788a` is unchanged, so no
+existing scene's worker payload moved by a byte.
+
+## Known gaps, carried forward
+
+- **No dedicated regression test for the signature-builder fix.** Constructing a synthetic
+  upload `Operation` means poking private machinery. The suite fails loudly if it
+  regresses — a required field on an upload operation breaks app construction for every
+  route at once — but the diagnosis would not be localised.
+- **Declared dimensions are proven only through `asset_fit_factors`**, not against a
+  Blender-evaluated mesh. glTF import under `--factory-startup --disable-autoexec` is
+  measured and works; the end-to-end envelope is not asserted.
+- **Poly Haven fetching remains out of scope.** What it still needs from this foundation:
+  API search and download, the provider's required User-Agent or Referer, download
+  staging and retries, and a visible credit surface wherever assets are shown. The
+  registry records `attribution_surface_required` but nothing displays credits yet.
+- **`.gltf` is withdrawn by design.** Converting a `.gltf` to `.glb` is a deliberate human
+  step, not a pipeline feature.
