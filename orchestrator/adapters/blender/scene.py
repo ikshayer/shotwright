@@ -80,6 +80,7 @@ class VisibilityKeyframeSpec(_FrozenModel):
 class ObjectSpec(_FrozenModel):
     name: str
     kind: Literal["box", "cylinder", "sphere", "cone", "torus"]
+    asset_id: str | None = None
     location: Vec3
     dimensions: Vec3
     material: str
@@ -100,6 +101,13 @@ class ObjectSpec(_FrozenModel):
     def positive_dimensions(cls, value: Vec3) -> Vec3:
         if any(not math.isfinite(v) or v <= 0 for v in value):
             raise ValueError("dimensions must be finite and strictly positive")
+        return value
+
+    @field_validator("asset_id")
+    @classmethod
+    def nonempty_asset_id(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("asset_id must not be empty")
         return value
 
     @model_validator(mode="after")
@@ -195,6 +203,28 @@ class SceneSpec(_FrozenModel):
         return self
 
 
+class AssetBinding(_FrozenModel):
+    """Project-local identity needed to bind a scene asset to its immutable bytes."""
+
+    asset_id: str
+    file_path: str
+    checksum: str
+
+    @field_validator("asset_id", "file_path")
+    @classmethod
+    def nonempty_identity(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("asset binding identity fields must not be empty")
+        return value
+
+    @field_validator("checksum")
+    @classmethod
+    def valid_checksum(cls, value: str) -> str:
+        if not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ValueError("asset binding checksum must be 64 lowercase hexadecimal characters")
+        return value
+
+
 class RenderRequest(_FrozenModel):
     shot_id: str
     shot_version: int = Field(ge=1)
@@ -206,6 +236,7 @@ class RenderRequest(_FrozenModel):
     master_resolution: tuple[StrictInt, StrictInt] = (1280, 960)
     camera_profile: CameraProfile
     scene: SceneSpec
+    asset_bindings: dict[str, AssetBinding] = Field(default_factory=dict)
     event_sec: float | None = Field(default=None, ge=0)
     anomaly: AnomalySpec | None = None
     anomaly_precomposed: bool = False
@@ -303,6 +334,29 @@ def build_scene_plan(request: RenderRequest) -> dict[str, object]:
     validate_camera_placement(request)
     frame_end = 1 if request.mode == "preview" else max(1, math.ceil(request.duration_sec * 60))
     scene_data = _scene_payload(request, camera)
+    referenced_assets: set[str] = set()
+    for spec, item in zip(request.scene.objects, scene_data["objects"], strict=True):
+        if spec.asset_id is None:
+            continue
+        referenced_assets.add(spec.asset_id)
+        binding = request.asset_bindings.get(spec.asset_id)
+        if binding is None:
+            raise ValueError(
+                f"object {spec.name!r} references unregistered asset {spec.asset_id!r}"
+            )
+        if binding.asset_id != spec.asset_id:
+            raise ValueError(
+                f"asset binding key {spec.asset_id!r} does not match its record id "
+                f"{binding.asset_id!r}"
+            )
+        item["asset_checksum"] = binding.checksum
+        item["asset_file_path"] = binding.file_path
+    unused_bindings = set(request.asset_bindings) - referenced_assets
+    if unused_bindings:
+        raise ValueError(
+            "render request carries unused asset binding(s): "
+            + ", ".join(sorted(unused_bindings))
+        )
     if profile.camera_mode == "non_cctv":
         scene_data["camera_keyframes"] = [
             keyframe.model_dump(mode="json")
@@ -881,6 +935,8 @@ def _scene_payload(request: RenderRequest, camera: dict[str, object]) -> dict[st
     else:
         payload.pop("camera_keyframes", None)
     for spec, item in zip(scene.objects, payload["objects"], strict=True):
+        if spec.asset_id is None:
+            item.pop("asset_id", None)
         if not spec.visibility_keyframes:
             item.pop("visibility_keyframes", None)
         for key, default in (("rotation", [0.0, 0.0, 0.0]), ("bevel", 0.0)):

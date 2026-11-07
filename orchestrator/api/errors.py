@@ -20,6 +20,7 @@ from pydantic import ValidationError
 from orchestrator.domain.state import ReviewApprovalError, TransitionError
 from orchestrator.platform.containment import ContainmentError, UploadRejected
 from orchestrator.platform.errors import JobError
+from orchestrator.service.assets import AssetRegistrationInvalid
 from orchestrator.service.dependencies import ShotProposalWriteFailure
 from orchestrator.store.json_store import RecordNotFound, VersionConflict
 
@@ -68,6 +69,7 @@ MAPPED: tuple[type[BaseException], ...] = (
     VersionConflict, RecordNotFound, ContainmentError, UploadRejected,
     TransitionError, ReviewApprovalError, JobError, MissingAdapter, RequestMismatch,
     AdapterRequestInvalid,
+    AssetRegistrationInvalid,
     ShotProposalWriteFailure,
     ValidationError,
 )
@@ -144,6 +146,8 @@ def describe(exc: BaseException) -> tuple[int, dict[str, Any]] | None:
                                expected=exc.path_value, actual=exc.body_value)
     if isinstance(exc, AdapterRequestInvalid):
         return 422, error_body("validation_error", str(exc), field="payload")
+    if isinstance(exc, AssetRegistrationInvalid):
+        return 422, error_body("validation_error", str(exc), field="asset")
     if isinstance(exc, ShotProposalWriteFailure):
         return 500, error_body(
             "partial_write", str(exc), written=list(exc.written),

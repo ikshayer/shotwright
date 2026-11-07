@@ -21,6 +21,7 @@ from orchestrator.jobs.queue import JobQueue
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.platform.settings import Settings
+from orchestrator.store.json_store import ProjectStore, RecordNotFound
 
 from .scene import RenderRequest, build_scene_plan
 
@@ -257,6 +258,7 @@ class BlenderAdapter:
             raise ValueError("job shot_id/run_id must match the scene request")
 
         plan = build_scene_plan(request)
+        self._verify_plan_assets(plan, job=job)
         scene_rel = (
             f"scenes/{request.shot_id}/v{request.shot_version:04d}/"
             f"{request.run_id}/scene.json"
@@ -305,6 +307,7 @@ class BlenderAdapter:
         if job.shot_id != request.shot_id or job.run_id != request.run_id:
             raise ValueError("job shot_id/run_id must match the render request")
         plan_base = build_scene_plan(request)
+        self._verify_plan_assets(plan_base, job=job)
         frame_end = plan_base.get("frame_end")
         if isinstance(frame_end, bool) or not isinstance(frame_end, int) or frame_end <= 0:
             raise JobError(
@@ -382,6 +385,7 @@ class BlenderAdapter:
                 for rel in (*frame_rels, blend_rel, metadata_rel, log_rel):
                     self.root.write_with(rel, lambda path: None)
                 plan = dict(plan_base)
+                self._verify_plan_assets(plan, job=job, bind_paths=True)
                 plan["outputs"] = {
                     "blend": _forward(self.root.resolve(blend_rel)),
                     "frames": [_forward(self.root.resolve(rel)) for rel in frame_rels],
@@ -619,6 +623,46 @@ class BlenderAdapter:
             return queued_worker(job)
         return queue.run(job, queued_worker, partial_artifacts=(base,),
                          startup_allowance_seconds=startup_allowance)
+
+    def _verify_plan_assets(
+        self, plan: dict[str, object], *, job: Job, bind_paths: bool = False
+    ) -> None:
+        scene = plan.get("scene")
+        objects = scene.get("objects") if isinstance(scene, dict) else None
+        if not isinstance(objects, list):
+            return
+        store = ProjectStore(self.root)
+        for item in objects:
+            if not isinstance(item, dict):
+                continue
+            asset_id = item.get("asset_id")
+            if asset_id is None:
+                continue
+            try:
+                asset = store.verify_asset(str(asset_id))
+            except (JobError, RecordNotFound) as exc:
+                raise JobError(
+                    JobErrorKind.INVALID_MANIFEST,
+                    f"Asset {asset_id!r} could not be verified before Blender use: {exc}",
+                    job_id=job.job_id,
+                    shot_id=job.shot_id,
+                    run_id=job.run_id,
+                    cause=exc,
+                ) from exc
+            if (
+                asset.file_path != item.get("asset_file_path")
+                or asset.checksum != item.get("asset_checksum")
+            ):
+                raise JobError(
+                    JobErrorKind.INVALID_MANIFEST,
+                    f"Asset {asset_id!r} registry path or checksum no longer matches the scene plan",
+                    job_id=job.job_id,
+                    shot_id=job.shot_id,
+                    run_id=job.run_id,
+                )
+            if bind_paths:
+                assert asset.file_path is not None
+                item["asset_path"] = _forward(self.root.resolve(asset.file_path))
 
     def _assemble_master(
         self,

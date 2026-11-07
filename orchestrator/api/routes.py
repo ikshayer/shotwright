@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, BinaryIO
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from orchestrator.domain.entities import (
     CameraProfile,
@@ -63,6 +64,24 @@ class RubricRequest(BaseModel):
     scores: RubricScores
 
 
+class AssetRegistration(BaseModel):
+    """Provenance fields submitted alongside one permitted local asset file."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    asset_id: str | None = None
+    type: str = "model"
+    generated: bool = False
+    source_url: str | None = None
+    provider: str | None = None
+    license: str | None = None
+    model_or_voice_license: str | None = None
+    attribution: str | None = None
+    attribution_surface_required: bool = False
+    reuse_scope: str = "project"
+    expected_version: int = Field(default=0, ge=0)
+
+
 #: Leading bytes carried for magic-byte detection; enough for every signature
 #: platform.containment recognises.
 MAGIC_HEADER_BYTES = 64
@@ -72,11 +91,9 @@ MAGIC_HEADER_BYTES = 64
 class UploadedFile:
     """What upload validation needs about one uploaded file.
 
-    The file's bytes are deliberately NOT carried. Validation needs only the magic-byte
-    header and the true size, so buffering whole files would let a caller decide how
-    much memory this process uses — multiplied by the number of parts in the request —
-    and buy nothing while the storing adapter is absent. The adapter, when it exists,
-    must stream the body to a contained path rather than take bytes from here.
+    The bytes are not buffered in this record. Registration receives either the CLI's
+    source path or the multipart parser's seekable spool and copies it in bounded chunks
+    through ProjectRoot.
     """
 
     filename: str
@@ -84,6 +101,9 @@ class UploadedFile:
     head: bytes
     #: The real size as the multipart parser measured it, not the number of bytes read.
     size_bytes: int
+    #: CLI source path, or the already-spooled multipart file stream.
+    source_path: Path | None = None
+    stream: BinaryIO | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -127,7 +147,7 @@ OPERATIONS = (
     Operation("propose_shots", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/propose", "Persist agent-authored shots", True, "service.dependencies.propose_shots", ShotProposal, _call("propose_shots")),
     Operation("revise_shot", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/revise", "Revise a shot", True, "service.dependencies.revise_shot", ShotRevision, _call("revise_shot")),
     Operation("search_assets", "GET", "/projects/{project_id}/assets/search", "Search assets", False, "asset search adapter", OpenRequest, _call("search_assets")),
-    Operation("create_asset", "POST", "/projects/{project_id}/assets", "Create an asset", True, "asset creation adapter", None, _call("create_asset"), upload=True),
+    Operation("create_asset", "POST", "/projects/{project_id}/assets", "Register a project-local asset file", True, "service.assets.register_asset", AssetRegistration, _call("create_asset"), upload=True),
     Operation("build_scene", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/scene", "Build a scene", True, "scene builder adapter", OpenRequest, _call("build_scene")),
     Operation("render_preview", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/preview", "Render a preview", True, "preview renderer adapter", OpenRequest, _call("render_preview")),
     Operation("render_master", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/master", "Render a master", True, "master renderer adapter", OpenRequest, _call("render_master")),

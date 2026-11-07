@@ -22,7 +22,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import BinaryIO, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -246,6 +246,24 @@ class ProjectRoot:
         self._write_atomically(relative, target, write_temporary)
         return target
 
+    def write_stream(
+        self, relative: str, source: BinaryIO, *, chunk_size: int = 1024 * 1024
+    ) -> Path:
+        """Atomically copy a binary stream to a contained project-relative file."""
+        if type(chunk_size) is not int or chunk_size <= 0:
+            raise ValueError("chunk_size must be a positive integer")
+        target = self._prepare_file(relative)
+
+        def write_temporary(temporary: Path) -> None:
+            with temporary.open("xb") as destination:
+                while chunk := source.read(chunk_size):
+                    if not isinstance(chunk, bytes):
+                        raise TypeError("binary stream read() must return bytes")
+                    destination.write(chunk)
+
+        self._write_atomically(relative, target, write_temporary)
+        return target
+
     def write_text(self, relative: str, text: str, *, encoding: str = "utf-8") -> Path:
         target = self._prepare_file(relative)
 
@@ -433,18 +451,22 @@ class UploadLimits(BaseModel):
     max_image_long_edge_px: int = Field(8192, gt=0, description="Maximum image long edge in pixels.")
     max_video_bytes: int = Field(500 * 1024 * 1024, gt=0, description="Maximum video upload size in bytes.")
     max_video_seconds: float = Field(120.0, gt=0, description="Maximum video duration in seconds.")
+    max_model_bytes: int = Field(500 * 1024 * 1024, gt=0, description="Maximum GLB model upload size in bytes.")
 
 
-MediaKind = Literal["image", "video"]
+MediaKind = Literal["image", "video", "model"]
 
 _EXTENSION_KIND: dict[str, MediaKind] = {
     ".jpg": "image", ".jpeg": "image", ".png": "image", ".webp": "image",
     ".mp4": "video", ".mov": "video", ".webm": "video",
+    ".glb": "model",
 }
 
 
 def _extensions_matching_magic(head: bytes) -> frozenset[str] | None:
     """Extensions consistent with the leading bytes; None if unrecognised."""
+    if head.startswith(b"glTF"):
+        return frozenset({".glb"})
     if head.startswith(b"\xff\xd8\xff"):
         return frozenset({".jpg", ".jpeg"})
     if head.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -501,10 +523,12 @@ def validate_upload(
         _enforce("max_image_bytes", limits.max_image_bytes, size_bytes)
         if image_long_edge_px is not None:
             _enforce("max_image_long_edge_px", limits.max_image_long_edge_px, image_long_edge_px)
-    else:
+    elif kind == "video":
         _enforce("max_video_bytes", limits.max_video_bytes, size_bytes)
         if duration_seconds is not None:
             _enforce("max_video_seconds", limits.max_video_seconds, duration_seconds)
+    else:
+        _enforce("max_model_bytes", limits.max_model_bytes, size_bytes)
     return ValidatedUpload(kind=kind, extension=extension, safe_filename=safe_name)
 
 

@@ -8,7 +8,7 @@ import uuid
 from typing import Annotated, Any
 from urllib.parse import urlsplit
 
-from fastapi import Body, FastAPI, File, Request, UploadFile
+from fastapi import Body, FastAPI, File, Form, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -27,6 +27,11 @@ from orchestrator.jobs.lease import GpuLease, PynvmlProbe
 from orchestrator.jobs.queue import JobQueue, ProjectQuarantine, SystemHostResources
 from orchestrator.platform.containment import ProjectRoot, validate_upload
 from orchestrator.platform.settings import Settings
+from orchestrator.service.assets import (
+    AssetRegistrationInvalid,
+    register_asset,
+    validate_asset_source,
+)
 from orchestrator.service.compose import compose_render_request
 from orchestrator.service.dependencies import (
     create_camera_profile,
@@ -59,6 +64,7 @@ from .routes import (
     ASYNC_ADAPTER_OPERATIONS,
     MAGIC_HEADER_BYTES,
     OPERATIONS,
+    AssetRegistration,
     Operation,
     UploadedFile,
 )
@@ -181,18 +187,47 @@ class OperationContext:
             scores = RubricScores.model_validate(data.get("scores", data))
             return {"scores": scores.model_dump(mode="json"), "passed": scores.passed()}
         if operation == "create_asset":
-            # Transport-level validation of the uploaded bytes (FR-25, AT-17). It runs
-            # before the adapter check because validating the request is this layer's
-            # job, while storing the asset is the absent adapter's: a well-formed
-            # upload therefore still answers 501, and a malformed one answers 400.
-            # Pixel and duration caps are NOT enforced here. They need a decoder, and
-            # the only alternative was to believe a dimension the caller supplied,
-            # which validates nothing: a caller that wants past the cap simply omits or
-            # understates it. Enforcing them belongs with the adapter that decodes the
-            # file. Extension, magic bytes and the byte caps are enforced.
-            for upload in data.get("uploads", ()):
-                validate_upload(upload.filename, upload.head, upload.size_bytes,
-                                self.settings.upload)
+            uploads = data.get("uploads", ())
+            if len(uploads) != 1:
+                raise AssetRegistrationInvalid("create_asset requires exactly one permitted upload file")
+            registration = AssetRegistration.model_validate({
+                field: data[field]
+                for field in AssetRegistration.model_fields
+                if field in data
+            })
+            upload: UploadedFile = uploads[0]
+            source = upload.source_path or upload.stream
+            if source is None:
+                raise AssetRegistrationInvalid(
+                    "the uploaded asset has no readable source file or stream"
+                )
+            # Registration accepts every upload kind supported by the shared closed
+            # extension/magic allowlist. Geometry restrictions are enforced on use.
+            validate_upload(
+                upload.filename,
+                upload.head,
+                upload.size_bytes,
+                self.settings.upload,
+            )
+            validate_asset_source(
+                source,
+                filename=upload.filename,
+                license=registration.license,
+                source_url=registration.source_url,
+                generated=registration.generated,
+            )
+            asset = register_asset(
+                self._store(data["project_id"]), source, filename=upload.filename,
+                asset_id=registration.asset_id, asset_type=registration.type,
+                generated=registration.generated, source_url=registration.source_url,
+                provider=registration.provider, license=registration.license,
+                model_or_voice_license=registration.model_or_voice_license,
+                attribution=registration.attribution,
+                attribution_surface_required=registration.attribution_surface_required,
+                reuse_scope=registration.reuse_scope,
+                expected_version=registration.expected_version,
+            )
+            return asset.model_dump(mode="json")
         if operation == "report_jobs":
             queue = self.job_queues.get(data["project_id"])
             return self._read_job_reports(data["project_id"], root=queue.root if queue else None)
@@ -298,7 +333,10 @@ async def _describe_upload(item: UploadFile) -> UploadedFile:
         size = len(head)
         while chunk := await item.read(_MEASURE_CHUNK_BYTES):
             size += len(chunk)
-    return UploadedFile(filename=item.filename or "", head=head, size_bytes=size)
+    await item.seek(0)
+    return UploadedFile(
+        filename=item.filename or "", head=head, size_bytes=size, stream=item.file
+    )
 
 
 def _error(status: int, code: str, message: str, **details: Any) -> JSONResponse:
@@ -471,6 +509,17 @@ def _register_operation(app: FastAPI, operation: Operation, context: OperationCo
             "files", Parameter.POSITIONAL_OR_KEYWORD, default=[],
             annotation=Annotated[list[UploadFile], File()],
         ))
+        if operation.request_model is not None:
+            for name, model_field in operation.request_model.model_fields.items():
+                default = (
+                    Parameter.empty if model_field.is_required() else model_field.default
+                )
+                params.append(Parameter(
+                    name,
+                    Parameter.POSITIONAL_OR_KEYWORD,
+                    default=default,
+                    annotation=Annotated[model_field.annotation, Form()],
+                ))
     elif operation.request_model is not None:
         # A mutating body is required, so its schema is the model itself rather than
         # "model or null". An optional body publishes anyOf[model, null], which hides
