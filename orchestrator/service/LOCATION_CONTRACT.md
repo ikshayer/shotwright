@@ -121,3 +121,72 @@ Say explicitly what this contract left ambiguous and anything you believe it got
 FR-03 contract needed four amendments and twelve defects were found; the figure contract
 needed one. Assume this one is wrong somewhere, and say where. The admissions are the most
 valuable part of the report.
+
+---
+
+# Amendment 1 — what the parallel pass settled
+
+Final state: **1561 passed, 36 skipped, 0 failed**, ruff clean. FR-15 is met.
+
+## A1.1 — the base shell is two fields, not one
+
+The contract said "which procedural room and which look" without naming fields. The test
+author assumed a single `Location.look`; the implementer added **`base_shell`** (which
+procedural room; `american_living_room` is the only one today) and **`scene_look`**
+(`bright` or `low_key`). **The implementer is right** — a room and its lighting are
+independent choices and conflating them would have made a second room impossible to add
+without a migration. All nine test failures traced to this one gap.
+
+Worth noting how cleanly it surfaced: the test author wrote a guard assertion naming its own
+assumption and printing the observed field list, so the diagnosis was one line rather than
+nine opaque `AttributeError`s. That idiom is worth repeating.
+
+## A1.2 — `asset_ids` is for non-geometry resources
+
+Both agents independently chose the same rule: `placements` owns placed geometry, and
+`asset_ids` is reserved for non-geometry resources such as textures and HDRIs. A validator
+rejects an id appearing in both. No duplicate source of truth.
+
+## A1.3 — placement object names are deterministic by list order
+
+Each placement becomes an `ObjectSpec` named deterministically from its **position in the
+list**, so repeated placements of one asset get distinct, stable names and builds stay
+byte-identical.
+
+**Known consequence, accepted:** reordering placements renames objects, which changes the
+plan and therefore triggers a rebuild, even though the room looks identical. That is
+defensible — the stored record did change — but it means a cosmetic reorder is not free. If
+that becomes annoying, the fix is a stable per-placement id rather than list position, and
+that is a contract change, not a patch.
+
+## A1.4 — section 4.4 tagging sits on top of an existing mechanism
+
+`revision_impact` already treated **any** `Location` change as impactful, so the contract's
+instruction to tag `placements` risked layering a second mechanism on the first. As
+implemented, Location invalidation honours tags and treats untagged changes conservatively.
+Measured: moving a placement impacts only the dependent approved shot, which goes `stale`,
+while an unrelated approved shot stays `approved`.
+
+## A1.5 — `blend_path` is dead weight, confirmed
+
+Untouched, as instructed. It predates FR-03's refusal of `.blend` as executable-on-load
+content, so nothing should ever populate it. Removing it is a separate decision about stored
+records and has not been taken.
+
+## Measured, not asserted
+
+- Two shots bound to one `location_id` composed **identical 50,358-byte scene JSON**,
+  SHA-256 `603823b591a99431e83556d1dd07e52ff0584864e952203e4a12cfcdb0d15a07`. That is FR-15's
+  acceptance.
+- An empty-placement Location composed byte-identically to `american_living_room(look=...)`.
+- The pinned static-plan hash
+  `92de3ed358ecc3bc4ef91127db9c6a12254e86a59f255645c03579b60b03788a` is unchanged.
+- `create_location` and `revise_location` are wired into `OPERATIONS`; revisions require
+  `expected_version` and explicit `episode_ids`.
+
+## Still owed
+
+No Blender render has been run against a placed asset, and the generated entity at
+`D:\Work\comfyui-trellis\ComfyUI\output\3D\entity_00001_.glb` has still not been registered
+through FR-03 or placed in a shot. The whole chain is now built and nothing has travelled
+down it end to end.
