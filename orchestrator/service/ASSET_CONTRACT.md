@@ -112,3 +112,76 @@ The production renderer runs `blender --background --factory-startup`. Confirm t
 import actually works under `--factory-startup`, since that flag resets preferences and the
 importer is an addon. If it does not, say so — do not work around it by abandoning
 `--factory-startup`, which FR-04 requires.
+
+---
+
+# Amendment 1 — what the parallel pass found
+
+Both agents worked from the text above. Five of its statements were wrong, and the code
+they read decided against me in every case. Recorded here rather than quietly fixed.
+
+## A1.1 — Decision 4 is superseded: the operation already exists
+
+`create_asset` is **already** a wired `Operation` (`POST /projects/{project_id}/assets`,
+`upload=True`, `routes.py:130`), sitting beside `search_assets`, with a special case in
+`app.py` that performs transport validation and then deliberately answers **501** because
+— in its own comment — "storing the asset is the absent adapter's job".
+
+**Fill that adapter. Do not add a `register_asset` operation.** `create_asset` must be
+removed from `DELIBERATE_501` in `tests/api/test_entry_path.py` once implemented, and the
+two sibling expectations in `tests/api/test_adapters.py` and `tests/api/test_cli_process.py`
+updated. Those three are the only legitimate test changes.
+
+## A1.2 — the provenance rule was a contradiction, and both readings were wrong
+
+Decision 1 said refusal required no licence **and** no source; the test rules said **or**.
+Neither is right, because `Asset.generated` exists:
+
+- **`license` is required for every asset**, generated or sourced.
+- **`source_url` is required only when `generated` is false.**
+
+A generated asset legitimately has no source URL. Refusing it would make FR-03 refuse the
+pipeline's own output.
+
+## A1.3 — registration stays as broad as FR-03; geometry-only binds to the import seam
+
+FR-03 covers "props, **textures**, and HDRIs". Narrowing `create_asset` to glTF makes a
+well-formed PNG upload a hard `upload_rejected` where it previously reached the adapter.
+"Texture *application* is out of scope" licensed no such thing.
+
+**`create_asset` registers any permitted upload kind with its provenance.** The glTF-only
+rule and the `.blend` refusal bind to the **geometry path** — an `ObjectSpec.asset_id`
+resolved for import — not to registration. A PNG must register and must then be refused
+only if something tries to import it as geometry.
+
+## A1.4 — `.glb` only; `.gltf` is withdrawn
+
+Decision 2 named both. `.gltf` is bare JSON referencing external `.bin` and texture files:
+it cannot be magic-byte verified without admitting arbitrary JSON, and it is not a single
+self-contained file, which defeats containment and single-checksum verification.
+
+**Uploads admit `.glb`.** This needs `MediaKind` widened past `Literal["image", "video"]`,
+a `.glb` entry in `_EXTENSION_KIND`, the glTF magic `b"glTF"` in
+`_extensions_matching_magic`, and a `max_model_bytes` cap in `UploadLimits`.
+
+Note the existing boundary is **stronger** than Decision 2 asked for: a closed extension
+allowlist plus extension/magic agreement, not a `.blend` denylist. Keep it that way.
+
+## A1.5 — the sizing arithmetic must be pure, or its guarantee is untestable
+
+The contract required asserting that declared `dimensions` govern the imported mesh. That
+is unprovable while the arithmetic sits inside a `bpy`-dependent function, and the test
+author correctly reported its test proves only that the declared value reaches the plan.
+
+**Extract the fit computation into a pure module-level function** — source bounds and
+declared dimensions in, per-axis factors out, with the degenerate-extent refusal — so it
+is unit-testable with no Blender. Deterministic logic does not belong behind a side effect.
+
+## Measured, not assumed
+
+glTF import **does** work under `blender --background --factory-startup --disable-autoexec`
+on Blender 5.2.0: the operator is available and import returned `FINISHED`. FR-04's flag
+stands.
+
+The pinned static-plan hash `92de3ed358ecc3bc4ef91127db9c6a12254e86a59f255645c03579b60b03788a`
+is unchanged, verified by a full local run, not by report.
