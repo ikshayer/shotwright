@@ -22,27 +22,57 @@ from orchestrator.domain.entities import (
     ShotOutput,
     ShotOutputKind,
 )
+from orchestrator.domain.state import TransitionContext, check_transition
 from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.service.dependencies import revise_shot
 from orchestrator.store.json_store import ProjectStore
 
 
-def _shot(store: ProjectStore, shot_id: str = "s1") -> Shot:
+def _advance_shot(store: ProjectStore, shot: Shot, target: ShotStatus) -> Shot:
+    """Seed an integration fixture at a legal pipeline stage through the store API."""
+    path = {
+        ShotStatus.DRAFT: ShotStatus.PLANNED,
+        ShotStatus.PLANNED: ShotStatus.BLOCKING,
+        ShotStatus.BLOCKING: ShotStatus.BUILDING,
+        ShotStatus.BUILDING: ShotStatus.REVIEW,
+    }
+    while shot.status is not target:
+        next_status = path.get(shot.status)
+        if next_status is None:
+            raise AssertionError(f"cannot fixture-advance Shot from {shot.status} to {target}")
+        check_transition(
+            shot.status,
+            next_status,
+            TransitionContext(framing_status=shot.framing_status),
+        )
+        _head, token = store.load_with_version(
+            Shot, shot.shot_id, episode_id=shot.episode_id,
+        )
+        store.update(shot.model_copy(update={"status": next_status}), expected_version=token)
+        shot = store.load(Shot, shot.shot_id, episode_id=shot.episode_id)
+    return shot
+
+
+def _shot(
+    store: ProjectStore,
+    shot_id: str = "s1",
+    *,
+    status: ShotStatus = ShotStatus.BLOCKING,
+) -> Shot:
     store.save(Project(project_id="p1", title="Test project"), expected_version=0)
     store.save(Episode(episode_id="ep1", project_id="p1", number=1,
                        duration_target_sec=30), expected_version=0)
+    store.create(CameraProfile(
+        camera_id="dvr-2005", profile_name="Fixture DVR camera",
+    ))
     shot = Shot(shot_id=shot_id, episode_id="ep1", duration_sec=5)
     store.create(shot)
-    return shot
+    return _advance_shot(store, shot, status)
 
 
 def _seed_degrade_inputs(store: ProjectStore, shot: Shot) -> None:
     """Supply composition's project records without involving a real adapter."""
     root = store._root
-    store.create(CameraProfile(
-        camera_id=shot.camera_profile,
-        profile_name="Fixture DVR camera",
-    ))
     font_relative = "assets/fonts/fixture-overlay.ttf"
     root.write_bytes(font_relative, b"fixture overlay font")
     store.save(
@@ -86,7 +116,11 @@ def _seed_degrade_inputs(store: ProjectStore, shot: Shot) -> None:
 
 
 def _revision(store: ProjectStore, before: Shot) -> Shot:
-    return before.model_copy(update={**before.next_version(), "narrative_beat": "revised"})
+    return before.model_copy(update={
+        **before.next_version(),
+        "narrative_beat": "revised",
+        "status": ShotStatus.DRAFT,
+    })
 
 
 def _drain_with_persisted_failure(env) -> None:
@@ -154,7 +188,11 @@ def test_completed_job_appends_output_bound_to_submitted_content_version(env) ->
 def test_kind_projects_to_output_kind_and_zero_vram_does_not_change_lease_routing(
     env, kind_name, expected_output_kind, takes_gpu_lease
 ) -> None:
-    shot = _shot(env.store)
+    stage = {
+        "scene": ShotStatus.PLANNED,
+        "degrade": ShotStatus.BUILDING,
+    }.get(kind_name, ShotStatus.BLOCKING)
+    shot = _shot(env.store, status=stage)
     if kind_name == "degrade":
         _seed_degrade_inputs(env.store, shot)
     env.adapter.release.set()
@@ -208,7 +246,7 @@ def test_missing_still_provenance_is_absent_and_job_still_succeeds(env) -> None:
 def test_adapter_result_object_attributes_supply_declared_provenance(env) -> None:
     from types import SimpleNamespace
 
-    _shot(env.store)
+    _shot(env.store, status=ShotStatus.PLANNED)
     env.adapter.release.set()
     env.adapter.result_value = SimpleNamespace(
         engine_id="BLENDER_EEVEE", engine_build="object-build", extra="ignored"

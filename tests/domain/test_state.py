@@ -56,14 +56,23 @@ def test_allowed_targets_matches_legal_table_exactly():
 
 
 @pytest.mark.parametrize("framing", [FramingStatus.NONE, FramingStatus.PENDING])
-def test_blocking_cannot_leave_until_framing_approved(framing):
-    with pytest.raises(TransitionError, match="framing"):
-        check_transition(S.BLOCKING, S.BUILDING, TransitionContext(framing_status=framing))
+def test_blocking_gate_allows_optional_none_and_refuses_pending(framing):
+    context = TransitionContext(framing_status=framing)
+    if framing is FramingStatus.PENDING:
+        with pytest.raises(TransitionError, match="framing is pending") as exc:
+            check_transition(S.BLOCKING, S.BUILDING, context)
+        assert "approve the FR-29 framing preview" in str(exc.value), (
+            f"pending framing refusal did not say how to resolve the gate: {exc.value}"
+        )
+    else:
+        check_transition(S.BLOCKING, S.BUILDING, context)
 
 
-def test_blocking_cannot_leave_with_default_context():
-    with pytest.raises(TransitionError):
-        check_transition(S.BLOCKING, S.BUILDING)
+def test_blocking_default_context_allows_optional_framing_to_pass():
+    check_transition(S.BLOCKING, S.BUILDING)
+    assert S.BUILDING in allowed_targets(S.BLOCKING), (
+        "default framing context represents no panel, which the creator decided passes"
+    )
 
 
 def test_blocking_leaves_once_framing_approved():

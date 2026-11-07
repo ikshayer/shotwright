@@ -136,7 +136,9 @@ def shots_invalidated_by_profile(
     hits = tuple(
         s.shot_id
         for s in shots
-        if s.status is ShotStatus.APPROVED and s.camera_id == diff.camera_id
+        if s.status is ShotStatus.APPROVED
+        and s.camera_profile_version is None
+        and (s.camera_id == diff.camera_id or s.camera_profile == diff.camera_id)
     )
     return Invalidated(hits, f"rebuild-triggering change ({detail})")
 
@@ -255,7 +257,11 @@ def revision_impact(
         diff = diff_camera_profile(before, after)
         if not diff.requires_rebuild:
             return ()
-        candidates = (shot for shot in shots if shot.camera_id == before.camera_id)
+        candidates = (
+            shot for shot in shots
+            if shot.camera_profile_version is None
+            and (shot.camera_id == before.camera_id or shot.camera_profile == before.camera_id)
+        )
     elif isinstance(before, Shot):
         if before.shot_id != after.shot_id or before.episode_id != after.episode_id:
             raise ValueError("cannot compare different Shots")

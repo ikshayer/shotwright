@@ -41,7 +41,14 @@ from typing import Any, ClassVar, TypeVar
 
 from pydantic import ValidationError
 
-from orchestrator.domain.base import SCHEMA_VERSION, Entity, ShotStatus, VersionedEntity
+from orchestrator.domain.base import (
+    SCHEMA_VERSION,
+    Entity,
+    FramingStatus,
+    Invalidation,
+    ShotStatus,
+    VersionedEntity,
+)
 from orchestrator.domain.entities import (
     CameraProfile,
     Episode,
@@ -57,6 +64,7 @@ from orchestrator.domain.entities import (
     StyleBible,
     Timeline,
 )
+from orchestrator.domain.invalidation import field_invalidation
 from orchestrator.domain.state import (
     RevisionError,
     TransitionContext,
@@ -77,6 +85,9 @@ _REPLACE_ATTEMPTS = 5
 _REPLACE_BACKOFF_S = 0.02
 _LIFECYCLE_FIELDS = frozenset({
     "status", "approval_review_id", "framing_status", "approval_notes",
+    # FR-29 panel refs change in the pending compare loop; profile pin and authoring
+    # markers change atomically with accepted framing.
+    "framing_panel_ref", "creator_authored", "camera_profile_version",
 })
 # Only declared filesystem references are paths; prose and identifiers are not.
 _PATH_FIELDS: dict[type[Entity], tuple[str, ...]] = {
@@ -611,6 +622,53 @@ class ProjectStore:
                 raise _invalid(
                     f"FR-29 creator_authored conflict: {', '.join(sorted(conflicts))}; "
                     "creator-authored fields cannot be overwritten by update()"
+                )
+            framing_approval = (
+                head.framing_status is FramingStatus.PENDING
+                and new.framing_status is FramingStatus.APPROVED
+            )
+            if framing_approval:
+                required_authored = {
+                    "camera_profile",
+                    "camera_profile_version",
+                    *(
+                        f"camera_profile.{name}"
+                        for name in CameraProfile.model_fields
+                        if field_invalidation(CameraProfile, name) is Invalidation.REBUILD
+                    ),
+                }
+                if not (
+                    head.status is ShotStatus.BLOCKING
+                    and new.status is ShotStatus.BUILDING
+                    and new.camera_profile_version is not None
+                    and required_authored.issubset(new.creator_authored)
+                ):
+                    raise _invalid(
+                        "FR-29 framing approval must atomically move blocking to building "
+                        "and freeze the accepted CameraProfile values"
+                    )
+            panel_changed = "framing_panel_ref" in changed
+            if panel_changed and not (
+                new.status is ShotStatus.BLOCKING
+                and new.framing_status is FramingStatus.PENDING
+                and bool(new.framing_panel_ref)
+            ):
+                raise _invalid(
+                    "FR-29 framing_panel_ref may change only while a pending panel is "
+                    "being created or replaced in blocking"
+                )
+            framing_binding_changed = bool(
+                changed & {"creator_authored", "camera_profile_version"}
+            )
+            if framing_binding_changed and not (
+                head.status is ShotStatus.BLOCKING
+                and new.status is ShotStatus.BUILDING
+                and head.framing_status is FramingStatus.PENDING
+                and new.framing_status is FramingStatus.APPROVED
+            ):
+                raise _invalid(
+                    "FR-29 camera values may only be frozen while approving pending framing; "
+                    "use revise() for creator-authored content changes"
                 )
         content = changed - _LIFECYCLE_FIELDS
         if content:

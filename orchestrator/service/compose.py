@@ -14,13 +14,19 @@ from __future__ import annotations
 import json
 from typing import Literal, cast
 
-from orchestrator.adapters.blender.scene import RenderRequest, SceneSpec, american_living_room
+from orchestrator.adapters.blender.scene import (
+    RenderRequest,
+    SceneSpec,
+    american_living_room,
+    validate_camera_placement,
+)
 from orchestrator.adapters.postprofile.profile import (
     EncodeSpec,
     OverlaySpec,
     PostProfileSpec,
 )
 from orchestrator.adapters.postprofile.runner import DegradeRequest
+from orchestrator.domain.base import Invalidation
 from orchestrator.domain.entities import (
     CameraProfile,
     PostProfile,
@@ -28,6 +34,7 @@ from orchestrator.domain.entities import (
     Shot,
     ShotOutputKind,
 )
+from orchestrator.domain.invalidation import field_invalidation
 from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.store.json_store import ProjectStore, RecordNotFound
 
@@ -43,13 +50,7 @@ def compose_render_request(
 ) -> RenderRequest:
     """Build the typed Blender request from the current Shot and referenced profile."""
     shot, _mutation_token = store.load_with_version(Shot, shot_id, episode_id=episode_id)
-    try:
-        camera_profile = store.load(CameraProfile, shot.camera_profile)
-    except RecordNotFound as exc:
-        raise RecordNotFound(
-            f"Shot {shot.shot_id!r} references missing CameraProfile "
-            f"{shot.camera_profile!r}"
-        ) from exc
+    camera_profile = camera_profile_for_render(store, shot)
     if shot.scene_look is not None and shot.scene_look not in {"bright", "low_key"}:
         raise ValueError(
             f"Shot {shot.shot_id!r} references missing scene look {shot.scene_look!r}"
@@ -67,7 +68,7 @@ def compose_render_request(
                 look=cast(Literal["bright", "low_key"], shot.scene_look)
             )
         anomaly_precomposed = False
-    return RenderRequest(
+    request = RenderRequest(
         shot_id=shot.shot_id,
         shot_version=shot.version,
         run_id=run_id,
@@ -83,6 +84,40 @@ def compose_render_request(
         mode=mode,
         engine="eevee",
     )
+    validate_camera_placement(request)
+    return request
+
+
+def camera_profile_for_render(store: ProjectStore, shot: Shot) -> CameraProfile:
+    """Resolve the latest post-only profile values and accepted framing values."""
+    try:
+        current = store.load(CameraProfile, shot.camera_profile)
+    except RecordNotFound as exc:
+        raise RecordNotFound(
+            f"Shot {shot.shot_id!r} references missing CameraProfile "
+            f"{shot.camera_profile!r}"
+        ) from exc
+    if shot.camera_profile_version is None:
+        return current
+    try:
+        frozen = store.load(
+            CameraProfile, shot.camera_profile, version=shot.camera_profile_version,
+        )
+    except RecordNotFound as exc:
+        raise JobError(
+            JobErrorKind.INVALID_MANIFEST,
+            f"Shot {shot.shot_id!r} pins missing CameraProfile "
+            f"{shot.camera_profile!r} version {shot.camera_profile_version}",
+            shot_id=shot.shot_id,
+            cause=exc,
+        ) from exc
+    rebuild_fields = {
+        name for name in CameraProfile.model_fields
+        if field_invalidation(CameraProfile, name) is Invalidation.REBUILD
+    }
+    values = {name: getattr(frozen, name) for name in rebuild_fields}
+    resolved = current.model_copy(update=values)
+    return CameraProfile.model_validate(resolved.model_dump(mode="python"))
 
 
 def _load_scene_spec(store: ProjectStore, shot: Shot) -> tuple[SceneSpec, bool]:

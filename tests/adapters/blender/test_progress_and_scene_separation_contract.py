@@ -13,6 +13,7 @@ import pytest
 from orchestrator.adapters.blender.runner import BlenderAdapter
 from orchestrator.adapters.blender.scene import build_scene_plan
 from orchestrator.domain.entities import (
+    CameraProfile,
     Episode,
     Project,
     Shot,
@@ -333,7 +334,14 @@ def test_build_scene_persists_scene_output_without_subprocess_or_gpu_lease(
     store.save(Project(project_id="p1", title="scene contract"), expected_version=0)
     store.save(Episode(episode_id="ep1", project_id="p1", number=1,
                        duration_target_sec=10), expected_version=0)
-    store.create(Shot(shot_id="shot-1", episode_id="ep1", duration_sec=1.01))
+    camera = CameraProfile(camera_id="cam", profile_name="Fixture camera")
+    store.create(camera)
+    store.create(Shot(
+        shot_id="shot-1",
+        episode_id="ep1",
+        camera_profile=camera.camera_id,
+        duration_sec=1.01,
+    ))
     nvml = _CountingNvml()
     launches: list[list[str]] = []
 

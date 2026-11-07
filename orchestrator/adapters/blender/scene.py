@@ -300,6 +300,7 @@ def build_scene_plan(request: RenderRequest) -> dict[str, object]:
         and math.dist(camera["camera_position"], request.scene.camera_target) <= 1e-9
     ):
         raise ValueError("camera_position override must not coincide with scene camera target")
+    validate_camera_placement(request)
     frame_end = 1 if request.mode == "preview" else max(1, math.ceil(request.duration_sec * 60))
     scene_data = _scene_payload(request, camera)
     if profile.camera_mode == "non_cctv":
@@ -339,6 +340,432 @@ def build_scene_plan(request: RenderRequest) -> dict[str, object]:
         plan["event_sec"] = request.event_sec
         plan["anomaly"] = request.anomaly.model_dump(mode="json")
     return plan
+
+
+def validate_camera_placement(request: RenderRequest) -> None:
+    """Reject a lens embedded in scene geometry or a view with no visible volume.
+
+    Primitive bounds are evaluated in their object-local coordinates. The room
+    shell is an inward-facing enclosure, so it is a valid visible surface but
+    does not count as solid geometry surrounding the camera.
+    """
+    camera = _rebuild_camera_fields(request.camera_profile)
+    position = camera["camera_position"] or request.scene.camera_location
+    poses = [(position, request.scene.camera_target)]
+    if request.camera_profile.camera_mode == "non_cctv":
+        frame_end = 1 if request.mode == "preview" else max(1, math.ceil(request.duration_sec * 60))
+        poses.extend(
+            (keyframe.location, keyframe.target)
+            for keyframe in _handheld_camera_keyframes(request, camera, frame_end)
+        )
+    width, height = (640, 480) if request.mode == "preview" else request.master_resolution
+    for camera_position, target in poses:
+        _validate_camera_pose(
+            request.scene,
+            camera_position=camera_position,
+            camera_target=target,
+            lens_mm=float(camera["field_of_view_mm"]),
+            image_width=width,
+            image_height=height,
+        )
+
+
+_PLACEMENT_EPSILON_M = 1e-6
+
+
+def _validate_camera_pose(
+    scene: SceneSpec,
+    *,
+    camera_position: Vec3,
+    camera_target: Vec3,
+    lens_mm: float,
+    image_width: int,
+    image_height: int,
+) -> None:
+    if math.dist(camera_position, camera_target) <= _PLACEMENT_EPSILON_M:
+        raise ValueError("camera placement has a degenerate view vector")
+    basis = _camera_basis(camera_position, camera_target)
+    forward = basis[0]
+    nearest_name: str | None = None
+    nearest_distance: float | None = None
+    visible_objects: list[str] = []
+
+    for obj in scene.objects:
+        local_position = _world_to_object_local(camera_position, obj)
+        if obj.name.casefold() != "roomshell" and _point_inside_object(local_position, obj):
+            interval = _ray_object_interval(
+                local_position,
+                _world_direction_to_object_local(forward, obj),
+                obj,
+            )
+            surface_distance = (
+                interval[1] if interval is not None and interval[1] > 0 else 0.0
+            )
+            raise ValueError(
+                f"camera is inside object {obj.name!r}; nearest surface along the view "
+                f"vector is {surface_distance:.3f} m away"
+            )
+
+        local_direction = _world_direction_to_object_local(forward, obj)
+        interval = _ray_object_interval(local_position, local_direction, obj)
+        if interval is not None:
+            entry, exit_distance = interval
+            surface_distance = entry if entry > _PLACEMENT_EPSILON_M else exit_distance
+            if surface_distance >= 0 and (
+                nearest_distance is None or surface_distance < nearest_distance
+            ):
+                nearest_name = obj.name
+                nearest_distance = surface_distance
+
+        surface_points = _object_world_surface_samples(obj)
+        projected = [
+            _project_camera_point(
+                point,
+                camera_position=camera_position,
+                basis=basis,
+                lens_mm=lens_mm,
+                image_width=image_width,
+                image_height=image_height,
+            )
+            for point in surface_points
+        ]
+        in_frame = [
+            point for point in projected
+            if point is not None
+            and 0 <= point[0] <= image_width
+            and 0 <= point[1] <= image_height
+        ]
+        if len(in_frame) < 3:
+            continue
+        left = min(point[0] for point in in_frame)
+        right = max(point[0] for point in in_frame)
+        top = min(point[1] for point in in_frame)
+        bottom = max(point[1] for point in in_frame)
+        if right - left > 1.0 and bottom - top > 1.0:
+            visible_objects.append(obj.name)
+
+    if nearest_distance is not None and nearest_distance <= _PLACEMENT_EPSILON_M:
+        raise ValueError(
+            f"camera is touching object {nearest_name!r}; nearest surface along the "
+            f"view vector is {nearest_distance:.6f} m away"
+        )
+    if not visible_objects:
+        nearest = (
+            f"{nearest_name!r} at {nearest_distance:.3f} m"
+            if nearest_name is not None and nearest_distance is not None
+            else "no scene surface"
+        )
+        raise ValueError(
+            "camera view has no non-degenerate visible object volume; nearest surface "
+            f"along the view vector is {nearest}"
+        )
+
+
+def _world_to_object_local(point: Vec3, obj: ObjectSpec) -> Vec3:
+    translated = tuple(value - origin for value, origin in zip(point, obj.location))
+    return _inverse_rotate_xyz(translated, obj.rotation)
+
+
+def _world_direction_to_object_local(direction: Vec3, obj: ObjectSpec) -> Vec3:
+    return _inverse_rotate_xyz(direction, obj.rotation)
+
+
+def _inverse_rotate_xyz(point: Vec3, rotation: Vec3) -> Vec3:
+    x, y, z = point
+    rx, ry, rz = rotation
+    cos_z, sin_z = math.cos(rz), math.sin(rz)
+    x, y = cos_z * x + sin_z * y, -sin_z * x + cos_z * y
+    cos_y, sin_y = math.cos(ry), math.sin(ry)
+    x, z = cos_y * x - sin_y * z, sin_y * x + cos_y * z
+    cos_x, sin_x = math.cos(rx), math.sin(rx)
+    y, z = cos_x * y + sin_x * z, -sin_x * y + cos_x * z
+    return (x, y, z)
+
+
+def _rotate_xyz(point: Vec3, rotation: Vec3) -> Vec3:
+    x, y, z = point
+    rx, ry, rz = rotation
+    cos_x, sin_x = math.cos(rx), math.sin(rx)
+    y, z = cos_x * y - sin_x * z, sin_x * y + cos_x * z
+    cos_y, sin_y = math.cos(ry), math.sin(ry)
+    x, z = cos_y * x + sin_y * z, -sin_y * x + cos_y * z
+    cos_z, sin_z = math.cos(rz), math.sin(rz)
+    x, y = cos_z * x - sin_z * y, sin_z * x + cos_z * y
+    return (x, y, z)
+
+
+def _point_inside_object(point: Vec3, obj: ObjectSpec) -> bool:
+    half_x, half_y, half_z = (dimension / 2 for dimension in obj.dimensions)
+    if obj.kind == "box":
+        return abs(point[0]) <= half_x and abs(point[1]) <= half_y and abs(point[2]) <= half_z
+    if obj.kind == "cylinder":
+        radial = (point[0] / half_x) ** 2 + (point[1] / half_y) ** 2
+        return radial <= 1 and abs(point[2]) <= half_z
+    if obj.kind == "sphere":
+        return sum((coordinate / half) ** 2 for coordinate, half in zip(
+            point, (half_x, half_y, half_z)
+        )) <= 1
+    if obj.kind == "cone":
+        if abs(point[2]) > half_z:
+            return False
+        height_fraction = (point[2] + half_z) / (2 * half_z)
+        radius_scale = 1.0 - 0.76 * height_fraction
+        radial = (point[0] / (half_x * radius_scale)) ** 2
+        radial += (point[1] / (half_y * radius_scale)) ** 2
+        return radial <= 1
+    if obj.kind == "torus":
+        radial = math.sqrt((point[0] / half_x) ** 2 + (point[1] / half_y) ** 2)
+        tube = ((radial - 0.4) / 0.1) ** 2 + (point[2] / (half_z * 0.1)) ** 2
+        return tube <= 1
+    return False
+
+
+def _ray_object_interval(
+    origin: Vec3,
+    direction: Vec3,
+    obj: ObjectSpec,
+) -> tuple[float, float] | None:
+    """Return ray entry/exit distances through the primitive's local bounds."""
+    half = tuple(dimension / 2 for dimension in obj.dimensions)
+    if obj.kind == "sphere":
+        scaled_origin = tuple(value / radius for value, radius in zip(origin, half))
+        scaled_direction = tuple(value / radius for value, radius in zip(direction, half))
+        a = _dot(scaled_direction, scaled_direction)
+        b = 2 * _dot(scaled_origin, scaled_direction)
+        c = _dot(scaled_origin, scaled_origin) - 1
+        discriminant = b * b - 4 * a * c
+        if discriminant < 0:
+            return None
+        root = math.sqrt(discriminant)
+        return ((-b - root) / (2 * a), (-b + root) / (2 * a))
+    if obj.kind == "cylinder":
+        candidates: list[float] = []
+        a = (direction[0] / half[0]) ** 2 + (direction[1] / half[1]) ** 2
+        b = 2 * (
+            origin[0] * direction[0] / half[0] ** 2
+            + origin[1] * direction[1] / half[1] ** 2
+        )
+        c = (origin[0] / half[0]) ** 2 + (origin[1] / half[1]) ** 2 - 1
+        discriminant = b * b - 4 * a * c
+        if a > _PLACEMENT_EPSILON_M and discriminant >= 0:
+            root = math.sqrt(discriminant)
+            for distance in ((-b - root) / (2 * a), (-b + root) / (2 * a)):
+                z = origin[2] + distance * direction[2]
+                if abs(z) <= half[2]:
+                    candidates.append(distance)
+        if abs(direction[2]) > _PLACEMENT_EPSILON_M:
+            for cap in (-half[2], half[2]):
+                distance = (cap - origin[2]) / direction[2]
+                x = origin[0] + distance * direction[0]
+                y = origin[1] + distance * direction[1]
+                if (x / half[0]) ** 2 + (y / half[1]) ** 2 <= 1:
+                    candidates.append(distance)
+        positive = [distance for distance in candidates if distance >= 0]
+        if positive:
+            return (min(positive), max(positive))
+        return None
+    if obj.kind == "cone":
+        height = half[2] * 2
+        scale_at_origin = 1.0 - 0.76 * (origin[2] + half[2]) / height
+        scale_per_meter = -0.76 * direction[2] / height
+        x_origin, x_direction = origin[0] / half[0], direction[0] / half[0]
+        y_origin, y_direction = origin[1] / half[1], direction[1] / half[1]
+        a = x_direction**2 + y_direction**2 - scale_per_meter**2
+        b = 2 * (
+            x_origin * x_direction + y_origin * y_direction
+            - scale_at_origin * scale_per_meter
+        )
+        c = x_origin**2 + y_origin**2 - scale_at_origin**2
+        candidates = [
+            distance
+            for distance in _quadratic_roots(a, b, c)
+            if abs(origin[2] + distance * direction[2]) <= half[2]
+        ]
+        if abs(direction[2]) > _PLACEMENT_EPSILON_M:
+            for cap, cap_scale in ((-half[2], 1.0), (half[2], 0.24)):
+                distance = (cap - origin[2]) / direction[2]
+                x = (origin[0] + distance * direction[0]) / half[0]
+                y = (origin[1] + distance * direction[1]) / half[1]
+                if x * x + y * y <= cap_scale * cap_scale:
+                    candidates.append(distance)
+        positive = [distance for distance in candidates if distance >= 0]
+        if positive:
+            return (min(positive), max(positive))
+        return None
+    if obj.kind == "torus":
+        return _ray_torus_interval(origin, direction, half)
+    return _ray_box_interval(origin, direction, half)
+
+
+def _quadratic_roots(a: float, b: float, c: float) -> tuple[float, ...]:
+    if abs(a) <= _PLACEMENT_EPSILON_M:
+        return (-c / b,) if abs(b) > _PLACEMENT_EPSILON_M else ()
+    discriminant = b * b - 4 * a * c
+    if discriminant < 0:
+        return ()
+    root = math.sqrt(discriminant)
+    return ((-b - root) / (2 * a), (-b + root) / (2 * a))
+
+
+def _ray_torus_interval(
+    origin: Vec3,
+    direction: Vec3,
+    half: tuple[float, float, float],
+) -> tuple[float, float] | None:
+    bounds = _ray_box_interval(origin, direction, half)
+    if bounds is None:
+        return None
+    start, end = max(0.0, bounds[0]), bounds[1]
+    if end <= start:
+        return None
+
+    def signed_surface_distance(distance: float) -> float:
+        x = (origin[0] + distance * direction[0]) / half[0]
+        y = (origin[1] + distance * direction[1]) / half[1]
+        z = (origin[2] + distance * direction[2]) / half[2]
+        radial = math.sqrt(x * x + y * y)
+        return (radial - 0.4) ** 2 + z * z - 0.1**2
+
+    step_size = max(min(half) * 0.02, _PLACEMENT_EPSILON_M)
+    samples = min(8192, max(64, math.ceil((end - start) / step_size)))
+    distances = [start + (end - start) * index / samples for index in range(samples + 1)]
+    roots: list[float] = []
+    left = distances[0]
+    left_value = signed_surface_distance(left)
+    for right in distances[1:]:
+        right_value = signed_surface_distance(right)
+        if left_value == 0:
+            roots.append(left)
+        elif (left_value < 0) != (right_value < 0):
+            low, high = left, right
+            low_value = left_value
+            for _ in range(40):
+                middle = (low + high) / 2
+                middle_value = signed_surface_distance(middle)
+                if (low_value < 0) == (middle_value < 0):
+                    low, low_value = middle, middle_value
+                else:
+                    high = middle
+            roots.append((low + high) / 2)
+        left, left_value = right, right_value
+    if left_value == 0:
+        roots.append(distances[-1])
+    if not roots:
+        return None
+    return min(roots), max(roots)
+
+
+def _ray_box_interval(
+    origin: Vec3,
+    direction: Vec3,
+    half: tuple[float, float, float],
+) -> tuple[float, float] | None:
+    entry, exit_distance = -math.inf, math.inf
+    for coordinate, component, extent in zip(origin, direction, half):
+        if abs(component) <= _PLACEMENT_EPSILON_M:
+            if coordinate < -extent or coordinate > extent:
+                return None
+            continue
+        first = (-extent - coordinate) / component
+        second = (extent - coordinate) / component
+        entry = max(entry, min(first, second))
+        exit_distance = min(exit_distance, max(first, second))
+        if entry > exit_distance:
+            return None
+    if exit_distance < 0:
+        return None
+    return entry, exit_distance
+
+
+def _object_world_surface_samples(obj: ObjectSpec) -> tuple[Vec3, ...]:
+    """Return deterministic points on the primitive surface for view-volume checks."""
+    half = tuple(dimension / 2 for dimension in obj.dimensions)
+    local_points: list[Vec3] = []
+    angular_steps = 48
+    if obj.kind == "box":
+        grid = tuple(-1 + 2 * index / 8 for index in range(9))
+        for fixed_axis in range(3):
+            other_axes = tuple(axis for axis in range(3) if axis != fixed_axis)
+            for sign in (-1, 1):
+                for first in grid:
+                    for second in grid:
+                        point = [0.0, 0.0, 0.0]
+                        point[fixed_axis] = sign * half[fixed_axis]
+                        point[other_axes[0]] = first * half[other_axes[0]]
+                        point[other_axes[1]] = second * half[other_axes[1]]
+                        local_points.append(tuple(point))
+    elif obj.kind == "cylinder":
+        for index in range(angular_steps):
+            angle = 2 * math.pi * index / angular_steps
+            x, y = half[0] * math.cos(angle), half[1] * math.sin(angle)
+            for level in (-1, -0.5, 0, 0.5, 1):
+                local_points.append((x, y, level * half[2]))
+            local_points.extend(((x, y, -half[2]), (x, y, half[2])))
+        local_points.extend(((0.0, 0.0, -half[2]), (0.0, 0.0, half[2])))
+    elif obj.kind == "sphere":
+        latitude_steps = 24
+        for latitude_index in range(latitude_steps + 1):
+            latitude = -math.pi / 2 + math.pi * latitude_index / latitude_steps
+            for longitude_index in range(angular_steps):
+                longitude = 2 * math.pi * longitude_index / angular_steps
+                local_points.append((
+                    half[0] * math.cos(latitude) * math.cos(longitude),
+                    half[1] * math.cos(latitude) * math.sin(longitude),
+                    half[2] * math.sin(latitude),
+                ))
+    elif obj.kind == "cone":
+        for level_index in range(9):
+            level = level_index / 8
+            z = -half[2] + 2 * half[2] * level
+            radius_scale = 1.0 - 0.76 * level
+            for angular_index in range(angular_steps):
+                angle = 2 * math.pi * angular_index / angular_steps
+                local_points.append((
+                    half[0] * radius_scale * math.cos(angle),
+                    half[1] * radius_scale * math.sin(angle),
+                    z,
+                ))
+        local_points.append((0.0, 0.0, -half[2]))
+    else:
+        major_steps, tube_steps = 48, 16
+        for major_index in range(major_steps):
+            major_angle = 2 * math.pi * major_index / major_steps
+            for tube_index in range(tube_steps):
+                tube_angle = 2 * math.pi * tube_index / tube_steps
+                ring = 0.4 + 0.1 * math.cos(tube_angle)
+                local_points.append((
+                    half[0] * ring * math.cos(major_angle),
+                    half[1] * ring * math.sin(major_angle),
+                    half[2] * 0.1 * math.sin(tube_angle),
+                ))
+
+    world_points = []
+    for point in local_points:
+        rotated = _rotate_xyz(point, obj.rotation)
+        world_points.append(tuple(
+            position + offset for position, offset in zip(obj.location, rotated)
+        ))
+    return tuple(world_points)
+
+
+def _project_camera_point(
+    point: Vec3,
+    *,
+    camera_position: Vec3,
+    basis: tuple[Vec3, Vec3, Vec3],
+    lens_mm: float,
+    image_width: int,
+    image_height: int,
+) -> tuple[float, float] | None:
+    forward, right, up = basis
+    relative = tuple(value - origin for value, origin in zip(point, camera_position))
+    depth = _dot(relative, forward)
+    if depth <= _PLACEMENT_EPSILON_M:
+        return None
+    focal_px = lens_mm * image_width / _CAMERA_SENSOR_WIDTH_MM
+    x = image_width / 2 + _dot(relative, right) * focal_px / depth
+    y = image_height / 2 - _dot(relative, up) * focal_px / depth
+    return x, y
 
 
 def _handheld_camera_keyframes(

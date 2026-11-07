@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import threading
 import time
 import uuid
@@ -17,7 +18,7 @@ from orchestrator.adapters.blender.runner import RenderRequest
 from orchestrator.adapters.comfyui.workflow import ImageRequest
 from orchestrator.adapters.postprofile.profile import PostProfileSpec
 from orchestrator.adapters.postprofile.runner import DegradeRequest
-from orchestrator.domain.base import Invalidation
+from orchestrator.domain.base import Invalidation, ShotStatus
 from orchestrator.domain.entities import (
     CameraProfile,
     Job,
@@ -26,12 +27,13 @@ from orchestrator.domain.entities import (
     ShotOutputKind,
 )
 from orchestrator.domain.invalidation import field_invalidation
+from orchestrator.domain.state import TransitionContext, TransitionError, check_transition
 from orchestrator.jobs.journal import append_job, read_job
 from orchestrator.jobs.queue import JobQueue
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.errors import JobError, JobErrorKind, failure_diagnostics
 from orchestrator.platform.settings import Settings
-from orchestrator.service.compose import compose_degrade_request
+from orchestrator.service.compose import camera_profile_for_render, compose_degrade_request
 from orchestrator.store.json_store import ProjectStore, RecordNotFound
 
 
@@ -337,6 +339,7 @@ class JobRunner:
                         JobErrorKind.CANCELLED, "job cancelled before adapter start", active
                     )
                 try:
+                    _begin_shot_work(store, request, active)
                     return adapter.invoke(request, active, queue=queue)
                 except Exception as exc:
                     raise JobError.from_exception(
@@ -372,6 +375,15 @@ class JobRunner:
             )
             self._record_result(store, root, request, job, result)
         except JobError as exc:
+            if exc.kind is not JobErrorKind.CANCELLED:
+                lifecycle_error = _fail_shot_after_job_error(store, request)
+                if lifecycle_error is not None:
+                    exc.message = (
+                        f"{exc.message}; also failed to move the Shot from building to "
+                        f"failed: {lifecycle_error}"
+                    )
+                    exc.args = (exc.message,)
+                    exc.__cause__ = lifecycle_error
             if job.state not in {"failed", "cancelled"}:
                 try:
                     queue = _kind_queue(self.queue_for, project_id, request.kind)
@@ -385,6 +397,14 @@ class JobRunner:
             error = JobError.from_exception(
                 exc, job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id, origin="runner"
             )
+            lifecycle_error = _fail_shot_after_job_error(store, request)
+            if lifecycle_error is not None:
+                error.message = (
+                    f"{error.message}; also failed to move the Shot from building to "
+                    f"failed: {lifecycle_error}"
+                )
+                error.args = (error.message,)
+                error.__cause__ = lifecycle_error
             job.state, job.error_kind = "failed", error.kind.value
             _persist_job(root, job, error, self.settings)
         finally:
@@ -408,28 +428,58 @@ class JobRunner:
         digest = hasher.hexdigest()
         with store.command():
             try:
-                shot = store.load(Shot, request.record_id, episode_id=request.episode_id)
+                shot, token = store.load_with_version(
+                    Shot, request.record_id, episode_id=request.episode_id,
+                )
             except RecordNotFound as exc:
                 raise _job_error(JobErrorKind.INVALID_MANIFEST,
                                  "bound Shot was deleted before recording; restore the Shot history", job,
                                  cause=exc) from exc
             kind = _output_kind(request.kind, request.payload)
             provenance = _provenance(kind, result.value)
-            output = ShotOutput(
-                output_id=uuid.uuid4().hex, episode_id=shot.episode_id, shot_id=shot.shot_id,
-                record_version=request.record_version, kind=kind,
-                relative_path=result.artifact_path, content_sha256=digest, **provenance,
-            )
             try:
-                store.load(Shot, request.record_id, episode_id=shot.episode_id,
-                           version=request.record_version)
+                bound_shot = store.load(
+                    Shot, request.record_id, episode_id=shot.episode_id,
+                    version=request.record_version,
+                )
             except RecordNotFound as exc:
                 raise _job_error(JobErrorKind.INVALID_MANIFEST,
                                  "bound Shot content version no longer exists; restore its project history", job,
                                  cause=exc) from exc
+            camera_binding = _camera_profile_binding(request, bound_shot, kind, job)
+            output = ShotOutput(
+                output_id=uuid.uuid4().hex, episode_id=shot.episode_id, shot_id=shot.shot_id,
+                record_version=request.record_version, kind=kind,
+                relative_path=result.artifact_path, content_sha256=digest,
+                **camera_binding, **provenance,
+            )
             existing = store.list_shot_outputs(shot.shot_id, episode_id=shot.episode_id)
             # Ledger tokens are contiguous and append-only, so row count is its head token.
             store.append_shot_output(output, expected_version=len(existing))
+            if shot.version == request.record_version:
+                if kind is ShotOutputKind.SCENE and shot.status is ShotStatus.PLANNED:
+                    shot, token = _transition_loaded_shot(
+                        store, shot, token, ShotStatus.BLOCKING, job=job,
+                    )
+                elif kind is ShotOutputKind.SCENE and shot.status is ShotStatus.BLOCKING:
+                    try:
+                        check_transition(
+                            shot.status, ShotStatus.BLOCKING,
+                            TransitionContext(framing_status=shot.framing_status),
+                        )
+                    except TransitionError as exc:
+                        raise _lifecycle_job_error(exc, job) from exc
+
+                delivered = store.list_shot_outputs(
+                    shot.shot_id,
+                    episode_id=shot.episode_id,
+                    record_version=shot.version,
+                    kind=ShotOutputKind.DEGRADED,
+                )
+                if delivered and shot.status is ShotStatus.BUILDING:
+                    _transition_loaded_shot(
+                        store, shot, token, ShotStatus.REVIEW, job=job,
+                    )
 
     def _is_cancelled(self, key: tuple[str, str]) -> bool:
         with self._condition:
@@ -448,6 +498,189 @@ def _payload_body(payload: Any) -> Any:
 
 def _payload_value(payload: Any, name: str) -> Any:
     return payload.get(name) if isinstance(payload, dict) else getattr(payload, name, None)
+
+
+def _camera_profile_binding(
+    request: AdapterRequest,
+    shot: Shot,
+    kind: ShotOutputKind,
+    job: Job,
+) -> dict[str, str | int]:
+    if kind not in {
+        ShotOutputKind.SCENE, ShotOutputKind.MASTER, ShotOutputKind.PREVIEW,
+    }:
+        return {}
+    payload = _payload_body(request.payload)
+    profile = _payload_value(payload, "camera_profile")
+    profile_id = _payload_value(profile, "camera_id") if profile is not None else None
+    profile_version = _payload_value(profile, "version") if profile is not None else None
+    if profile_id is None and profile_version is None:
+        return {}
+    if profile_id != shot.camera_profile:
+        raise _job_error(
+            JobErrorKind.INVALID_MANIFEST,
+            f"render request uses CameraProfile {profile_id!r}, but Shot "
+            f"{shot.shot_id!r} references {shot.camera_profile!r}",
+            job,
+        )
+    if type(profile_version) is not int or profile_version < 1:
+        raise _job_error(
+            JobErrorKind.INVALID_MANIFEST,
+            f"render request for Shot {shot.shot_id!r} has no valid CameraProfile version",
+            job,
+        )
+    return {
+        "camera_profile_id": shot.camera_profile,
+        "camera_profile_version": shot.camera_profile_version or profile_version,
+    }
+
+
+def _begin_shot_work(store: ProjectStore, request: AdapterRequest, job: Job) -> None:
+    """Advance a current Shot into the state required by the submitted stage."""
+    with store.command():
+        try:
+            shot, token = store.load_with_version(
+                Shot, request.record_id, episode_id=request.episode_id,
+            )
+        except RecordNotFound as exc:
+            raise _job_error(
+                JobErrorKind.INVALID_MANIFEST,
+                "bound Shot disappeared before its job started",
+                job,
+                cause=exc,
+            ) from exc
+        if shot.version != request.record_version:
+            # Historical jobs retain their own outputs but cannot drive today's lifecycle.
+            return
+
+        if request.kind is AdapterKind.SCENE and shot.status is ShotStatus.DRAFT:
+            if not math.isfinite(shot.duration_sec) or shot.duration_sec <= 0:
+                raise _job_error(
+                    JobErrorKind.INVALID_MANIFEST,
+                    f"Shot {shot.shot_id!r} needs a finite positive duration before planning",
+                    job,
+                )
+            try:
+                camera_profile_for_render(store, shot)
+            except RecordNotFound as exc:
+                raise _job_error(
+                    JobErrorKind.INVALID_MANIFEST,
+                    f"Shot {shot.shot_id!r} cannot be planned because its CameraProfile "
+                    f"{shot.camera_profile!r} cannot be resolved",
+                    job,
+                    cause=exc,
+                ) from exc
+            shot, token = _transition_loaded_shot(
+                store, shot, token, ShotStatus.PLANNED, job=job,
+            )
+
+        if shot.status is ShotStatus.FAILED:
+            shot, token = _transition_loaded_shot(
+                store, shot, token, ShotStatus.BUILDING, job=job,
+            )
+
+        if request.kind is AdapterKind.SCENE:
+            if shot.status is ShotStatus.BLOCKING:
+                try:
+                    check_transition(
+                        shot.status, ShotStatus.BLOCKING,
+                        TransitionContext(framing_status=shot.framing_status),
+                    )
+                except TransitionError as exc:
+                    raise _lifecycle_job_error(exc, job) from exc
+                return
+            if shot.status in {ShotStatus.PLANNED, ShotStatus.BUILDING}:
+                return
+            try:
+                check_transition(
+                    shot.status, ShotStatus.PLANNED,
+                    TransitionContext(framing_status=shot.framing_status),
+                )
+            except TransitionError as exc:
+                raise _lifecycle_job_error(exc, job) from exc
+        elif request.kind is AdapterKind.RENDER:
+            body = _payload_body(request.payload)
+            mode = _payload_value(body, "mode") or "master"
+            if mode == "preview":
+                if shot.status is not ShotStatus.BLOCKING:
+                    raise _job_error(
+                        JobErrorKind.INVALID_MANIFEST,
+                        f"FR-29 framing preview requires Shot status 'blocking'; "
+                        f"found {shot.status.value}",
+                        job,
+                    )
+                return
+            if shot.status is ShotStatus.BUILDING:
+                return
+            _transition_loaded_shot(
+                store,
+                shot,
+                token,
+                ShotStatus.BUILDING,
+                TransitionContext(framing_status=shot.framing_status),
+                job,
+            )
+        elif request.kind is AdapterKind.DEGRADE and shot.status is not ShotStatus.BUILDING:
+            raise _job_error(
+                JobErrorKind.INVALID_MANIFEST,
+                f"degrade_media requires Shot status 'building'; found {shot.status.value}",
+                job,
+            )
+
+
+def _transition_loaded_shot(
+    store: ProjectStore,
+    shot: Shot,
+    token: int,
+    target: ShotStatus,
+    context: TransitionContext | None = None,
+    job: Job | None = None,
+) -> tuple[Shot, int]:
+    try:
+        check_transition(shot.status, target, context)
+    except TransitionError as exc:
+        raise _lifecycle_job_error(exc, job) from exc
+    updated = shot.model_copy(update={"status": target})
+    store.update(updated, expected_version=token)
+    current, current_token = store.load_with_version(
+        Shot, shot.shot_id, episode_id=shot.episode_id,
+    )
+    return current, current_token
+
+
+def _lifecycle_job_error(
+    exc: TransitionError,
+    job: Job | None,
+) -> JobError:
+    return JobError(
+        JobErrorKind.INVALID_MANIFEST,
+        str(exc),
+        job_id=job.job_id if job is not None else None,
+        shot_id=job.shot_id if job is not None else None,
+        run_id=job.run_id if job is not None else None,
+        cause=exc,
+    )
+
+
+def _fail_shot_after_job_error(
+    store: ProjectStore,
+    request: AdapterRequest,
+) -> BaseException | None:
+    """Move only the bound current version from building to failed."""
+    try:
+        with store.command():
+            try:
+                shot, token = store.load_with_version(
+                    Shot, request.record_id, episode_id=request.episode_id,
+                )
+            except RecordNotFound:
+                return None
+            if shot.version != request.record_version or shot.status is not ShotStatus.BUILDING:
+                return None
+            _transition_loaded_shot(store, shot, token, ShotStatus.FAILED)
+    except Exception as exc:  # noqa: BLE001 - report the secondary failure on the originating job.
+        return exc
+    return None
 
 
 def _artifact_path(kind: AdapterKind, value: Any, payload: Any = None) -> str:

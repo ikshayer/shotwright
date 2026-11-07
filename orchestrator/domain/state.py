@@ -88,15 +88,17 @@ def check_transition(
         permitted = ", ".join(sorted(s.value for s in _EDGES[current])) or "nothing"
         raise TransitionError(current, target, f"only {permitted} is reachable from here")
 
-    if (
-        current is S.BLOCKING
-        and target is S.BUILDING
-        and ctx.framing_status is not FramingStatus.APPROVED
-    ):
-        raise TransitionError(
-            current, target,
-            "framing_status must be 'approved' first - resolve the FR-29 compare loop",
-        )
+    if current is S.BLOCKING and target is S.BUILDING:
+        if ctx.framing_status is FramingStatus.PENDING:
+            raise TransitionError(
+                current, target,
+                "framing is pending; approve the FR-29 framing preview before production",
+            )
+        if ctx.framing_status not in {FramingStatus.APPROVED, FramingStatus.NONE}:
+            raise TransitionError(
+                current, target,
+                "framing_status must be 'approved' or 'none' before production",
+            )
 
     if target is S.APPROVED:
         if not ctx.approving_review_id:
@@ -173,6 +175,15 @@ def check_revision(before: VersionedEntity, after: VersionedEntity) -> None:
         raise RevisionError("a revision never inherits approval")
     if isinstance(after, Shot) and after.status is not ShotStatus.DRAFT:
         raise RevisionError("a revised Shot must be draft")
+    if (
+        isinstance(before, Shot)
+        and before.camera_profile != after.camera_profile
+        and after.camera_profile_version is not None
+    ):
+        raise RevisionError(
+            "changing Shot.camera_profile must clear camera_profile_version; "
+            "accept framing against the new profile to pin it"
+        )
 
 
 def check_dependency_freshness(

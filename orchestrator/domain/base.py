@@ -31,7 +31,7 @@ class ShotStatus(StrEnum):
 
 
 class FramingStatus(StrEnum):
-    """FR-29. A shot leaves `blocking` only when this reaches `approved`."""
+    """FR-29. Pending framing blocks production; none and approved pass."""
 
     NONE = "none"
     PENDING = "pending"

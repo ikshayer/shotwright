@@ -120,6 +120,10 @@ class Shot(VersionedEntity):
     location_id: str | None = None
     camera_id: str | None = None
     camera_profile: str = "dvr-2005"
+    # FR-29 pins the rebuild-triggering values from this CameraProfile version
+    # version whose rebuild-triggering values the creator accepted. Post-only
+    # values still resolve from the latest profile for re-derivation.
+    camera_profile_version: int | None = Field(None, ge=1)
     post_profile: str | None = None
     # Placeholder until Location is implemented: scene look belongs on Location,
     # because a room's lighting is a property of place and time of day, not Shot.
@@ -214,6 +218,8 @@ class ShotOutput(Entity):
     kind: ShotOutputKind
     relative_path: str = Field(min_length=1)
     content_sha256: str
+    camera_profile_id: str | None = None
+    camera_profile_version: int | None = Field(None, ge=1, strict=True)
     engine_id: str | None = None
     engine_build: str | None = None
     profile_semver: str | None = None
@@ -244,6 +250,12 @@ class ShotOutput(Entity):
     def _provenance_matches_kind(self) -> ShotOutput:
         if not re.fullmatch(r"[0-9a-f]{64}", self.content_sha256):
             raise ValueError("content_sha256 must be 64 lowercase hexadecimal characters")
+        if (self.camera_profile_id is None) != (self.camera_profile_version is None):
+            raise ValueError("CameraProfile provenance must provide both id and version or neither")
+        if self.kind not in {
+            ShotOutputKind.SCENE, ShotOutputKind.MASTER, ShotOutputKind.PREVIEW,
+        } and self.camera_profile_id is not None:
+            raise ValueError(f"{self.kind.value} output may not carry CameraProfile provenance")
         if self.kind is ShotOutputKind.SCENE:
             if (self.engine_id is None) != (self.engine_build is None):
                 raise ValueError("scene output must provide both engine_id and engine_build or neither")

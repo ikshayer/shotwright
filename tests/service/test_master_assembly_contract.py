@@ -20,6 +20,7 @@ from typing import Any, Self
 
 import pytest
 
+from orchestrator.domain.base import ShotStatus
 from orchestrator.domain.entities import (
     CameraProfile,
     Episode,
@@ -28,6 +29,7 @@ from orchestrator.domain.entities import (
     Shot,
     ShotOutputKind,
 )
+from orchestrator.domain.state import TransitionContext, check_transition
 from orchestrator.service.runner import (
     AdapterKind,
     AdapterRegistry,
@@ -40,6 +42,29 @@ from tests.adapters.blender.test_supervision_contract import FakePopen, setup
 
 _FAKE_FFMPEG_VERSION = b"ffmpeg version fake-assembly-build\n"
 _MASTER_BYTES = b"fake FFV1 master representing the complete planned shot"
+
+
+def _advance_shot(store: Any, shot: Shot, target: ShotStatus) -> Shot:
+    """Place the render fixture at a legal lifecycle stage via versioned updates."""
+    path = {
+        ShotStatus.DRAFT: ShotStatus.PLANNED,
+        ShotStatus.PLANNED: ShotStatus.BLOCKING,
+    }
+    while shot.status is not target:
+        next_status = path.get(shot.status)
+        if next_status is None:
+            raise AssertionError(f"cannot fixture-advance Shot from {shot.status} to {target}")
+        check_transition(
+            shot.status,
+            next_status,
+            TransitionContext(framing_status=shot.framing_status),
+        )
+        _head, token = store.load_with_version(
+            Shot, shot.shot_id, episode_id=shot.episode_id,
+        )
+        store.update(shot.model_copy(update={"status": next_status}), expected_version=token)
+        shot = store.load(Shot, shot.shot_id, episode_id=shot.episode_id)
+    return shot
 
 
 class _ImmediateProcess:
@@ -146,6 +171,7 @@ def rendered_master(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
         duration_sec=15.0, degrade_seed=44221,
     )
     store.create(shot)
+    shot = _advance_shot(store, shot, ShotStatus.BLOCKING)
     request = render_request(
         shot_id=shot.shot_id,
         shot_version=shot.version,
