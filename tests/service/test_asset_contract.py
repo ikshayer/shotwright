@@ -1,30 +1,17 @@
-"""FR-03 asset registration and scene-use seam tests.
-
-API assumptions made because ASSET_CONTRACT.md deliberately leaves names open:
-
-* registration is ``orchestrator.service.assets.register_asset(store, asset,
-  source_path=Path)`` and returns a populated ``Asset``;
-* ``ObjectSpec.asset_id`` selects a registered asset, and
-  ``compose_render_request`` resolves that id before ``build_scene_plan`` emits
-  the worker payload;
-* the public ``OPERATIONS`` entry is named ``register_asset``.
-
-The dimension test proves the target envelope reaches the plan even when the GLB's
-authored bounds are different. The contract forbids Blender in these tests and does
-not define a pure worker sizing seam, so it cannot prove Blender's final evaluated
-mesh bounds here; that limitation is reported with the test results.
-"""
+"""FR-03 asset registration and scene-use seam tests through ``create_asset``."""
 
 from __future__ import annotations
 
 import hashlib
 import importlib
+import importlib.util
 import json
 import struct
 from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
 
 from orchestrator.adapters.blender.scene import (
     ObjectSpec,
@@ -33,6 +20,7 @@ from orchestrator.adapters.blender.scene import (
     build_scene_plan,
     synthetic_interior,
 )
+from orchestrator.api.app import create_app
 from orchestrator.domain.entities import (
     Asset,
     CameraProfile,
@@ -41,13 +29,15 @@ from orchestrator.domain.entities import (
     Shot,
 )
 from orchestrator.platform.containment import ProjectRoot
+from orchestrator.platform.settings import Settings
 from orchestrator.service.compose import compose_render_request
 from orchestrator.store.json_store import ProjectStore
-
+from tests.api.asset_requests import create_asset_request_kwargs
 
 _STATIC_PLAN_SHA256 = "92de3ed358ecc3bc4ef91127db9c6a12254e86a59f255645c03579b60b03788a"
 _ASSET_ID = "asset-figure-1"
 _SOURCE_URL = "https://assets.example.invalid/models/figure.glb"
+_API_TOKEN = "asset-contract-test-token"
 
 
 def _canonical_plan_bytes(plan: dict[str, object]) -> bytes:
@@ -159,12 +149,19 @@ def test_fixture_is_a_well_formed_glb_2_container() -> None:
     )
 
 
-def _asset(asset_id: str = _ASSET_ID, *, license: str = "CC0", source_url: str | None = _SOURCE_URL,
-           attribution_surface_required: bool = True) -> Asset:
+def _asset(
+    asset_id: str = _ASSET_ID,
+    *,
+    license: str = "CC0",
+    source_url: str | None = _SOURCE_URL,
+    generated: bool = False,
+    asset_type: str = "model",
+    attribution_surface_required: bool = True,
+) -> Asset:
     return Asset(
         asset_id=asset_id,
-        type="model",
-        generated=False,
+        type=asset_type,
+        generated=generated,
         source_url=source_url,
         provider="fixture-provider",
         license=license,
@@ -172,30 +169,44 @@ def _asset(asset_id: str = _ASSET_ID, *, license: str = "CC0", source_url: str |
     )
 
 
-def _register_asset(store: ProjectStore, asset: Asset, source_path: Path) -> Asset:
-    try:
-        module = importlib.import_module("orchestrator.service.assets")
-    except ModuleNotFoundError as error:
-        pytest.fail(
-            "assumed orchestrator.service.assets.register_asset entry point is absent; "
-            f"observed {error!r}"
+def _create_asset_response(root: ProjectRoot, asset: Asset, source_path: Path):
+    app = create_app(settings=Settings(project_root=root.path.parent), token=_API_TOKEN)
+    route = next((
+        item for item in app.routes
+        if getattr(item, "path", None) == "/projects/{project_id}/assets"
+        and "POST" in getattr(item, "methods", set())
+    ), None)
+    assert route is not None, "create_asset API route was absent from the app route table"
+    kwargs = create_asset_request_kwargs(
+        app,
+        method="POST",
+        path=route.path,
+        asset=asset.model_dump(mode="json"),
+        filename=source_path.name,
+        content=source_path.read_bytes(),
+    )
+    with TestClient(app, base_url="http://127.0.0.1:8765", raise_server_exceptions=False) as client:
+        return client.post(
+            route.path.replace("{project_id}", "p1"),
+            headers={"X-Loopback-Token": _API_TOKEN},
+            **kwargs,
         )
-    register = getattr(module, "register_asset", None)
-    assert callable(register), (
-        "asset service did not expose the assumed register_asset function; "
-        f"observed {register!r}"
+
+
+def _register_asset(root: ProjectRoot, asset: Asset, source_path: Path) -> Asset:
+    response = _create_asset_response(root, asset, source_path)
+    assert response.status_code in {200, 201}, (
+        f"create_asset did not register {asset.asset_id!r}: "
+        f"status={response.status_code}, body={response.text!r}"
     )
-    result = register(store, asset, source_path=source_path)
-    assert isinstance(result, Asset), (
-        "register_asset did not return the registered Asset; "
-        f"observed {type(result).__name__}"
-    )
-    return result
+    return ProjectStore(ProjectRoot(root.path)).load(Asset, asset.asset_id)
 
 
 def _project_store(path: Path, *, asset_ids: list[str] | None = None) -> tuple[ProjectRoot, ProjectStore]:
     path.mkdir(parents=True, exist_ok=True)
-    root = ProjectRoot(path)
+    base = ProjectRoot(path)
+    base.make_dir("p1")
+    root = ProjectRoot(base.resolve("p1"))
     store = ProjectStore(root)
     store.save(Project(project_id="p1", title="Asset fixture"), expected_version=0)
     store.save(
@@ -211,6 +222,67 @@ def _project_store(path: Path, *, asset_ids: list[str] | None = None) -> tuple[P
         asset_ids=list(asset_ids or []),
     ))
     return root, store
+
+
+def _seed_asset_file(
+    root: ProjectRoot,
+    asset: Asset,
+    relative_path: str,
+    content: bytes,
+) -> Asset:
+    root.write_bytes(relative_path, content)
+    return asset.model_copy(update={
+        "file_path": relative_path,
+        "checksum": hashlib.sha256(content).hexdigest(),
+    })
+
+
+def _refuse_asset_geometry(
+    store: ProjectStore,
+    asset_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    asset_record: Asset | None = None,
+) -> str:
+    if asset_record is not None:
+        original_load = store.load
+
+        def load_with_fixture(entity_type, entity_id, **kwargs):
+            if entity_type is Asset and entity_id == asset_id:
+                return asset_record
+            return original_load(entity_type, entity_id, **kwargs)
+
+        monkeypatch.setattr(store, "load", load_with_fixture)
+    scene = _asset_scene(asset_id)
+    compose_module = importlib.import_module("orchestrator.service.compose")
+    monkeypatch.setattr(compose_module, "american_living_room", lambda **_kwargs: scene)
+    try:
+        request = compose_render_request(
+            store,
+            shot_id="shot-1",
+            episode_id="ep1",
+            run_id="run-refused-geometry",
+            mode="master",
+        )
+        build_scene_plan(request)
+    except Exception as error:  # noqa: BLE001 - refusal type is not fixed by this contract
+        return str(error)
+    pytest.fail(f"asset {asset_id!r} was accepted as geometry; observed worker plan {request!r}")
+
+
+def _asset_fit_function():
+    worker_path = Path(__file__).resolve().parents[2] / "orchestrator" / "adapters" / "blender" / "worker.py"
+    spec = importlib.util.spec_from_file_location("asset_worker_fit_test", worker_path)
+    assert spec is not None and spec.loader is not None, (
+        f"could not load standalone Blender worker at {worker_path}; observed spec={spec!r}"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    function = getattr(module, "asset_fit_factors", None)
+    assert callable(function), (
+        f"worker did not expose module-level asset_fit_factors; observed {function!r}"
+    )
+    return function
 
 
 def _asset_scene(
@@ -241,7 +313,7 @@ def _asset_plan(
     raw = _tiny_glb(authored_bounds)
     source_rel = "incoming/figure.glb"
     root.write_bytes(source_rel, raw)
-    registered = _register_asset(store, _asset(), root.resolve(source_rel))
+    registered = _register_asset(root, _asset(), root.resolve(source_rel))
     scene = _asset_scene(_ASSET_ID)
     compose_module = importlib.import_module("orchestrator.service.compose")
     monkeypatch.setattr(compose_module, "american_living_room", lambda **_kwargs: scene)
@@ -282,21 +354,20 @@ def test_scene_without_assets_keeps_the_pinned_worker_plan_bytes() -> None:
 def test_register_refuses_missing_reuse_right_or_source_without_writing(
     tmp_path: Path, license: str, source_url: str | None, missing_field: str,
 ) -> None:
-    root, store = _project_store(tmp_path / "project")
+    root, _store = _project_store(tmp_path / "project")
     content = _tiny_glb((0.5, 1.0, 2.0))
     root.write_bytes("incoming/figure.glb", content)
     before = _tree_snapshot(root.path)
 
-    with pytest.raises(Exception) as caught:
-        _register_asset(
-            store,
-            _asset(license=license, source_url=source_url),
-            root.resolve("incoming/figure.glb"),
-        )
-    observed = str(caught.value)
-    assert not isinstance(caught.value, AssertionError), (
-        "registration used an assertion failure instead of a validation refusal; "
-        f"observed {observed!r}"
+    response = _create_asset_response(
+        root,
+        _asset(license=license, source_url=source_url),
+        root.resolve("incoming/figure.glb"),
+    )
+    observed = response.text
+    assert response.status_code in {400, 422}, (
+        f"create_asset accepted missing {missing_field} provenance: "
+        f"status={response.status_code}, body={observed!r}"
     )
     assert missing_field in observed.lower(), (
         "provenance rejection did not name the missing reuse right or source; "
@@ -308,40 +379,90 @@ def test_register_refuses_missing_reuse_right_or_source_without_writing(
     )
 
 
-def test_register_refuses_blend_and_names_the_executable_content_reason(
-    tmp_path: Path,
-) -> None:
-    root, store = _project_store(tmp_path / "project")
-    root.write_bytes("incoming/unsafe.blend", b"not a real blend file")
+def test_generated_asset_without_source_url_registers_with_license(tmp_path: Path) -> None:
+    root, _store = _project_store(tmp_path / "project")
+    content = _tiny_glb((0.5, 1.0, 2.0))
+    root.write_bytes("incoming/generated.glb", content)
+
+    registered = _register_asset(
+        root,
+        _asset(asset_id="generated-figure", source_url=None, generated=True),
+        root.resolve("incoming/generated.glb"),
+    )
+
+    assert registered.generated is True, (
+        f"generated flag did not survive registration; observed {registered.generated!r}"
+    )
+    assert registered.source_url is None, (
+        f"generated asset acquired a source_url; observed {registered.source_url!r}"
+    )
+    assert registered.license == "CC0", (
+        f"generated asset did not retain its required license; observed {registered.license!r}"
+    )
+
+
+def test_gltf_registration_is_refused_for_external_buffers(tmp_path: Path) -> None:
+    root, _store = _project_store(tmp_path / "project")
+    gltf = json.dumps({
+        "asset": {"version": "2.0"},
+        "buffers": [{"uri": "mesh.bin", "byteLength": 4}],
+    }).encode("utf-8")
+    root.write_bytes("incoming/figure.gltf", gltf)
     before = _tree_snapshot(root.path)
 
-    with pytest.raises(Exception) as caught:
-        _register_asset(store, _asset(), root.resolve("incoming/unsafe.blend"))
-    observed = str(caught.value).lower()
-    assert not isinstance(caught.value, AssertionError), (
-        ".blend import failed internally instead of being refused; "
-        f"observed {observed!r}"
+    response = _create_asset_response(
+        root,
+        _asset(asset_id="external-gltf"),
+        root.resolve("incoming/figure.gltf"),
     )
-    assert ".blend" in observed and any(
-        reason in observed for reason in ("python", "executable", "script")
-    ), (
-        ".blend refusal did not explain its executable-content risk; "
-        f"observed {observed!r}"
+    observed = response.text.lower()
+    assert response.status_code in {400, 422}, (
+        f"create_asset accepted non-self-contained .gltf: "
+        f"status={response.status_code}, body={response.text!r}"
+    )
+    assert ".gltf" in observed and "external" in observed and "buffer" in observed, (
+        f".gltf refusal did not name external buffers; observed {response.text!r}"
     )
     assert _tree_snapshot(root.path) == before, (
-        "rejected .blend registration changed project files or directories; "
+        "rejected .gltf registration changed project files or directories; "
         f"observed before={before!r}, after={_tree_snapshot(root.path)!r}"
+    )
+
+
+def test_blend_geometry_is_refused_for_executable_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, store = _project_store(tmp_path / "project", asset_ids=["unsafe-blend"])
+    seeded = _seed_asset_file(
+        root,
+        _asset(asset_id="unsafe-blend"),
+        "assets/models/unsafe-blend/unsafe.blend",
+        b"fixture blend content",
+    )
+
+    observed = _refuse_asset_geometry(
+        store,
+        "unsafe-blend",
+        monkeypatch,
+        asset_record=seeded,
+    ).lower()
+    assert "unsafe-blend" in observed and ".blend" in observed, (
+        f"geometry refusal did not name the asset and .blend format; observed {observed!r}"
+    )
+    assert any(reason in observed for reason in ("python", "executable", "script")), (
+        f".blend refusal did not explain its executable-content risk; observed {observed!r}"
     )
 
 
 def test_registered_asset_is_contained_hashed_and_keeps_attribution_obligation(
     tmp_path: Path,
 ) -> None:
-    root, store = _project_store(tmp_path / "project")
+    root, _store = _project_store(tmp_path / "project")
     content = _tiny_glb((0.5, 1.0, 2.0))
     root.write_bytes("incoming/figure.glb", content)
 
-    registered = _register_asset(store, _asset(), root.resolve("incoming/figure.glb"))
+    registered = _register_asset(root, _asset(), root.resolve("incoming/figure.glb"))
 
     expected_checksum = hashlib.sha256(content).hexdigest()
     assert registered.checksum == expected_checksum, (
@@ -401,7 +522,7 @@ def test_same_asset_request_builds_identical_worker_bytes(
 ) -> None:
     root, store = _project_store(tmp_path / "project", asset_ids=[_ASSET_ID])
     root.write_bytes("incoming/figure.glb", _tiny_glb((0.5, 1.0, 2.0)))
-    _register_asset(store, _asset(), root.resolve("incoming/figure.glb"))
+    _register_asset(root, _asset(), root.resolve("incoming/figure.glb"))
     scene = _asset_scene(_ASSET_ID)
     compose_module = importlib.import_module("orchestrator.service.compose")
     monkeypatch.setattr(compose_module, "american_living_room", lambda **_kwargs: scene)
@@ -425,29 +546,79 @@ def test_same_asset_request_builds_identical_worker_bytes(
     )
 
 
-def test_declared_dimensions_reach_worker_plan_despite_different_glb_bounds(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+def test_png_registers_but_is_refused_as_geometry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The test GLB is 0.5 x 1.0 x 2.0 m, while the declared envelope is 0.4 x 0.7 x 1.8 m.
-    # This checks the data at the worker boundary; see the module docstring for the limit.
-    plan_bytes, _checksum, dimensions = _asset_plan(
-        tmp_path / "project", monkeypatch, authored_bounds=(0.5, 1.0, 2.0),
+    asset_id = "texture-png"
+    root, store = _project_store(tmp_path / "project", asset_ids=[asset_id])
+    content = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+    root.write_bytes("incoming/texture.png", content)
+
+    registered = _register_asset(
+        root,
+        _asset(asset_id=asset_id, asset_type="image"),
+        root.resolve("incoming/texture.png"),
     )
-    observed_plan = json.loads(plan_bytes)
-    scene = observed_plan.get("scene")
-    assert isinstance(scene, dict), f"worker plan scene was not an object: {scene!r}"
-    objects = scene.get("objects")
-    assert isinstance(objects, list), f"worker plan objects were not a list: {objects!r}"
-    observed_object = next((item for item in objects if item.get("name") == "ImportedFigure"), None)
-    assert isinstance(observed_object, dict), (
-        "asset-backed object was absent from the worker plan; "
-        f"observed object names {[item.get('name') for item in objects]!r}"
+    assert registered.license == "CC0", (
+        f"PNG registration did not retain its license; observed {registered.license!r}"
     )
-    target = [0.4, 0.7, 1.8]
-    assert observed_object.get("dimensions") == target, (
-        "declared object envelope did not reach the worker payload unchanged; "
-        f"observed {observed_object.get('dimensions')!r}, expected {target!r}; "
-        f"source bounds are (0.5, 1.0, 2.0), request dimensions are {dimensions!r}"
+
+    observed = _refuse_asset_geometry(store, asset_id, monkeypatch).lower()
+    assert asset_id in observed and ".png" in observed, (
+        f"PNG geometry refusal did not name the asset and format; observed {observed!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("source_min", "source_max", "desired", "expected_factors"),
+    [
+        ((0.0, 0.0, 0.0), (2.0, 2.0, 2.0), (1.0, 1.0, 1.0), (0.5, 0.5, 0.5)),
+        ((-1.0, 0.0, 2.0), (3.0, 4.0, 8.0), (2.0, 1.0, 3.0), (0.5, 0.25, 0.5)),
+    ],
+    ids=["uniform-bounds", "non-uniform-bounds-and-target"],
+)
+def test_asset_fit_factors_make_mesh_envelope_match_declared_dimensions(
+    source_min: tuple[float, float, float],
+    source_max: tuple[float, float, float],
+    desired: tuple[float, float, float],
+    expected_factors: tuple[float, float, float],
+) -> None:
+    fit = _asset_fit_function()
+    observed = fit(source_min, source_max, desired)
+    assert observed == pytest.approx(expected_factors), (
+        f"asset_fit_factors returned {observed!r}; expected per-axis factors {expected_factors!r}"
+    )
+    observed_envelope = tuple(
+        (source_max[index] - source_min[index]) * observed[index]
+        for index in range(3)
+    )
+    assert observed_envelope == pytest.approx(desired), (
+        f"scaled source bounds produced envelope {observed_envelope!r}; "
+        f"declared dimensions were {desired!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("source_min", "source_max", "axis"),
+    [
+        ((0.0, 0.0, 0.0), (1e-9, 1.0, 1.0), "x"),
+        ((0.0, 0.0, 0.0), (1.0, 0.0, 1.0), "y"),
+        ((0.0, 0.0, 0.0), (1.0, 1.0, float("inf")), "z"),
+    ],
+    ids=["extent-at-threshold", "zero-extent", "nonfinite-extent"],
+)
+def test_asset_fit_refuses_degenerate_extent_and_names_axis(
+    source_min: tuple[float, float, float],
+    source_max: tuple[float, float, float],
+    axis: str,
+) -> None:
+    fit = _asset_fit_function()
+    with pytest.raises(ValueError) as caught:
+        fit(source_min, source_max, (1.0, 1.0, 1.0))
+    observed = str(caught.value).lower()
+    assert axis in observed, (
+        f"degenerate {axis}-axis extent refusal did not name the axis; observed {observed!r}"
     )
 
 
@@ -456,7 +627,7 @@ def test_checksum_mismatch_fails_at_asset_use_without_project_writes(
 ) -> None:
     root, store = _project_store(tmp_path / "project", asset_ids=[_ASSET_ID])
     root.write_bytes("incoming/figure.glb", _tiny_glb((0.5, 1.0, 2.0)))
-    registered = _register_asset(store, _asset(), root.resolve("incoming/figure.glb"))
+    registered = _register_asset(root, _asset(), root.resolve("incoming/figure.glb"))
     assert registered.file_path is not None, (
         f"registered asset has no file_path for use-time verification: {registered!r}"
     )
@@ -489,15 +660,15 @@ def test_checksum_mismatch_fails_at_asset_use_without_project_writes(
     )
 
 
-def test_registration_is_exposed_as_a_mutating_api_operation() -> None:
+def test_create_asset_is_exposed_as_a_mutating_api_operation() -> None:
     from orchestrator.api.routes import OPERATIONS
 
-    operation = next((item for item in OPERATIONS if item.name == "register_asset"), None)
+    operation = next((item for item in OPERATIONS if item.name == "create_asset"), None)
     assert operation is not None, (
-        "OPERATIONS did not expose the assumed register_asset operation; "
+        "OPERATIONS did not expose the contract's create_asset operation; "
         f"observed {[item.name for item in OPERATIONS]!r}"
     )
     assert operation.mutating, (
-        "register_asset API operation was not marked mutating; "
+        "create_asset API operation was not marked mutating; "
         f"observed mutating={operation.mutating!r}"
     )

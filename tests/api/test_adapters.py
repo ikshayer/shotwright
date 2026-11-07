@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from orchestrator.adapters.blender.scene import build_scene_plan
 from orchestrator.domain.entities import (
+    Asset,
     CameraProfile,
     Episode,
     PostProfile,
@@ -26,6 +27,7 @@ from orchestrator.platform.containment import ProjectRoot
 from orchestrator.service.compose import compose_render_request
 from orchestrator.store.json_store import ProjectStore
 
+from .asset_requests import create_asset_request_kwargs
 from .conftest import TOKEN, TOKEN_HEADER, find_key, operations, valid_request_kwargs
 from .test_parity import _cli, _command_names, _spellings
 
@@ -175,15 +177,48 @@ def test_adapter_operation_returns_contract_status(
     """The app fixture constructs the default app with only settings and auth token."""
     ops = _matches(app, ADAPTER_OPERATIONS[operation])
     assert ops, f"no route for contract operation {operation!r}"
-    if operation in WIRED:
+    if operation in WIRED or operation == "create asset":
         _seed_wired_route_records(app, needs_degrade=operation == "degrade")
     for op in ops:
+        if operation == "create asset":
+            asset = Asset(
+                asset_id="route-asset",
+                type="model",
+                generated=False,
+                source_url="https://assets.example.invalid/route.png",
+                provider="fixture-provider",
+                license="CC0",
+            )
+            request_kwargs = create_asset_request_kwargs(
+                app,
+                method=op.method,
+                path=op.path,
+                asset=asset.model_dump(mode="json"),
+                filename="route.png",
+                content=b"\x89PNG\r\n\x1a\n" + b"\x00" * 32,
+            )
+        else:
+            request_kwargs = (
+                _wired_request_kwargs(app, op) if operation in WIRED
+                else valid_request_kwargs(app, op)
+            )
         resp = client.request(
             op.method, op.url(), headers={TOKEN_HEADER: TOKEN},
-            **(_wired_request_kwargs(app, op) if operation in WIRED
-               else valid_request_kwargs(app, op))
+            **request_kwargs,
         )
-        if operation in WIRED:
+        if operation == "create asset":
+            assert resp.status_code in {200, 201}, (
+                f"{op.key} did not register a valid PNG: {resp.status_code} {resp.text}"
+            )
+            asset_store = ProjectStore(ProjectRoot(app.state.settings.project_root).resolve("x"))
+            registered = asset_store.load(Asset, "route-asset")
+            assert registered.license == "CC0", (
+                f"create_asset lost the supplied license; observed {registered.license!r}"
+            )
+            assert registered.source_url == "https://assets.example.invalid/route.png", (
+                f"create_asset lost the supplied source_url; observed {registered.source_url!r}"
+            )
+        elif operation in WIRED:
             assert resp.status_code == 202, f"{op.key} answered {resp.status_code}: {resp.text}"
             job_ids = [v for v in find_key(resp.json(), lambda k: "job" in k.lower() and "id" in k.lower())
                        if isinstance(v, str) and v]

@@ -18,6 +18,10 @@ from pathlib import Path
 
 import pytest
 
+from orchestrator.domain.entities import Asset, Project
+from orchestrator.platform.containment import ProjectRoot
+from orchestrator.store.json_store import ProjectStore
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"\x00" * 32
@@ -118,14 +122,46 @@ def test_upload_with_contradictory_magic_bytes_fails_and_names_problem(project_r
     assert "frame.png" in result.stderr or "magic" in result.stderr.lower() or "png" in result.stderr.lower()
 
 
-def test_well_formed_upload_reaches_absent_adapter(project_root: Path, tmp_path: Path) -> None:
+def test_well_formed_png_upload_registers_with_provenance(project_root: Path, tmp_path: Path) -> None:
     upload = tmp_path / "frame.png"
     upload.write_bytes(PNG_BYTES)
-    result = _run_cli(project_root, "create-asset", "--project-id", "p1", "--file", str(upload), "--json")
+    base = ProjectRoot(project_root)
+    base.make_dir("p1")
+    store = ProjectStore(ProjectRoot(base.resolve("p1")))
+    store.save(Project(project_id="p1", title="CLI upload fixture"), expected_version=0)
+    asset = Asset(
+        asset_id="cli-frame",
+        type="image",
+        generated=False,
+        source_url="https://assets.example.invalid/frame.png",
+        provider="fixture-provider",
+        license="CC0",
+    )
+    result = _run_cli(
+        project_root,
+        "create-asset",
+        "--project-id",
+        "p1",
+        "--file",
+        str(upload),
+        "--data",
+        json.dumps({"asset": asset.model_dump(mode="json")}, separators=(",", ":")),
+        "--json",
+    )
 
-    assert result.returncode != 0
-    assert result.stdout == ""
-    assert "adapter" in result.stderr.lower()
+    assert result.returncode == 0, (
+        f"well-formed PNG upload did not register: exit={result.returncode}, stderr={result.stderr!r}"
+    )
+    assert result.stderr == "", f"successful create-asset wrote stderr: {result.stderr!r}"
+    assert result.stdout.strip(), "successful create-asset returned no JSON on stdout"
+    json.loads(result.stdout)
+    registered = store.load(Asset, "cli-frame")
+    assert registered.license == "CC0", (
+        f"CLI registration lost the license provenance; observed {registered.license!r}"
+    )
+    assert registered.source_url == "https://assets.example.invalid/frame.png", (
+        f"CLI registration lost the source_url provenance; observed {registered.source_url!r}"
+    )
 
 
 @pytest.mark.parametrize("command", ["list-projects", "load-project"])
