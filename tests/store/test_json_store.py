@@ -6,6 +6,7 @@ import json
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from orchestrator.domain.entities import (
     Episode,
     Location,
     Project,
+    Review,
     Script,
     Shot,
     StyleBible,
@@ -26,6 +28,7 @@ from orchestrator.domain.entities import (
 from orchestrator.domain.state import TransitionError
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.errors import JobError, JobErrorKind
+from orchestrator.service.approval import approve_shot, approve_style_bible
 from orchestrator.store.json_store import ProjectStore, RecordNotFound, VersionConflict
 
 
@@ -387,10 +390,46 @@ def test_stale_approved_version_remains_immutable(store, changes):
 ])
 def test_revision_rejects_approval_pointer_on_every_type_that_has_one(store, entity):
     if isinstance(entity, Shot):
-        approve(store)
-        entity = store.load(Shot, entity.shot_id, episode_id=entity.episode_id)
+        store.create(entity)
+        for status in (ShotStatus.PLANNED, ShotStatus.BLOCKING, ShotStatus.BUILDING,
+                       ShotStatus.REVIEW):
+            changes = {"status": status}
+            if status is ShotStatus.BUILDING:
+                changes["framing_status"] = FramingStatus.APPROVED
+            entity = entity.model_copy(update=changes)
+            store.update(entity, expected_version=current_token(store, entity))
+        review_id = "r1"
+        store.save(Review(
+            review_id=review_id,
+            target_id=entity.shot_id,
+            target_version=entity.version,
+            created_at=datetime.now(UTC),
+            approval_state=ShotStatus.APPROVED,
+        ), expected_version=0)
+        entity = approve_shot(
+            store,
+            entity.shot_id,
+            episode_id=entity.episode_id,
+            review_id=review_id,
+            expected_version=current_token(store, entity),
+        )
+    elif isinstance(entity, StyleBible):
+        store.create(entity)
+        review_id = "r1"
+        store.save(Review(
+            review_id=review_id,
+            target_id=entity.project_id,
+            target_version=entity.version,
+            created_at=datetime.now(UTC),
+            approval_state=ShotStatus.APPROVED,
+        ), expected_version=0)
+        entity = approve_style_bible(
+            store,
+            entity.project_id,
+            review_id=review_id,
+            expected_version=current_token(store, entity),
+        )
     else:
-        entity = entity.model_copy(update={"approval_review_id": "r1"})
         store.create(entity)
     changes = {**entity.next_version(), "approval_review_id": "r1"}
     if isinstance(entity, Shot):
@@ -425,8 +464,9 @@ def test_update_reports_creator_authored_conflicts(store, field, value):
 
 @pytest.mark.parametrize("status", [s for s in ShotStatus if s is not ShotStatus.DRAFT])
 def test_shot_creation_requires_draft(store, root, status):
-    shot = make_shot(status=status,
-                     approval_review_id="r1" if status is ShotStatus.APPROVED else None)
+    # Keep this test on the status guard: an otherwise invalid APPROVED payload
+    # without a review pointer must still fail because new Shots start as drafts.
+    shot = make_shot().model_copy(update={"status": status, "approval_review_id": None})
     with pytest.raises(JobError, match="draft"):
         store.create(shot)
     assert not list(root.path.rglob("*.json"))

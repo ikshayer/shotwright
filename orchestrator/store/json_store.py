@@ -166,6 +166,15 @@ def _invalid(message: str, *, cause: BaseException | None = None) -> JobError:
     return JobError(JobErrorKind.INVALID_MANIFEST, message, cause=cause)
 
 
+def _check_creation_approval_fields(entity: Entity) -> None:
+    """Approval state can only be attached to an existing record by its service."""
+    for field in ("approval_review_id", "approved_cut_version"):
+        if getattr(entity, field, None) is not None:
+            raise _invalid(
+                f"`{field}` may not be set on creation; approval is set only by the approval service"
+            )
+
+
 def _declared_paths(data: dict[str, Any], entity_type: type[Entity]) -> list[tuple[str, str]]:
     """(field, value) for every declared path field holding a string."""
     found: list[tuple[str, str]] = []
@@ -450,15 +459,19 @@ class ProjectStore:
             raise _invalid(f"{type(entity).__name__} is versioned; use create/update/revise")
         relative = layout.place(self._id_of(entity, layout), None)
         with self._lock:
+            creating = False
             try:
                 current, actual = self._read_record(type(entity), relative)
             except RecordNotFound:
                 if expected_version != 0:
                     raise
                 actual = 0
+                creating = True
             else:
                 if expected_version != actual:
                     raise VersionConflict(relative, expected_version, actual, current)
+            if creating:
+                _check_creation_approval_fields(entity)
             self._write(relative, entity, store_version=actual + 1)
             return actual + 1
 
@@ -466,6 +479,7 @@ class ProjectStore:
         """Create content version 1 with mutation token 1."""
         if entity.version != 1 or entity.supersedes is not None:
             raise _invalid("a new record must be version 1 with no `supersedes`")
+        _check_creation_approval_fields(entity)
         if isinstance(entity, Shot) and entity.status is not ShotStatus.DRAFT:
             raise _invalid("a new Shot must be draft")
         directory = self._directory_of(entity)
