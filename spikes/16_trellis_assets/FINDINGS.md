@@ -76,3 +76,18 @@ They hardcode absolute paths for this machine and expect the instance on port 81
 `finding_degrade_fps.md` is unrelated to Trellis: it records that
 `DegradeResult.output_fps` is copied from the request rather than the probe. Kept here
 only so it is not lost with the session that found it.
+
+## Copies of the out-of-repo install, kept here deliberately
+
+The TRELLIS2 install lives at `D:\Work\comfyui-trellis`, outside this repository and
+outside version control. Two of its files are copied here so a clone is self-sufficient:
+
+- **`TRELLIS_INSTALL_NOTES.md`** — the authority on why the install is a separate Python
+  environment, the five undocumented bugs worked around, the measured VRAM table, and how
+  to run it. The live copy is `D:\Work\comfyui-trellis\INSTALL_NOTES.md`.
+- **`run_trellis.bat.reference`** — the launcher, as `D:\Work\comfyui-trellis\run_trellis.bat`.
+
+These are **copies, not the originals**. If you change the install, update both or delete
+the stale copy — a confidently wrong note is worse than none. The weights at
+`D:\Work\trellis2-gguf` (11 GB, hash-verified, with their own `PROVENANCE.json`) and the
+generated `entity_00001_.glb` are not in the repository and never should be.

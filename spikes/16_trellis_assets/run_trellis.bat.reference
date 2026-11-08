@@ -1,0 +1,15 @@
+@echo off
+REM ===================================================================
+REM  Trellis2 ComfyUI - AUTHORING instance. Port 8189.
+REM
+REM  This is NOT the pipeline's ComfyUI. The orchestrator owns
+REM  D:\ComfyUI_3\ComfyUI_windows_portable on port 8188 and launches it
+REM  with --disable-all-custom-nodes. That tree is immutable (AGENTS.md).
+REM
+REM  This instance exists so Trellis2's custom nodes and their CUDA
+REM  dependencies live in their own Python environment and can never
+REM  reach python_embeded.
+REM ===================================================================
+
+cd /d "%~dp0ComfyUI"
+"%~dp0.venv\Scripts\python.exe" main.py --port 8189 --listen 127.0.0.1 --disable-auto-launch %*
