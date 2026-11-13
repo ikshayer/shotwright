@@ -628,41 +628,192 @@ class BlenderAdapter:
         self, plan: dict[str, object], *, job: Job, bind_paths: bool = False
     ) -> None:
         scene = plan.get("scene")
-        objects = scene.get("objects") if isinstance(scene, dict) else None
-        if not isinstance(objects, list):
+        if not isinstance(scene, dict):
             return
+        objects = scene.get("objects", [])
+        materials = scene.get("materials", [])
+        if not isinstance(objects, list) or not isinstance(materials, list):
+            raise JobError(
+                JobErrorKind.INVALID_MANIFEST,
+                "scene asset references must be stored in object/material lists",
+                job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id,
+            )
         store = ProjectStore(self.root)
-        for item in objects:
-            if not isinstance(item, dict):
-                continue
-            asset_id = item.get("asset_id")
-            if asset_id is None:
-                continue
+        verified: dict[tuple[str, str], object] = {}
+
+        def verify_identity(asset_id: object, checksum: object, file_path: object, *, context: str,
+                            texture: bool = False, usage: str | None = None):
+            if not isinstance(asset_id, str) or not isinstance(checksum, str) or not isinstance(file_path, str):
+                raise JobError(
+                    JobErrorKind.INVALID_MANIFEST,
+                    f"{context} has an incomplete registered asset identity",
+                    job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id,
+                )
             try:
-                asset = store.verify_asset(str(asset_id))
+                resolved_usage = usage or ("texture" if texture else "geometry")
+                cache_key = (asset_id, resolved_usage)
+                asset = verified.get(cache_key)
+                if asset is None:
+                    asset = store.verify_asset(asset_id, usage=resolved_usage)
+                    verified[cache_key] = asset
             except (JobError, RecordNotFound) as exc:
                 raise JobError(
                     JobErrorKind.INVALID_MANIFEST,
-                    f"Asset {asset_id!r} could not be verified before Blender use: {exc}",
-                    job_id=job.job_id,
-                    shot_id=job.shot_id,
-                    run_id=job.run_id,
-                    cause=exc,
+                    f"{context} Asset {asset_id!r} could not be verified before Blender use: {exc}",
+                    job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id, cause=exc,
                 ) from exc
-            if (
-                asset.file_path != item.get("asset_file_path")
-                or asset.checksum != item.get("asset_checksum")
-            ):
+            if asset.file_path != file_path or asset.checksum != checksum:
                 raise JobError(
                     JobErrorKind.INVALID_MANIFEST,
-                    f"Asset {asset_id!r} registry path or checksum no longer matches the scene plan",
-                    job_id=job.job_id,
-                    shot_id=job.shot_id,
-                    run_id=job.run_id,
+                    f"{context} Asset {asset_id!r} registry path or checksum no longer matches the scene plan",
+                    job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id,
                 )
+            if texture:
+                extension = asset.file_path.rsplit(".", 1)[-1].lower() if asset.file_path and "." in asset.file_path else ""
+                if asset.type != "texture" or extension not in {"png", "jpg", "jpeg", "webp"}:
+                    raise JobError(
+                        JobErrorKind.INVALID_MANIFEST,
+                        f"{context} Asset {asset_id!r} must be a texture with a .png/.jpg/.jpeg/.webp file",
+                        job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id,
+                    )
+                self._verify_texture_file(asset_id, asset.file_path, context=context, job=job)
             if bind_paths:
                 assert asset.file_path is not None
-                item["asset_path"] = _forward(self.root.resolve(asset.file_path))
+                return _forward(self.root.resolve(asset.file_path))
+            return None
+
+        geometry_asset_ids = {
+            item.get("asset_id") for item in objects
+            if isinstance(item, dict) and item.get("asset_id") is not None
+        }
+        for item in objects:
+            if not isinstance(item, dict) or item.get("asset_id") is None:
+                continue
+            asset_id = item.get("asset_id")
+            path = verify_identity(
+                asset_id, item.get("asset_checksum"), item.get("asset_file_path"),
+                context=f"geometry object {item.get('name')!r}",
+            )
+            if bind_paths:
+                item["asset_path"] = path
+
+        for material in materials:
+            if not isinstance(material, dict):
+                continue
+            textures = material.get("textures")
+            if textures is None:
+                continue
+            context = f"material {material.get('name')!r}"
+            if not isinstance(textures, dict):
+                raise JobError(JobErrorKind.INVALID_MANIFEST, f"{context} textures are malformed",
+                               job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
+            maps, bindings = textures.get("maps"), textures.get("bindings")
+            if not isinstance(maps, dict) or not isinstance(bindings, dict) or set(maps) != set(bindings):
+                raise JobError(JobErrorKind.INVALID_MANIFEST,
+                               f"{context} map roles and derived bindings do not agree",
+                               job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
+            for role, asset_id in maps.items():
+                if asset_id in geometry_asset_ids:
+                    raise JobError(
+                        JobErrorKind.INVALID_MANIFEST,
+                        f"{context} map role {role!r} reuses a geometry asset id",
+                        job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id,
+                    )
+                binding = bindings.get(role)
+                if not isinstance(binding, dict) or binding.get("asset_id") != asset_id:
+                    raise JobError(JobErrorKind.INVALID_MANIFEST,
+                                   f"{context} map role {role!r} has a missing or conflicting asset binding",
+                                   job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
+                path = verify_identity(
+                    asset_id, binding.get("asset_checksum"), binding.get("asset_file_path"),
+                    context=f"{context} map role {role!r}", texture=True,
+                )
+                if bind_paths:
+                    binding["asset_path"] = path
+
+        environment = scene.get("environment")
+        if environment is not None:
+            if not isinstance(environment, dict) or not isinstance(environment.get("binding"), dict):
+                raise JobError(JobErrorKind.INVALID_MANIFEST, "scene environment has no derived asset binding", job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
+            binding = environment["binding"]
+            if binding.get("asset_id") != environment.get("asset_id"):
+                raise JobError(JobErrorKind.INVALID_MANIFEST, "scene environment asset binding conflicts with its id", job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
+            path = verify_identity(binding.get("asset_id"), binding.get("asset_checksum"), binding.get("asset_file_path"), context="scene environment", usage="environment")
+            if bind_paths:
+                binding["asset_path"] = path
+            self._verify_environment_file(binding["asset_id"], binding["asset_file_path"], job=job)
+
+    def _verify_environment_file(self, asset_id: str, file_path: str, *, job: Job) -> None:
+        try:
+            path = self.root.resolve(file_path)
+            size = path.stat().st_size
+            if size > self.settings.upload.max_image_bytes:
+                raise ValueError(f"file is {size} bytes; configured maximum is {self.settings.upload.max_image_bytes}")
+            import shutil
+            ffmpeg = self.settings.binaries.ffmpeg_exe
+            resolved_ffmpeg = str(ffmpeg.resolve()) if ffmpeg.is_file() else shutil.which(str(ffmpeg))
+            if not resolved_ffmpeg:
+                raise ValueError("configured FFmpeg executable could not be resolved")
+            probe = os.path.join(
+                os.path.dirname(resolved_ffmpeg), "ffprobe.exe" if os.name == "nt" else "ffprobe"
+            )
+            if not os.path.isfile(probe):
+                raise ValueError("ffprobe beside configured FFmpeg is unavailable")
+            result = subprocess.run([probe, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", str(path)], capture_output=True, text=True, timeout=30, check=False)
+            if result.returncode != 0:
+                raise ValueError("ffprobe rejected the HDR/EXR image")
+            stream = json.loads(result.stdout)["streams"][0]
+            width, height = int(stream["width"]), int(stream["height"])
+            if min(width, height) <= 0 or max(width, height) > self.settings.upload.max_image_long_edge_px:
+                raise ValueError(f"decoded dimensions {width}x{height} exceed configured image limits")
+        except Exception as exc:
+            raise JobError(JobErrorKind.INVALID_MANIFEST, f"scene environment Asset {asset_id!r} is not a supported configured-size HDRI: {exc}", job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id, cause=exc) from exc
+
+    def _verify_texture_file(self, asset_id: str, file_path: str, *, context: str, job: Job) -> None:
+        """Enforce configured byte/decode caps before handing any map to Blender."""
+        try:
+            path = self.root.resolve(file_path)
+            size = path.stat().st_size
+            if size > self.settings.upload.max_image_bytes:
+                raise ValueError(
+                    f"file is {size} bytes; configured maximum is {self.settings.upload.max_image_bytes}"
+                )
+            import warnings
+
+            from PIL import Image
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+                with Image.open(path) as image:
+                    if image.format not in {"PNG", "JPEG", "WEBP"}:
+                        raise ValueError(f"decoder format {image.format!r} is not PNG, JPEG, or WebP")
+                    extension = Path(file_path).suffix.lower()
+                    expected_format = {
+                        ".png": "PNG", ".jpg": "JPEG", ".jpeg": "JPEG", ".webp": "WEBP",
+                    }.get(extension)
+                    if image.format != expected_format:
+                        raise ValueError(
+                            f"file extension {extension!r} does not match decoder format {image.format!r}"
+                        )
+                    width, height = image.size
+                    if width <= 0 or height <= 0:
+                        raise ValueError(f"decoded dimensions are invalid: {width}x{height}")
+                    if max(width, height) > self.settings.upload.max_image_long_edge_px:
+                        raise ValueError(
+                            f"decoded long edge {max(width, height)} exceeds configured maximum "
+                            f"{self.settings.upload.max_image_long_edge_px}"
+                        )
+                    image.verify()
+                # verify() checks structure without decoding all pixel data; a truncated
+                # JPEG can pass it, so force a full decode after the dimension cap.
+                with Image.open(path) as decoded:
+                    decoded.load()
+        except Exception as exc:
+            raise JobError(
+                JobErrorKind.INVALID_MANIFEST,
+                f"{context} Asset {asset_id!r} is not a supported configured-size texture: {exc}",
+                job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id, cause=exc,
+            ) from exc
 
     def _assemble_master(
         self,

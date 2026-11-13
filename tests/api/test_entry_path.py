@@ -24,7 +24,6 @@ from .test_parity import _cli
 
 ENTRY_NAMES = {"create_episode", "draft_script", "propose_shots"}
 DELIBERATE_501 = {
-    "search_assets",
     "sample_references",
     "export",
     "apply_typed_feedback",
@@ -119,7 +118,7 @@ def _post(client: TestClient, op: Op, body: dict, **ids: str):
 def test_every_route_is_implemented_or_deliberately_501(
     client: TestClient, app: FastAPI
 ) -> None:
-    """Exercise every registered operation; only the contract's five remain 501.
+    """Exercise every registered operation; only deliberate absences remain 501.
 
     The cases come from ``operations(app)``. The fixed set names only deliberate
     absences; a newly registered operation is automatically requested and fails if it

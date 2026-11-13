@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "created_date": "2026-11-09",
+  "model_root": "spikes/22_minimax_h3_workflows/_work/local_models",
+  "components": [
+    {
+      "role": "diffusion",
+      "repo": "DmitryDB/MiniMax-H3-ComfyUI-Quants",
+      "revision": "06aba4816457400d1dcb12ffd77e37499c8116b1",
+      "source_filename": "Ref2VA/MiniMax-H3_Ref2VA-NVFP4.safetensors",
+      "model_relative_path": "diffusion_models/MiniMax-H3_Ref2VA-NVFP4.safetensors",
+      "url": "https://huggingface.co/DmitryDB/MiniMax-H3-ComfyUI-Quants/resolve/06aba4816457400d1dcb12ffd77e37499c8116b1/Ref2VA/MiniMax-H3_Ref2VA-NVFP4.safetensors",
+      "expected_bytes": 11663443448,
+      "expected_sha256": "f970a8a32ded2b4b72f68a624244f8e39d488b1fe0992b9de7133b400dbc95e2",
+      "format": "safetensors",
+      "licence": "MiniMax H3 Community License Agreement (inherited); underlying Qwen notice also retained",
+      "downloaded": false
+    },
+    {
+      "role": "text_encoder",
+      "repo": "Comfy-Org/MiniMax-H3",
+      "revision": "54472221d27c695fca9621b0c3ed52f06c4af707",
+      "source_filename": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "model_relative_path": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/54472221d27c695fca9621b0c3ed52f06c4af707/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "expected_bytes": 15687142551,
+      "expected_sha256": "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6",
+      "format": "safetensors",
+      "licence": "MiniMax H3 Community License Agreement (inherited); underlying Qwen notice also retained",
+      "downloaded": false
+    },
+    {
+      "role": "video_vae",
+      "repo": "Comfy-Org/MiniMax-H3",
+      "revision": "54472221d27c695fca9621b0c3ed52f06c4af707",
+      "source_filename": "vae/minimax_h3_video_vae_int8_convrot.safetensors",
+      "model_relative_path": "vae/minimax_h3_video_vae_int8_convrot.safetensors",
+      "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/54472221d27c695fca9621b0c3ed52f06c4af707/vae/minimax_h3_video_vae_int8_convrot.safetensors",
+      "expected_bytes": 2811065184,
+      "expected_sha256": "52a2c8c73583c86e4f41cdcce3a6ad0ea562987bc0bf3d60a0cef5f5c8e60c0e",
+      "format": "safetensors",
+      "licence": "MiniMax H3 Community License Agreement (inherited); underlying Qwen notice also retained",
+      "downloaded": false
+    },
+    {
+      "role": "audio_vae",
+      "repo": "Comfy-Org/MiniMax-H3",
+      "revision": "54472221d27c695fca9621b0c3ed52f06c4af707",
+      "source_filename": "vae/minimax_h3_audio_vae_fp32.safetensors",
+      "model_relative_path": "vae/minimax_h3_audio_vae_fp32.safetensors",
+      "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/54472221d27c695fca9621b0c3ed52f06c4af707/vae/minimax_h3_audio_vae_fp32.safetensors",
+      "expected_bytes": 605254808,
+      "expected_sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
+      "format": "safetensors",
+      "licence": "MiniMax H3 Community License Agreement (inherited); underlying Qwen notice also retained",
+      "downloaded": false
+    }
+  ],
+  "total_file_bytes": 30766905991,
+  "file_sizes_are_not_vram_requirements": true,
+  "selection_reason": "Native Ref2VA NVFP4 plus complete native H3 encoder avoids GGUF loader global patches and missing-vision sentinel ambiguity; runtime fit/quality unmeasured.",
+  "territory_basis": "User explicitly confirmed outside US/EU/UK/South Korea on2026-11-09. No independent geolocation or worldwide output clearance claimed.",
+  "approval_scope": "Local internal test, not publication or promotion to production",
+  "compatible_source_evidence": "Comfy0.44 commit2c75dc1 includes tested quant-card commit14b05228 in ancestry (574commits ahead); this does not prove runtime compatibility."
+}

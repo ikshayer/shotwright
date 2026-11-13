@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from orchestrator.adapters.blender.scene import build_scene_plan
+from orchestrator.api.routes import OPERATIONS as SHARED_OPERATIONS
 from orchestrator.domain.entities import (
     Asset,
     CameraProfile,
@@ -31,27 +31,26 @@ from .asset_requests import create_asset_request_kwargs
 from .conftest import TOKEN, TOKEN_HEADER, find_key, operations, valid_request_kwargs
 from .test_parity import _cli, _command_names, _spellings
 
-# One pattern per adapter operation, matched against route path + function name.
+# Labels map to exact operation_ids from the shared API/CLI registry.
 ADAPTER_OPERATIONS = {
-    "search assets": r"search.*asset|asset.*search",
-    "create asset": r"(create|add|new).*asset|asset.*(create|add|new)",
-    "build scene": r"scene",
-    # One label per route: r"preview|render" also matched /master, so the master
-    # route was only ever checked as a side effect of the preview label.
-    "render preview": r"preview",
-    "render master": r"master",
-    "generate media": r"generat",
-    # Narrow: r"post.?profile" also matched create_post_profile, so this demanded 202
-    # from a creation route. Only the degradation operation belongs here.
-    "degrade": r"degrad",
-    "sample references": r"sample|reference",
-    "export": r"export",
+    "create asset": "create_asset",
+    "build scene": "build_scene",
+    "render preview": "render_preview",
+    "render master": "render_master",
+    "generate media": "generate_media",
+    "degrade": "degrade_media",
+    "sample references": "sample_references",
+    "export": "export",
 }
 
 
-def _matches(app: FastAPI, pattern: str):
-    rx = re.compile(pattern, re.IGNORECASE)
-    return [o for o in operations(app) if rx.search(f"{o.path} {o.name}")]
+def _matches(app: FastAPI, operation_name: str):
+    declared = next((item for item in SHARED_OPERATIONS if item.name == operation_name), None)
+    assert declared is not None, f"unknown shared operation_id {operation_name!r}"
+    return [
+        operation for operation in operations(app)
+        if operation.name == declared.name and operation.path == declared.path
+    ]
 
 
 def _seed_wired_route_records(app: FastAPI, *, needs_degrade: bool = False) -> None:

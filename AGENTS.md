@@ -146,3 +146,26 @@ Get-Content prompt.txt -Raw | codex exec -m <model> --sandbox read-only -C <repo
    sub-agent report, and have repeatedly exposed gaps in the contract itself.
 7. **Review is cheaper than rework.** One read-only review pass returned 18 HIGH
    findings; one discarded package cost far more than several reviews.
+
+
+## Local Qwen audio/video helper (advisory)
+
+Qwen Omni is available as a local perceptual helper for reference analysis and generated-audio review. This is useful when the driving agent cannot listen directly. Read `orchestrator/adapters/qwen/README.md` and `spikes/23_joint_av_analyzer/CREATOR_INTENT_AND_REVIEW.md`.
+
+From this checkout, use the existing orchestrator Python with `-B -m orchestrator.adapters.qwen`:
+
+- `analyze --media <project-relative-file>` for reference observations.
+- `review --media <project-relative-file> --brief-file <project-relative-UTF8-brief>` for generated-audio review. A nonempty intended-sound brief is required; intentional hiss/distortion may be desirable.
+- `inspect` checks local runtime presence without model loading; `--dry-run` on analyze/review probes and plans without inference.
+
+Defaults are 25-second windows, 2-second minimum overlap and 500 output tokens per window. End-anchored windows may overlap more. Inputs/reports stay inside this repository; the real backend uses the already isolated spike23 runtime, not the orchestrator/ComfyUI environment for model loading. Do not start competing GPU work, install into existing environments, stop unrelated apps, bypass admission guards or retry automatically.
+
+Read the saved JSON/Markdown paths returned by the CLI. Retain raw Qwen text, window/source times, intent brief, signal metrics, EOS/cap and partial-coverage/error flags. Distinguish creator direction, model claims and measured facts. Qwen advice is supplementary and does not approve versions or establish semantic truth. The helper is separate from the production job/API registry; its lock does not serialize the production scheduler or other GPU apps.
+
+## MiniMax H3 candidate adapter (opt-in)
+
+- Before using H3, read `orchestrator/adapters/minimax_h3/README.md`, the adapter contract, and `spikes/22_minimax_h3_workflows/CREATOR_PROMPT_RUN.md`. Preserve the creator prompt byte-for-byte after UTF-8 decoding and keep the mode video-plus-prompt only.
+- Bind the source to a hash-matching MASTER or DEGRADED receipt for the requested historical Shot version; never use references or unbound video. `expected_version` is the current mutation token, separate from `shot_version`.
+- Keep H3 disabled unless explicit positive operator VRAM/RAM/disk reservations and throughput floor are configured. Defaults are 8 seconds, 384x288, 24 fps, 20 steps; non-default settings require `experimental=true` and must still satisfy the live schema and all existing guards.
+- Do not add automatic H3 retries. Do not install, download, or mutate pinned model/runtime environments. H3 and the default wired GPU queues share the repository-root execution slot with the Qwen native helper; foreign applications and standalone historical spikes are not covered.
+- Treat outputs as immutable, unapproved candidates with provenance and relative bundle links. Never change Shot/Episode approvals, replace a master, or promote H3 automatically. Inspect remains model-free.

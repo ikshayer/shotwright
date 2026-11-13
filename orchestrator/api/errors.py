@@ -17,10 +17,12 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from orchestrator.adapters.assets.models import ProviderConfigurationError
 from orchestrator.domain.state import ReviewApprovalError, TransitionError
 from orchestrator.platform.containment import ContainmentError, UploadRejected
 from orchestrator.platform.errors import JobError
 from orchestrator.service.assets import AssetRegistrationInvalid
+from orchestrator.adapters.minimax_h3.core import H3RequestError, H3SetupError
 from orchestrator.service.dependencies import ShotProposalWriteFailure
 from orchestrator.store.json_store import RecordNotFound, VersionConflict
 
@@ -67,9 +69,11 @@ _PROMOTED = ("expected", "actual", "current", "limit", "observed", "remediation"
 #: a malformed request body) are mapped by the surface that can raise them.
 MAPPED: tuple[type[BaseException], ...] = (
     VersionConflict, RecordNotFound, ContainmentError, UploadRejected,
+    H3RequestError, H3SetupError,
     TransitionError, ReviewApprovalError, JobError, MissingAdapter, RequestMismatch,
     AdapterRequestInvalid,
     AssetRegistrationInvalid,
+    ProviderConfigurationError,
     ShotProposalWriteFailure,
     ValidationError,
 )
@@ -97,6 +101,10 @@ def describe(exc: BaseException) -> tuple[int, dict[str, Any]] | None:
     ``None`` means "this is not a request failure" and must not be turned into a tidy
     response: over HTTP it stays an unhandled error, which is a 500 and a bug to fix.
     """
+    if isinstance(exc, H3RequestError):
+        return 422, error_body("validation_error", str(exc), field="h3_request")
+    if isinstance(exc, H3SetupError):
+        return 503, error_body("h3_setup_unavailable", str(exc), field="minimax_h3")
     if isinstance(exc, VersionConflict):
         current = (
             exc.current.model_dump(mode="json")
@@ -148,6 +156,8 @@ def describe(exc: BaseException) -> tuple[int, dict[str, Any]] | None:
         return 422, error_body("validation_error", str(exc), field="payload")
     if isinstance(exc, AssetRegistrationInvalid):
         return 422, error_body("validation_error", str(exc), field="asset")
+    if isinstance(exc, ProviderConfigurationError):
+        return 422, error_body("provider_configuration_error", str(exc), provider=exc.provider)
     if isinstance(exc, ShotProposalWriteFailure):
         return 500, error_body(
             "partial_write", str(exc), written=list(exc.written),

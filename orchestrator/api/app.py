@@ -1,18 +1,28 @@
-﻿"""FastAPI transport for the project-local orchestrator."""
+"""FastAPI transport for the project-local orchestrator."""
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hmac
+import html
 import math
 import uuid
 from typing import Annotated, Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
-from fastapi import Body, FastAPI, File, Form, Request, UploadFile
+from fastapi import Body, FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from orchestrator.adapters.assets.models import (
+    AssetAcquireRequest,
+    AssetCategoryRequest,
+    AssetPreviewRequest,
+    AssetSearchRequest,
+)
+from orchestrator.domain.base import ShotStatus
 from orchestrator.domain.entities import (
     CameraProfile,
     Episode,
@@ -25,6 +35,7 @@ from orchestrator.domain.entities import (
 )
 from orchestrator.jobs.journal import read_job_records
 from orchestrator.jobs.lease import GpuLease, PynvmlProbe
+from orchestrator.jobs.gpu_slot import GpuExecutionSlot
 from orchestrator.jobs.queue import JobQueue, ProjectQuarantine, SystemHostResources
 from orchestrator.platform.containment import ProjectRoot, validate_upload
 from orchestrator.platform.settings import Settings
@@ -34,6 +45,10 @@ from orchestrator.service.assets import (
     validate_asset_source,
 )
 from orchestrator.service.compose import compose_render_request
+from orchestrator.service.minimax_h3 import (
+    H3CancelBody, H3GenerateBody, H3RequestError, H3SetupError,
+    compose_h3_request, effective_h3_settings,
+)
 from orchestrator.service.dependencies import (
     create_camera_profile,
     create_episode,
@@ -52,6 +67,10 @@ from orchestrator.service.runner import (
     AdapterRequest,
     JobRunner,
 )
+from orchestrator.service.sourcing import acquire_asset as source_acquire_asset
+from orchestrator.service.sourcing import list_asset_categories as source_list_asset_categories
+from orchestrator.service.sourcing import preview_asset as source_preview_asset
+from orchestrator.service.sourcing import search_assets as source_search_assets
 from orchestrator.store.json_store import ProjectStore, RecordNotFound
 
 from .errors import (
@@ -95,8 +114,10 @@ class OperationContext:
         self.settings = settings
         self.root = root
         self.job_queues = job_queues or {}
+        self._runtime: _DefaultRuntime | None = None
         if job_runner is None and root is not None:
             runtime = _DefaultRuntime(settings, root)
+            self._runtime = runtime
             job_runner = JobRunner(
                 lambda project_id: ProjectStore(runtime.project_root(project_id)), settings,
                 queue_for=runtime, adapters=runtime.registry,
@@ -201,6 +222,22 @@ class OperationContext:
             revised = revise_shot(self._store(data["project_id"]), shot,
                                   expected_version=data["expected_version"])
             return revised.model_dump(mode="json")
+        if operation == "derive_script_scene_plan":
+            from orchestrator.service.script_authoring import derive_script_scene_plan
+            return derive_script_scene_plan(
+                self._store(data["project_id"]),
+                episode_id=data["episode_id"],
+                script_id=data["script_id"],
+                expected_version=data["expected_version"],
+                expected_episode_version=data["expected_episode_version"],
+                expected_shot_versions=data["expected_shot_versions"],
+                expected_location_versions=data["expected_location_versions"],
+            )
+        if operation == "list_episode_credits":
+            from orchestrator.service.credits import collect_episode_credits
+            return collect_episode_credits(
+                self._store(data["project_id"]), episode_id=data["episode_id"]
+            )
         if operation == "score_rubric":
             scores = RubricScores.model_validate(data.get("scores", data))
             return {"scores": scores.model_dump(mode="json"), "passed": scores.passed()}
@@ -246,6 +283,130 @@ class OperationContext:
                 expected_version=registration.expected_version,
             )
             return asset.model_dump(mode="json")
+        if operation == "list_asset_categories":
+            request = AssetCategoryRequest.model_validate({
+                key: value for key, value in data.items()
+                if key in AssetCategoryRequest.model_fields
+            })
+            return source_list_asset_categories(
+                self._store(data["project_id"]), self.settings, request
+            )
+        if operation == "asset_preview":
+            request = AssetPreviewRequest.model_validate({
+                key: value for key, value in data.items()
+                if key in AssetPreviewRequest.model_fields
+            })
+            return source_preview_asset(
+                self._store(data["project_id"]), self.settings, request
+            ).model_dump(mode="json")
+        if operation in {"search_assets", "asset_browser"}:
+            q = data.get("q")
+            saved = []
+            store = self._store(data["project_id"])
+            if operation == "asset_browser":
+                assets_dir = self._project_root(data["project_id"]).resolve("assets/registry")
+                if assets_dir.is_dir():
+                    from orchestrator.domain.entities import Asset
+                    for record in sorted(assets_dir.glob("*.json")):
+                        saved.append(store.load(Asset, record.stem).model_dump(mode="json"))
+            if operation == "asset_browser" and not q:
+                return {"project_id": data["project_id"], "provider": data.get("provider", "polyhaven"), "q": "", "asset_type": data.get("asset_type", "model"), "categories": [], "selected_categories": [], "search": None, "assets": saved}
+            fields = ("provider", "q", "asset_type", "limit", "page", "categories")
+            query = AssetSearchRequest.model_validate({key: data[key] for key in fields if key in data})
+            result = source_search_assets(store, self.settings, query)
+            if operation == "asset_browser":
+                category_request = AssetCategoryRequest(provider=query.provider, asset_type=query.asset_type)
+                category_result = source_list_asset_categories(store, self.settings, category_request)
+                categories = category_result.get("categories", [])
+                return {"project_id": data["project_id"], "provider": query.provider, "q": query.q, "asset_type": query.asset_type, "categories": categories, "selected_categories": query.categories, "search": result.model_dump(mode="json"), "assets": saved}
+            return result.model_dump(mode="json")
+        if operation == "acquire_asset":
+            request = AssetAcquireRequest.model_validate({key: value for key, value in data.items() if key != "project_id"})
+            asset = source_acquire_asset(self._store(data["project_id"]), self.settings, request)
+            return asset.model_dump(mode="json")
+        if operation == "inspect_h3":
+            import json
+            from pathlib import Path
+            policy = self.settings.minimax_h3
+            repository = ProjectRoot(Path(__file__).resolve().parents[2])
+            base = "spikes/22_minimax_h3_workflows"
+            runtime_rel = base + "/_work/local_runtime"
+            catalog_rel = base + "/LOCAL_MODEL_CATALOG.json"
+            required = [
+                base + "/direct_comfy.py",
+                base + "/local_h3.py",
+                runtime_rel + "/env/Scripts/python.exe",
+                runtime_rel + "/source/ComfyUI/main.py",
+                runtime_rel + "/source/ComfyUI/custom_nodes/ComfyUI-MiniMaxH3-Easy/__init__.py",
+            ]
+            try:
+                catalog = json.loads(repository.read_text(catalog_rel, encoding="utf-8"))
+                model_root = catalog["model_root"]
+                required.extend(
+                    model_root + "/" + row["model_relative_path"]
+                    for row in catalog["components"]
+                )
+                runtime_present = (
+                    repository.resolve(runtime_rel).is_dir()
+                    and all(repository.resolve(relative).is_file() for relative in required)
+                )
+            except (OSError, KeyError, TypeError, ValueError):
+                runtime_present = False
+            return {"enabled": policy.enabled, "configured_runtime_present": runtime_present,
+                    "tested_defaults": {"duration_seconds": 8, "width": 384, "height": 288, "fps": 24, "steps": 20},
+                    "limitations": ["video and prompt only", "experimental settings require explicit opt-in",
+                                    "reservations are admission policy, not measured model minima"]}
+        if operation == "list_h3_candidates":
+            store = self._store(data["project_id"])
+            shot = store.load(Shot, data["shot_id"], episode_id=data["episode_id"])
+            return [item.model_dump(mode="json") | {
+                "stale": item.shot_version != shot.version or shot.status is ShotStatus.STALE,
+            } for item in store.list_h3_candidates(data["shot_id"], episode_id=data["episode_id"])]
+        if operation == "cancel_h3_candidate":
+            if self.job_runner is None:
+                raise RuntimeError("default JobRunner was not configured")
+            store = self._store(data["project_id"])
+            body = H3CancelBody.model_validate({key: value for key, value in data.items()
+                                                if key in H3CancelBody.model_fields})
+            with store.command():
+                shot, token = store.load_with_version(Shot, data["shot_id"], episode_id=data["episode_id"])
+                if token != body.expected_version:
+                    from orchestrator.store.json_store import VersionConflict
+                    raise VersionConflict(f"episodes/{data['episode_id']}/shots/{data['shot_id']}",
+                                          body.expected_version, token, shot)
+                from orchestrator.jobs.journal import read_job
+                record = read_job(store._root, data["job_id"])
+                if (record is None or record.get("type") != AdapterKind.H3_CANDIDATE.value
+                        or record.get("shot_id") != data["shot_id"]
+                        or record.get("episode_id") != data["episode_id"]):
+                    raise H3RequestError("job is not bound to this H3 candidate, Shot, and Episode")
+                job = self.job_runner.cancel(data["project_id"], data["job_id"])
+            return {"job_id": job.job_id, "state": job.state, "cancellation_requested": True}
+        if operation == "generate_h3_candidate":
+            if self.job_runner is None:
+                raise RuntimeError("default JobRunner was not configured")
+            effective_h3_settings(self.settings)
+            if self._runtime is not None:
+                adapter = self._runtime.adapter_for(
+                    self._project_root(data["project_id"]), AdapterKind.H3_CANDIDATE,
+                )
+                if not adapter.inspect().get("runtime_present", False):
+                    raise H3SetupError(
+                        "MiniMax H3 runtime is not present; restore the pinned local runtime before submitting"
+                    )
+            body = H3GenerateBody.model_validate({key: value for key, value in data.items()
+                                                  if key in H3GenerateBody.model_fields})
+            store = self._store(data["project_id"])
+            request_model = compose_h3_request(store, shot_id=data["shot_id"],
+                episode_id=data["episode_id"], body=body, run_id=uuid.uuid4().hex)
+            policy = self.settings.minimax_h3
+            request = AdapterRequest(kind=AdapterKind.H3_CANDIDATE,
+                payload={"request": request_model, "expected_version": body.expected_version},
+                record_id=data["shot_id"], record_version=request_model.shot_version,
+                episode_id=data["episode_id"], required_vram_gb=policy.required_vram_gb,
+                required_ram_gb=policy.required_ram_gb, required_disk_gb=policy.required_disk_gb)
+            job = self.job_runner.submit(data["project_id"], request)
+            return {"job_id": job.job_id, "state": job.state, "run_id": request_model.run_id}
         if operation == "report_jobs":
             queue = self.job_queues.get(data["project_id"])
             return self._read_job_reports(data["project_id"], root=queue.root if queue else None)
@@ -369,6 +530,76 @@ async def _mapped_exception(_request: Request, exc: Exception) -> JSONResponse:
         raise exc
     status, body = mapped
     return JSONResponse(status_code=status, content=body)
+
+
+def _asset_browser_html(data: dict[str, Any]) -> str:
+    """Render escaped search cards, local previews, categories and visible credits."""
+    search = data.get("search")
+    rows: list[str] = []
+    project_id = quote(str(data.get("project_id", "")), safe="")
+    if isinstance(search, dict):
+        credit_url = search.get("credit_url", "")
+        if _safe_asset_href(credit_url):
+            rows.append(f'<p class="provider-credit"><a rel="noopener" href="{html.escape(credit_url, quote=True)}">{html.escape(str(search.get("credit", "")))}</a></p>')
+        for item in search.get("results", []):
+            provider = str(item.get("provider", data.get("provider", "polyhaven")))
+            asset_id = str(item.get("source_asset_id", ""))
+            title = html.escape(str(item.get("name", "")))
+            source = item.get("source_url", "")
+            if _safe_asset_href(source):
+                title = f'<a rel="noopener" href="{html.escape(source, quote=True)}">{title}</a>'
+            preview = ""
+            if provider in {"polyhaven", "sketchfab"} and asset_id:
+                local_url = (f'/projects/{project_id}/assets/preview?provider={quote(provider, safe="")}'
+                             f'&amp;source_asset_id={quote(asset_id, safe="")}')
+                preview = f'<img src="{local_url}" alt="Preview of {html.escape(str(item.get("name", "asset")), quote=True)}" loading="lazy"> '
+            rows.append(f'<li>{preview}{title} <span class="license">{html.escape(str(item.get("license", "")))}</span> <span class="creator">{html.escape(str(item.get("attribution", "")))}</span></li>')
+    for item in data.get("assets", []):
+        item_provider = item.get("provider")
+        provider_credit = ('<a class="provider-credit" href="https://polyhaven.com" rel="noopener">Assets from Poly Haven</a> '
+                           if item_provider == "polyhaven" else "")
+        title = html.escape(str(item.get("asset_id", "")))
+        source = item.get("source_url")
+        if _safe_asset_href(source):
+            title = f'<a rel="noopener" href="{html.escape(source, quote=True)}">{title}</a>'
+        license_name = str(item.get("license", ""))
+        license_url = {"CC-BY-4.0": "https://creativecommons.org/licenses/by/4.0/",
+                       "CC0-1.0": "https://creativecommons.org/publicdomain/zero/1.0/"}.get(license_name)
+        shown_license = html.escape(license_name)
+        if license_url and _safe_asset_href(license_url):
+            shown_license = f'<a rel="noopener" href="{license_url}">{shown_license}</a>'
+        rows.append(f'<li class="saved">{provider_credit}{title} <span class="license">{shown_license}</span> <span class="creator">{html.escape(str(item.get("attribution", "")))}</span></li>')
+    provider = html.escape(str(data.get("provider", "polyhaven")), quote=True)
+    selected = str(data.get("asset_type", "model"))
+    types = "".join(f'<option value="{name}"{" selected" if selected == name else ""}>{label}</option>' for name, label in (("model", "Model"), ("texture", "Texture"), ("hdri", "HDRI")))
+    provs = "".join(f'<option value="{name}"{" selected" if provider == name else ""}>{label}</option>' for name, label in (("polyhaven", "Poly Haven"), ("sketchfab", "Sketchfab")))
+    category_controls = ""
+    if data.get("q"):
+        selected_categories = set(data.get("selected_categories", []))
+        options = []
+        for category in data.get("categories", []):
+            slug = str(category.get("slug", ""))
+            label = html.escape(str(category.get("name", slug)))
+            checked = " checked" if slug in selected_categories else ""
+            count = category.get("count")
+            count_text = f' ({int(count)})' if isinstance(count, int) and not isinstance(count, bool) else ""
+            options.append(f'<label><input type="checkbox" name="categories" value="{html.escape(slug, quote=True)}"{checked}>{label}{count_text}</label>')
+        category_controls = '<fieldset><legend>Categories</legend>' + "".join(options) + "</fieldset>"
+    return ('<!doctype html><html><head><meta charset=\"utf-8\"><title>Asset browser</title></head><body>'
+            f'<form method="get"><label>Provider <select name="provider">{provs}</select></label><label>Search <input name="q" value="{html.escape(str(data.get("q", "")), quote=True)}"></label><label>Type <select name="asset_type">{types}</select></label>{category_controls}<button type="submit">Search</button></form><ul>{"".join(rows)}</ul></body></html>')
+
+
+def _safe_asset_href(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = urlsplit(value)
+        return parsed.scheme == "https" and parsed.port in {None, 443} and parsed.hostname and parsed.hostname.casefold() in {
+            "polyhaven.com", "www.polyhaven.com", "sketchfab.com", "www.sketchfab.com",
+            "creativecommons.org", "www.creativecommons.org",
+        } and not parsed.username and not parsed.password and not parsed.fragment
+    except ValueError:
+        return False
 
 
 def create_app(
@@ -510,6 +741,18 @@ def _register_operation(app: FastAPI, operation: Operation, context: OperationCo
         if files:
             data["uploads"] = [await _describe_upload(item) for item in files]
         result = operation.invoke(context, data)
+        if operation.name == "asset_browser":
+            return HTMLResponse(content=_asset_browser_html(result), media_type="text/html")
+        if operation.name == "asset_preview":
+            try:
+                image_bytes = base64.b64decode(result["data_base64"], validate=True)
+            except (KeyError, TypeError, binascii.Error) as exc:
+                raise RuntimeError("asset preview service returned invalid encoded image data") from exc
+            media_type = result.get("media_type")
+            if media_type not in {"image/jpeg", "image/png", "image/webp"}:
+                raise RuntimeError("asset preview service returned an unsupported media type")
+            return Response(content=image_bytes, media_type=media_type,
+                            headers={"X-Content-Type-Options": "nosniff"})
         if operation.name in ASYNC_ADAPTER_OPERATIONS:
             return JSONResponse(status_code=202, content=result)
         return result
@@ -530,7 +773,9 @@ def _register_operation(app: FastAPI, operation: Operation, context: OperationCo
         if operation.request_model is not None:
             for name, model_field in operation.request_model.model_fields.items():
                 default = (
-                    Parameter.empty if model_field.is_required() else model_field.default
+                    Parameter.empty if model_field.is_required()
+                    else model_field.default_factory() if model_field.default_factory is not None
+                    else model_field.default
                 )
                 params.append(Parameter(
                     name,
@@ -538,6 +783,15 @@ def _register_operation(app: FastAPI, operation: Operation, context: OperationCo
                     default=default,
                     annotation=Annotated[model_field.annotation, Form()],
                 ))
+    elif operation.name in {"search_assets", "asset_browser", "list_asset_categories", "asset_preview"}:
+        for name, model_field in operation.request_model.model_fields.items():
+            default = (
+                Parameter.empty if model_field.is_required()
+                else model_field.default_factory() if model_field.default_factory is not None
+                else model_field.default
+            )
+            params.append(Parameter(name, Parameter.POSITIONAL_OR_KEYWORD, default=default,
+                                    annotation=Annotated[model_field.annotation, Query()]))
     elif operation.request_model is not None:
         # A mutating body is required, so its schema is the model itself rather than
         # "model or null". An optional body publishes anyOf[model, null], which hides
@@ -647,6 +901,9 @@ class _DefaultRuntime:
                 elif kind is AdapterKind.GENERATE:
                     from orchestrator.adapters.comfyui.runner import ComfyAdapter
                     adapter = ComfyAdapter(project_root, self.settings)
+                elif kind is AdapterKind.H3_CANDIDATE:
+                    from orchestrator.adapters.minimax_h3 import MinimaxH3Adapter
+                    adapter = MinimaxH3Adapter(project_root, effective_h3_settings(self.settings))
                 else:
                     from orchestrator.adapters.postprofile.runner import PostProfileAdapter
                     adapter = PostProfileAdapter(project_root, self.settings)
@@ -666,11 +923,14 @@ class _DefaultRuntime:
             if key in self._queues:
                 return self._queues[key]
             adapter = self.adapter_for(root, kind)
+            queue_settings = adapter.settings if kind is AdapterKind.H3_CANDIDATE else self.settings
             if self._nvml is None:
                 self._nvml = PynvmlProbe()
             worker = getattr(adapter, "worker", _CpuWorker())
-            lease = GpuLease(root, self.settings, nvml=self._nvml, worker=worker)
-            queue = JobQueue(root, self.settings, lease, ProjectStore(root), nvml=self._nvml,
+            repo_root = ProjectRoot(__import__("pathlib").Path(__file__).resolve().parents[2])
+            lease = GpuLease(root, queue_settings, nvml=self._nvml, worker=worker,
+                             execution_slot=GpuExecutionSlot(repo_root))
+            queue = JobQueue(root, queue_settings, lease, ProjectStore(root), nvml=self._nvml,
                              host=SystemHostResources(), quarantine=ProjectQuarantine(root))
             self._queues[key] = queue
             return queue

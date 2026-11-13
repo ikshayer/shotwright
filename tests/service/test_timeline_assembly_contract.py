@@ -20,7 +20,9 @@ output file. No FFmpeg binary, GPU, renderer, or network is used.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+import uuid
 from datetime import UTC, datetime
 from fractions import Fraction
 from pathlib import Path
@@ -28,6 +30,7 @@ from typing import Any
 
 import pytest
 
+from orchestrator.adapters.blender.scene import RenderRequest, build_scene_plan, synthetic_interior
 from orchestrator.adapters.postprofile.profile import PostProfileSpec
 from orchestrator.adapters.timeline.runner import (
     MediaInfo,
@@ -37,6 +40,7 @@ from orchestrator.adapters.timeline.runner import (
 from orchestrator.domain.base import FramingStatus, ShotStatus
 from orchestrator.domain.entities import (
     Beat,
+    CameraProfile,
     Episode,
     PostProfile,
     PostProfileEncode,
@@ -54,6 +58,14 @@ from orchestrator.service.approval import approve_shot
 from orchestrator.service.dependencies import propose_shots
 from orchestrator.service.timeline import compose_timeline
 from orchestrator.store.json_store import ProjectStore, RecordNotFound, VersionConflict
+
+
+@pytest.fixture
+def tmp_path() -> Path:
+    """Use contained, task-local scratch roots instead of the inaccessible system temp."""
+    base = Path.cwd() / "_work" / "timeline-assembly-tests" / uuid.uuid4().hex
+    ProjectRoot(Path.cwd()).make_dir(base.relative_to(Path.cwd()).as_posix())
+    return base
 
 _EPISODE_ID = "episode-1"
 _OUTPUT_BYTES = b"fake assembled episode bytes"
@@ -242,6 +254,36 @@ def _fixture(
         )
         store.create(shot)
         shot = _approve_fixture_shot(store, shot)
+
+        # Every timeline fixture shot owns a real persisted, version-matched scene plan.
+        # This pure Python path exercises composition provenance without Blender/GPU work.
+        render_request = RenderRequest(
+            shot_id=shot.shot_id,
+            shot_version=shot.version,
+            run_id=f"timeline-scene-{shot_id}",
+            degrade_seed=shot.degrade_seed,
+            duration_sec=shot.duration_sec,
+            camera_profile=CameraProfile(camera_id=f"camera-{shot_id}", profile_name="fixture"),
+            scene=synthetic_interior(),
+        )
+        scene_relative = f"scenes/{shot_id}/v{shot.version:04d}/timeline-fixture/scene.json"
+        scene_bytes = json.dumps(
+            {"schema_version": 1, "plan": build_scene_plan(render_request)},
+            sort_keys=True,
+        ).encode("utf-8")
+        root.write_bytes(scene_relative, scene_bytes)
+        store.append_shot_output(
+            ShotOutput(
+                output_id=f"scene-{shot_id}",
+                episode_id=_EPISODE_ID,
+                shot_id=shot_id,
+                record_version=shot.version,
+                kind=ShotOutputKind.SCENE,
+                relative_path=scene_relative,
+                content_sha256=hashlib.sha256(scene_bytes).hexdigest(),
+            ),
+            expected_version=0,
+        )
         if shot_id == omit_output_for:
             continue
 
@@ -266,7 +308,7 @@ def _fixture(
                 pinned_binaries={"ffmpeg": "fixture-build"},
                 **output_timing,
             ),
-            expected_version=0,
+            expected_version=1,
         )
 
     ordered_beats = (

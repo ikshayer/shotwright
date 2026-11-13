@@ -33,6 +33,14 @@ class Quarantine(Protocol):
     def quarantine(self, paths: Sequence[Path]) -> Path: ...
 
 
+def _budget_seconds(value: object, mapping: str, key: str) -> float:
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value < 0):
+        raise JobError(JobErrorKind.INVALID_MANIFEST,
+                       f"jobs/budgets.json {mapping}[{key!r}] must be finite and nonnegative")
+    return float(value)
+
+
 def _raise_walk_error(error: OSError) -> None:
     """A project-size scan must not silently undercount an unreadable subtree."""
     raise error
@@ -170,20 +178,35 @@ class JobQueue:
             else startup_allowance_seconds
         )
         self._transition(job, "queued")
+        budget_key = job.shot_id or job.job_id
         try:
+            shot_remaining, episode_remaining = self._remaining_budget(job, budget_key)
+            if shot_remaining <= 0:
+                raise self._budget_exhausted(job, "per-shot")
+            if episode_remaining <= 0:
+                raise self._budget_exhausted(job, "per-episode")
             self.preflight(job)
         except JobError as error:
             self._transition(job, "failed", error=error)
             raise
-        budget_key = job.shot_id or job.job_id
         deadline = self.clock() + self.settings.budget.per_shot_wall_clock_seconds
         last_error: JobError | None = None
         retry_policy = None
         while True:
-            if self.clock() >= deadline:
+            now = self.clock()
+            if now >= deadline:
                 last_error = JobError(JobErrorKind.BUDGET_EXCEEDED, "per-shot wall-clock budget exceeded",
                                       job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
                 break
+            shot_remaining, episode_remaining = self._remaining_budget(job, budget_key)
+            remaining_gpu = min(shot_remaining, episode_remaining)
+            if remaining_gpu <= 0:
+                last_error = self._budget_exhausted(
+                    job, "per-shot" if shot_remaining <= episode_remaining else "per-episode",
+                )
+                break
+            # Lease contention consumes the ordinary wall-clock allowance, not the
+            # GPU-minute ledger. GPU allowance is recomputed once the lease is held.
             self.lease.acquire(timeout_seconds=max(0.0, deadline - self.clock()))
             acquired_here = True
             # Recorded the moment the lease is held, not after preflight: a preflight that
@@ -193,6 +216,23 @@ class JobQueue:
             release_failed = False
             start = self.clock()
             try:
+                # Re-read after any bounded lease wait: another queue may have used
+                # the remaining project budget while this attempt waited for admission.
+                shot_remaining, episode_remaining = self._remaining_budget(job, budget_key)
+                remaining_gpu = min(shot_remaining, episode_remaining)
+                if remaining_gpu <= 0:
+                    raise self._budget_exhausted(
+                        job, "per-shot" if shot_remaining <= episode_remaining else "per-episode",
+                    )
+                gpu_deadline = start + remaining_gpu
+                attempt_deadline = min(deadline, gpu_deadline)
+                deadline_message = (
+                    "remaining per-shot/per-episode GPU-minute budget exceeded"
+                    if gpu_deadline < deadline else "per-shot wall-clock budget exceeded"
+                )
+                if start >= attempt_deadline:
+                    raise JobError(JobErrorKind.BUDGET_EXCEEDED, "GPU-minute budget exhausted before worker start",
+                                   job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
                 if job.attempts >= self.settings.budget.retries_per_shot + 1:
                     raise JobError(JobErrorKind.BUDGET_EXCEEDED, "per-shot attempt ceiling reached",
                                    job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
@@ -203,7 +243,8 @@ class JobQueue:
                 try:
                     self._watch_context.startup_allowance_seconds = startup_allowance
                     try:
-                        result = self._watch(worker_fn, job, deadline)
+                        result = self._watch(worker_fn, job, attempt_deadline,
+                                             deadline_message=deadline_message)
                     finally:
                         del self._watch_context.startup_allowance_seconds
                 except JobError as error:
@@ -211,6 +252,13 @@ class JobQueue:
                                                          shot_id=job.shot_id, run_id=job.run_id)
                     if (last_error.kind is JobErrorKind.INTERNAL
                             and "watchdog could not confirm worker stopped" in last_error.message):
+                        try:
+                            self._charge_budget(job, budget_key, self.clock() - start)
+                        except Exception as charge_error:
+                            last_error.add_note(
+                                f"GPU usage ledger update also failed: "
+                                f"{type(charge_error).__name__}: {charge_error}"
+                            )
                         release_failed = True
                         break
                     self._charge_budget(job, budget_key, self.clock() - start)
@@ -314,7 +362,8 @@ class JobQueue:
         )
         job.lease_holder_pid = None
 
-    def _watch(self, worker_fn: Callable[[Job], T], job: Job, deadline: float) -> T:
+    def _watch(self, worker_fn: Callable[[Job], T], job: Job, deadline: float, *,
+               deadline_message: str = "per-shot wall-clock budget exceeded") -> T:
         """Run work in a managed thread; detect stalls and require confirmed worker stop."""
         result: list[T] = []
         errors: list[BaseException] = []
@@ -344,7 +393,10 @@ class JobQueue:
         while not done.wait(0.01):
             now = self.clock()
             if now >= deadline:
-                raise JobError(JobErrorKind.BUDGET_EXCEEDED, "per-shot wall-clock budget exceeded")
+                if not self.lease.worker.terminate():
+                    raise JobError(JobErrorKind.INTERNAL,
+                                   "watchdog could not confirm worker stopped before hard deadline")
+                raise JobError(JobErrorKind.BUDGET_EXCEEDED, deadline_message)
             if configured_floor > 0:
                 if not startup_complete:
                     if job.progress > last_progress:
@@ -384,25 +436,69 @@ class JobQueue:
         raise JobError(JobErrorKind.BUDGET_EXCEEDED,
                        "VRAM thrash suspected: job progress rate fell below configured floor")
 
-    def _charge_budget(self, job: Job, key: str, elapsed: float) -> None:
+    def _remaining_budget(self, job: Job, key: str) -> tuple[float, float]:
+        """Return finite, nonnegative remaining shot and episode GPU seconds."""
         path = "jobs/budgets.json"
         with self._budget_lock:
-            try:
-                budget = json.loads(self.root.read_text(path, encoding="utf-8"))
-            except FileNotFoundError:
-                budget = {"shot_seconds": {}, "episode_seconds": {}}
-            shot_seconds = float(budget["shot_seconds"].get(key, 0)) + elapsed
-            episode_key = job.episode_id or job.run_id or "unassigned"
-            episode_seconds = float(budget["episode_seconds"].get(episode_key, 0)) + elapsed
-            if shot_seconds > self.settings.budget.gpu_minutes_per_shot * 60:
-                raise JobError(JobErrorKind.BUDGET_EXCEEDED, "per-shot GPU-minute ceiling exceeded",
-                               job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
-            if episode_seconds > self.settings.budget.gpu_minutes_per_episode * 60:
-                raise JobError(JobErrorKind.BUDGET_EXCEEDED, "per-episode GPU-minute ceiling exceeded",
-                               job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
+            budget = self._read_budget(path)
+        shot_seconds = _budget_seconds(budget["shot_seconds"].get(key, 0), "shot_seconds", key)
+        episode_key = job.episode_id or job.run_id or "unassigned"
+        episode_seconds = _budget_seconds(
+            budget["episode_seconds"].get(episode_key, 0), "episode_seconds", episode_key,
+        )
+        shot_limit = self.settings.budget.gpu_minutes_per_shot * 60
+        episode_limit = self.settings.budget.gpu_minutes_per_episode * 60
+        if (not math.isfinite(shot_limit) or shot_limit <= 0
+                or not math.isfinite(episode_limit) or episode_limit <= 0):
+            raise JobError(JobErrorKind.INVALID_MANIFEST,
+                           "configured GPU-minute ceilings must be finite and positive")
+        shot_remaining = max(0.0, shot_limit - shot_seconds)
+        episode_remaining = max(0.0, episode_limit - episode_seconds)
+        if not math.isfinite(shot_remaining) or not math.isfinite(episode_remaining):
+            raise JobError(JobErrorKind.INVALID_MANIFEST,
+                           "remaining GPU-minute budgets must be finite")
+        return shot_remaining, episode_remaining
+
+    def _read_budget(self, path: str) -> dict[str, dict[str, object]]:
+        try:
+            budget = json.loads(self.root.read_text(path, encoding="utf-8"))
+        except FileNotFoundError:
+            return {"shot_seconds": {}, "episode_seconds": {}}
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise JobError(JobErrorKind.INVALID_MANIFEST,
+                           "jobs/budgets.json is not valid JSON", cause=exc) from exc
+        if (not isinstance(budget, dict)
+                or not isinstance(budget.get("shot_seconds"), dict)
+                or not isinstance(budget.get("episode_seconds"), dict)):
+            raise JobError(JobErrorKind.INVALID_MANIFEST,
+                           "jobs/budgets.json must contain shot_seconds and episode_seconds objects")
+        return budget
+
+    def _budget_exhausted(self, job: Job, scope: str) -> JobError:
+        return JobError(JobErrorKind.BUDGET_EXCEEDED, f"{scope} GPU-minute ceiling exhausted",
+                        job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
+
+    def _charge_budget(self, job: Job, key: str, elapsed: float) -> None:
+        if isinstance(elapsed, bool) or not isinstance(elapsed, (int, float)) or not math.isfinite(elapsed) or elapsed < 0:
+            raise JobError(JobErrorKind.INTERNAL, "measured lease duration must be finite and nonnegative",
+                           job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
+        path = "jobs/budgets.json"
+        episode_key = job.episode_id or job.run_id or "unassigned"
+        with self._budget_lock:
+            budget = self._read_budget(path)
+            shot_seconds = _budget_seconds(budget["shot_seconds"].get(key, 0), "shot_seconds", key) + elapsed
+            episode_seconds = _budget_seconds(
+                budget["episode_seconds"].get(episode_key, 0), "episode_seconds", episode_key,
+            ) + elapsed
+            # Record the measured consumption before enforcing the hard cap. A job
+            # that overruns must not make its consumed GPU time disappear.
             budget["shot_seconds"][key] = shot_seconds
             budget["episode_seconds"][episode_key] = episode_seconds
             self.root.write_text(path, json.dumps(budget, sort_keys=True, indent=2))
+        if shot_seconds > self.settings.budget.gpu_minutes_per_shot * 60:
+            raise self._budget_exhausted(job, "per-shot")
+        if episode_seconds > self.settings.budget.gpu_minutes_per_episode * 60:
+            raise self._budget_exhausted(job, "per-episode")
 
     def _transition(self, job: Job, state: str, *, error: JobError | None = None) -> None:
         job.state = state

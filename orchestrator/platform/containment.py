@@ -458,6 +458,7 @@ MediaKind = Literal["image", "video", "model"]
 
 _EXTENSION_KIND: dict[str, MediaKind] = {
     ".jpg": "image", ".jpeg": "image", ".png": "image", ".webp": "image",
+    ".hdr": "image", ".exr": "image",
     ".mp4": "video", ".mov": "video", ".webm": "video",
     ".glb": "model",
 }
@@ -489,6 +490,10 @@ def _extensions_matching_magic(head: bytes) -> frozenset[str] | None:
         return frozenset({".jpg", ".jpeg"})
     if head.startswith(b"\x89PNG\r\n\x1a\n"):
         return frozenset({".png"})
+    if head.startswith((b"#?RADIANCE", b"#?RGBE")):
+        return frozenset({".hdr"})
+    if head.startswith(b"\x76\x2f\x31\x01"):
+        return frozenset({".exr"})
     if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
         return frozenset({".webp"})
     if head[4:8] == b"ftyp":

@@ -205,6 +205,32 @@ def shots_invalidated_by_script(
         if shot_id is not None
     }
 
+    def scene_blueprints(script: Script) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for scene in getattr(script, "scenes", []):
+            payload = scene.model_dump(mode="python")
+            for field in ("version", "supersedes", "schema_version", "approval_review_id"):
+                payload.pop(field, None)
+            result[scene.location_id] = payload
+        return result
+
+    old_scenes, new_scenes = scene_blueprints(before), scene_blueprints(after)
+    changed_locations = {
+        location_id for location_id in old_scenes.keys() | new_scenes.keys()
+        if old_scenes.get(location_id) != new_scenes.get(location_id)
+    }
+    if changed_locations:
+        affected_shots.update(
+            shot.shot_id for shot in shots if shot.location_id in changed_locations
+        )
+        for script, mapping in ((before, old_mapping), (after, new_mapping)):
+            for beat in script.beats:
+                direction = getattr(beat, "scene_direction", None)
+                if direction is not None and direction.location_id in changed_locations:
+                    shot_id = mapping.get(beat.beat_id)
+                    if shot_id is not None:
+                        affected_shots.add(shot_id)
+
     if not affected_beats and not affected_shots:
         return Invalidated((), "no beat content or beat-to-shot mapping change")
 
@@ -217,6 +243,7 @@ def shots_invalidated_by_script(
             shot.beat_id in affected_beats
             or any(beat_id in shot.dependencies for beat_id in affected_beats)
             or shot.shot_id in affected_shots
+            or shot.location_id in changed_locations
         )
     ))
     return Invalidated(hits, "Script beat content or beat-to-shot mapping changed")

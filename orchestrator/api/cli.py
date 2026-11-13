@@ -11,7 +11,8 @@ import click
 
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.errors import JobError, JobErrorKind
-from orchestrator.platform.settings import Settings
+from orchestrator.platform.settings import Settings, load_settings
+from orchestrator.store.json_store import ProjectStore
 
 from .app import OperationContext
 from .errors import describe, error_body
@@ -65,6 +66,9 @@ def _command_callback(operation_name: str):
     def run(data: str, json_output: bool, **values: Any) -> None:
         context = click.get_current_context()
         configured: Settings = (context.obj or {}).get("settings") or Settings()
+        operation_context = None
+        submitted = None
+        payload = {}
         try:
             payload = json.loads(data)
             if not isinstance(payload, dict):
@@ -81,6 +85,8 @@ def _command_callback(operation_name: str):
             if model is not None:
                 payload = model.model_validate(payload).model_dump(mode="python")
             wait_for_job = values.pop("wait", True)
+            if operation_name == "generate_h3_candidate" and not wait_for_job:
+                raise ValueError("H3 CLI jobs cannot use --no-wait because the local process owns cleanup")
             payload.update({key: value for key, value in values.items() if value is not None})
             if files:
                 payload["uploads"] = [_describe_file(path) for path in files]
@@ -92,16 +98,41 @@ def _command_callback(operation_name: str):
                 if configured.project_root.is_dir()
                 else None
             )
-            context = OperationContext(configured, root)
-            result = context.invoke(operation_name, payload)
+            operation_context = OperationContext(configured, root)
+            result = operation_context.invoke(operation_name, payload)
             if operation_name in ASYNC_ADAPTER_OPERATIONS and wait_for_job:
-                job = context.job_runner.wait(payload["project_id"], result["job_id"])
-                context.job_runner.close()
+                submitted = result
+                job = operation_context.job_runner.wait(payload["project_id"], result["job_id"])
+                operation_context.job_runner.close()
                 if job.state != "completed":
                     kind = JobErrorKind(job.error_kind or JobErrorKind.INTERNAL.value)
                     raise JobError(kind, f"job {job.job_id} ended in state {job.state}",
                                    job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
                 result = {"job_id": job.job_id, "state": job.state}
+                if operation_name == "generate_h3_candidate":
+                    if root is None:
+                        raise RuntimeError("project root is required to read the H3 candidate receipt")
+                    store = ProjectStore(ProjectRoot(root.resolve(payload["project_id"])))
+                    candidates = store.list_h3_candidates(payload["shot_id"], episode_id=payload["episode_id"])
+                    candidate = next((item for item in candidates if item.job_id == job.job_id), None)
+                    if candidate is None:
+                        raise RuntimeError("completed H3 job has no immutable candidate receipt")
+                    result.update({"run_id": candidate.run_id, "av_path": candidate.av_path,
+                                   "wav_path": candidate.wav_path, "report_path": candidate.report_path})
+        except KeyboardInterrupt:
+            cleanup_error = None
+            if operation_name == "generate_h3_candidate" and submitted and operation_context is not None and operation_context.job_runner is not None:
+                try:
+                    operation_context.job_runner.cancel(payload["project_id"], submitted["job_id"])
+                    operation_context.job_runner.wait(payload["project_id"], submitted["job_id"])
+                    operation_context.job_runner.close()
+                except Exception as exc:
+                    cleanup_error = f"{type(exc).__name__}: {exc}"
+            click.echo(json.dumps(error_body(
+                "cancelled", "H3 candidate generation interrupted",
+                cleanup_error=cleanup_error,
+            )), err=True)
+            raise click.exceptions.Exit(130)
         except Exception as exc:  # CLI failures are reported to stderr with a nonzero status.
             click.echo(json.dumps(_error_payload(exc), ensure_ascii=False), err=True)
             raise click.exceptions.Exit(1) from exc
@@ -147,10 +178,13 @@ def _build_command(operation: Any, name: str) -> click.Command:
 
 
 @click.pass_context
-def _configure_cli(context: click.Context, project_root: Path | None) -> None:
+def _configure_cli(context: click.Context, project_root: Path | None, settings_file: Path | None) -> None:
     existing = context.obj if isinstance(context.obj, dict) else {}
     if existing.get("settings") is None:
-        existing["settings"] = Settings(project_root=project_root or Settings().project_root)
+        configured = load_settings(settings_file) if settings_file is not None else Settings()
+        if project_root is not None:
+            configured = configured.model_copy(update={"project_root": project_root})
+        existing["settings"] = configured
     context.obj = existing
 
 
@@ -159,7 +193,9 @@ app = click.Group(
     help="CCTV production pipeline",
     callback=_configure_cli,
     params=[click.Option(["--project-root"], type=click.Path(path_type=Path),
-                         help="Existing project root from Settings.")],
+                         help="Existing project root from Settings."),
+            click.Option(["--settings", "settings_file"], type=click.Path(exists=True, dir_okay=False, path_type=Path),
+                         help="Load validated TOML settings.")],
 )
 for _operation in OPERATIONS:
     app.add_command(_build_command(_operation, _operation.name))

@@ -56,6 +56,8 @@ class TimelineAssemblyResult:
     content_sha256: str
     ffmpeg_identity: str
     argv: tuple[str, ...]
+    narrative_duration_sec: float = 0.0
+    credit_duration_sec: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,8 @@ class _Segment:
     shot_id: str | None = None
     media: MediaInfo | None = None
     card_text: str | None = None
+    card_text_file: Path | None = None
+    card_fontsize: int = 32
 
 
 def build_assembly_command(
@@ -77,6 +81,7 @@ def build_assembly_command(
     profile: PostProfileSpec,
     output: Path,
     font_path: Path | None = None,
+    card_text_files: Mapping[int, tuple[Path, int]] | None = None,
 ) -> list[str]:
     """Build a deterministic CFR concat-filter command for one persisted Timeline."""
     width, height = profile.storage_resolution
@@ -91,7 +96,8 @@ def build_assembly_command(
 
     segments: list[_Segment] = []
     cursor = Fraction(0)
-    for entry in timeline.entries:
+    card_text_files = card_text_files or {}
+    for entry_index, entry in enumerate(timeline.entries):
         start = Fraction(str(entry.start_sec))
         duration = Fraction(str(entry.duration_sec))
         if start < cursor:
@@ -128,9 +134,17 @@ def build_assembly_command(
                 raise _invalid("Timeline card entry must store its text in ref")
             if font_path is None:
                 raise _invalid("Timeline card needs a contained font file from the delivery PostProfile")
-            if any(ord(char) < 32 or ord(char) == 127 for char in entry.ref):
-                raise _invalid("Timeline card text must be a single printable line")
-            segments.append(_Segment("card", duration, card_text=entry.ref))
+            if any((ord(char) < 32 and char != "\n") or ord(char) == 127 for char in entry.ref):
+                raise _invalid("Timeline card text may contain line breaks but no control characters")
+            if "\n" in entry.ref and entry_index not in card_text_files:
+                raise _invalid("multiline cards require a contained textfile reference")
+            if entry_index in card_text_files:
+                text_file, fontsize = card_text_files[entry_index]
+                if fontsize <= 0 or not text_file.is_file():
+                    raise _invalid("Timeline card text file is missing or fontsize is invalid")
+                segments.append(_Segment("card", duration, card_text_file=text_file, card_fontsize=fontsize))
+            else:
+                segments.append(_Segment("card", duration, card_text=entry.ref))
         else:
             raise _invalid(f"Timeline entry type {entry.type!r} is unsupported; use shot, card, or pause")
         cursor = start + duration
@@ -163,13 +177,21 @@ def build_assembly_command(
         else:
             chain.append(f"setsar={_ratio_text(target_sar)}")
             if segment.kind == "card":
-                assert segment.card_text is not None and font_path is not None
+                assert font_path is not None
                 font = _escape_filter_value(str(font_path.resolve()))
-                text = _escape_filter_value(segment.card_text)
-                chain.append(
-                    f"drawtext=fontfile='{font}':text='{text}':fontcolor=white:fontsize=32:"
-                    "x=(w-text_w)/2:y=(h-text_h)/2"
-                )
+                if segment.card_text_file is not None:
+                    text_file = _escape_filter_value(str(segment.card_text_file.resolve()))
+                    chain.append(
+                        f"drawtext=fontfile='{font}':textfile='{text_file}':expansion=none:"
+                        f"fontcolor=white:fontsize={segment.card_fontsize}:x=(w-text_w)/2:y=(h-text_h)/2"
+                    )
+                else:
+                    assert segment.card_text is not None
+                    text = _escape_filter_value(segment.card_text)
+                    chain.append(
+                        f"drawtext=fontfile='{font}':text='{text}':fontcolor=white:fontsize=32:"
+                        "x=(w-text_w)/2:y=(h-text_h)/2"
+                    )
         chain.append(f"format={profile.encode.pix_fmt}")
         label = f"v{index}"
         filter_parts.append(f"[{index}:v:0]{','.join(chain)}[{label}]")
@@ -250,6 +272,8 @@ class TimelineAssembler:
         log_relative: str,
         font_relative: str | None = None,
         budget_seconds: float | None = None,
+        card_text_files: Mapping[int, tuple[str, int]] | None = None,
+        narrative_duration_sec: float | None = None,
     ) -> TimelineAssemblyResult:
         validated = Timeline.model_validate(timeline.model_dump(mode="python"))
         profile = PostProfileSpec.model_validate(profile.model_dump(mode="python"))
@@ -267,6 +291,17 @@ class TimelineAssembler:
         if log_path.exists():
             raise _invalid(f"episode FFmpeg log already exists: {log_relative}")
         font_path = self._font_path(font_relative, validated, profile)
+        resolved_card_files: dict[int, tuple[Path, int]] = {}
+        for index, item in (card_text_files or {}).items():
+            if type(index) is not int or index < 0 or index >= len(validated.entries) or validated.entries[index].type != "card":
+                raise _invalid("card_text_files must point to an existing card entry index")
+            relative, fontsize = item
+            if type(fontsize) is not int or fontsize <= 0:
+                raise _invalid("card text fontsize must be a positive integer")
+            text_path = self.root.resolve(relative)
+            if not text_path.is_file() or self.root.read_text(relative, encoding="utf-8") != validated.entries[index].ref:
+                raise _invalid("contained credit-card textfile does not match the declared card text")
+            resolved_card_files[index] = (text_path, fontsize)
 
         source_paths: dict[str, Path] = {}
         media: dict[str, MediaInfo] = {}
@@ -293,7 +328,7 @@ class TimelineAssembler:
             command = build_assembly_command(
                 self.ffmpeg_exe, timeline=validated, shot_outputs=shot_outputs,
                 media_info=media, source_paths=source_paths, profile=profile,
-                output=path, font_path=font_path,
+                output=path, font_path=font_path, card_text_files=resolved_card_files,
             )
             command_box.append(command)
 
@@ -355,12 +390,22 @@ class TimelineAssembler:
         except OSError as exc:
             raise JobError(JobErrorKind.CORRUPT_ARTIFACT,
                            f"cannot hash assembled episode cut: {exc}", cause=exc) from exc
+        credit_duration = sum(
+            entry.duration_sec for index, entry in enumerate(validated.entries)
+            if index in resolved_card_files
+        )
+        narrative_duration = (
+            validated.total_duration_sec - credit_duration
+            if narrative_duration_sec is None else narrative_duration_sec
+        )
         return TimelineAssemblyResult(
             relative_path=output_relative,
             log_path=log_relative,
             content_sha256=digest,
             ffmpeg_identity=identity,
             argv=tuple(argv),
+            narrative_duration_sec=narrative_duration,
+            credit_duration_sec=credit_duration,
         )
 
     def _font_path(

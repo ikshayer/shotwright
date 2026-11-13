@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from orchestrator.adapters.blender.scene import build_scene_plan
 from orchestrator.adapters.postprofile.runner import DegradeRequest
 from orchestrator.adapters.timeline.runner import (
     MediaInfo,
@@ -33,7 +34,7 @@ from orchestrator.domain.entities import (
 )
 from orchestrator.domain.state import TransitionContext, check_transition
 from orchestrator.platform.errors import JobError, JobErrorKind
-from orchestrator.service.compose import compose_degrade_request
+from orchestrator.service.compose import compose_degrade_request, compose_render_request
 from orchestrator.service.dependencies import revise_shot
 from orchestrator.service.timeline import assemble_episode
 from orchestrator.store.json_store import ProjectStore
@@ -88,9 +89,36 @@ def _seed_degrade_inputs(
     shot: Shot,
     *,
     artifact_schedule: tuple[ArtifactScheduleEntry, ...] = (),
+    with_scene: bool = False,
 ) -> None:
     """Supply composition's project records without involving a real adapter."""
     root = store._root
+    output_token = 0
+    if with_scene:
+        request = compose_render_request(
+            store,
+            shot_id=shot.shot_id,
+            episode_id=shot.episode_id,
+            run_id="seed-scene",
+            mode="preview",
+        )
+        plan = build_scene_plan(request)
+        scene_relative = f"scenes/{shot.shot_id}/v{shot.version:04d}/seed-scene/scene.json"
+        scene_artifact = json.dumps({"schema_version": 1, "plan": plan}, sort_keys=True).encode("utf-8")
+        root.write_bytes(scene_relative, scene_artifact)
+        store.append_shot_output(
+            ShotOutput(
+                output_id="seed-scene",
+                episode_id=shot.episode_id,
+                shot_id=shot.shot_id,
+                record_version=shot.version,
+                kind=ShotOutputKind.SCENE,
+                relative_path=scene_relative,
+                content_sha256=hashlib.sha256(scene_artifact).hexdigest(),
+            ),
+            expected_version=0,
+        )
+        output_token = 1
     font_relative = "assets/fonts/fixture-overlay.ttf"
     root.write_bytes(font_relative, b"fixture overlay font")
     store.save(
@@ -130,7 +158,7 @@ def _seed_degrade_inputs(
             engine_id="BLENDER_EEVEE",
             engine_build="fixture-build",
         ),
-        expected_version=0,
+        expected_version=output_token,
     )
 
 
@@ -290,7 +318,7 @@ def test_dropped_frames_flow_from_delivery_receipt_into_assembled_timeline(env) 
 
     drop = ArtifactScheduleEntry(type="drop", start_frame=24, count=6)
     shot = _shot(env.store, status=ShotStatus.BUILDING, frame_drop_schedule=(drop,))
-    _seed_degrade_inputs(env.store, shot, artifact_schedule=(drop,))
+    _seed_degrade_inputs(env.store, shot, artifact_schedule=(drop,), with_scene=True)
     profile = env.store.load(PostProfile, "dvr-2005")
 
     planned_frames = int(shot.duration_sec * profile.output_fps)

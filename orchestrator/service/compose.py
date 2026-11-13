@@ -110,6 +110,54 @@ def compose_render_request(
     return request
 
 
+def compose_scene_for_location(location: Location) -> SceneSpec:
+    """Build the existing Location shell/placement/material SceneSpec without store access."""
+    if location.base_shell != "american_living_room":
+        raise JobError(
+            JobErrorKind.INVALID_MANIFEST,
+            f"Location {location.location_id!r} has unsupported base shell {location.base_shell!r}",
+        )
+    scene = american_living_room(look=location.scene_look)
+    objects = list(scene.objects)
+    names = {item.name for item in objects} | {item.name for item in scene.lights}
+    for index, placement in enumerate(location.placements, start=1):
+        name = f"LocationPlacement{index:03d}"
+        suffix = 2
+        while name in names:
+            name = f"LocationPlacement{index:03d}_{suffix:02d}"
+            suffix += 1
+        names.add(name)
+        objects.append(ObjectSpec(
+            name=name,
+            # ObjectSpec's closed primitive vocabulary is still required by the worker
+            # envelope; the worker imports the asset instead whenever asset_id is set.
+            kind="box",
+            asset_id=placement.asset_id,
+            location=placement.position,
+            dimensions=placement.dimensions,
+            rotation=placement.rotation,
+            fit_mode=placement.fit_mode,
+        ))
+    materials = list(scene.materials)
+    known_materials = {material.name for material in materials}
+    for material_name, texture_set in location.material_overrides.items():
+        if material_name not in known_materials:
+            raise JobError(
+                JobErrorKind.INVALID_MANIFEST,
+                f"Location {location.location_id!r} material override targets unknown room material "
+                f"{material_name!r}",
+            )
+        materials = [
+            material.model_copy(update={"textures": texture_set})
+            if material.name == material_name else material
+            for material in materials
+        ]
+    return SceneSpec.model_validate(scene.model_dump(mode="python") | {
+        "objects": tuple(objects), "materials": tuple(materials),
+        "environment": location.environment,
+    })
+
+
 def _scene_for_shot(store: ProjectStore, shot: Shot) -> SceneSpec:
     """Build a Location's shell and placements, preserving legacy unbound shots."""
     if shot.location_id is None:
@@ -132,35 +180,7 @@ def _scene_for_shot(store: ProjectStore, shot: Shot) -> SceneSpec:
             cause=exc,
         ) from exc
 
-    if location.base_shell != "american_living_room":
-        raise JobError(
-            JobErrorKind.INVALID_MANIFEST,
-            f"Location {location.location_id!r} has unsupported base shell {location.base_shell!r}",
-        )
-    scene = american_living_room(look=location.scene_look)
-    if not location.placements:
-        return scene
-
-    objects = list(scene.objects)
-    names = {item.name for item in objects} | {item.name for item in scene.lights}
-    for index, placement in enumerate(location.placements, start=1):
-        name = f"LocationPlacement{index:03d}"
-        suffix = 2
-        while name in names:
-            name = f"LocationPlacement{index:03d}_{suffix:02d}"
-            suffix += 1
-        names.add(name)
-        objects.append(ObjectSpec(
-            name=name,
-            # ObjectSpec's closed primitive vocabulary is still required by the worker
-            # envelope; the worker imports the asset instead whenever asset_id is set.
-            kind="box",
-            asset_id=placement.asset_id,
-            location=placement.position,
-            dimensions=placement.dimensions,
-            rotation=placement.rotation,
-        ))
-    return scene.model_copy(update={"objects": tuple(objects)})
+    return compose_scene_for_location(location)
 
 
 def camera_profile_for_render(store: ProjectStore, shot: Shot) -> CameraProfile:
@@ -235,20 +255,51 @@ def _load_scene_spec(
             object_payloads = scene_payload.get("objects", [])
             if not isinstance(object_payloads, list):
                 raise TypeError("scene plan objects must be a list")
-            for item in object_payloads:
-                if not isinstance(item, dict) or item.get("asset_id") is None:
-                    continue
-                asset_id = item["asset_id"]
-                checksum = item.get("asset_checksum")
-                file_path = item.get("asset_file_path")
+            def remember_binding(asset_id, checksum, file_path):
                 if not isinstance(asset_id, str) or not isinstance(checksum, str) or not isinstance(file_path, str):
                     raise TypeError("scene plan asset reference is missing its checksum or file path")
                 identity = (checksum, file_path)
                 if asset_id in saved_asset_bindings and saved_asset_bindings[asset_id] != identity:
-                    raise ValueError(
-                        f"scene plan has inconsistent bindings for Asset {asset_id!r}"
-                    )
+                    raise ValueError(f"scene plan has inconsistent bindings for Asset {asset_id!r}")
                 saved_asset_bindings[asset_id] = identity
+
+            for item in object_payloads:
+                if isinstance(item, dict) and item.get("asset_id") is not None:
+                    remember_binding(item["asset_id"], item.get("asset_checksum"), item.get("asset_file_path"))
+            material_payloads = scene_payload.get("materials", [])
+            if not isinstance(material_payloads, list):
+                raise TypeError("scene plan materials must be a list")
+            for material in material_payloads:
+                if not isinstance(material, dict):
+                    raise TypeError("scene plan material must be an object")
+                textures = material.get("textures")
+                if textures is None:
+                    continue
+                if not isinstance(textures, dict):
+                    raise TypeError("scene plan material textures must be an object")
+                maps = textures.get("maps")
+                bindings = textures.get("bindings")
+                if not isinstance(maps, dict) or not isinstance(bindings, dict) or set(maps) != set(bindings):
+                    raise ValueError(f"material {material.get('name')!r} has missing or conflicting map bindings")
+                for role, asset_id in maps.items():
+                    binding = bindings.get(role)
+                    if not isinstance(binding, dict) or binding.get("asset_id") != asset_id:
+                        raise ValueError(f"material {material.get('name')!r} map {role!r} binding disagrees with maps")
+                    remember_binding(asset_id, binding.get("asset_checksum"), binding.get("asset_file_path"))
+                textures.pop("bindings")
+                textures.pop("asset_path", None)
+            environment_payload = scene_payload.get("environment")
+            if environment_payload is not None:
+                if not isinstance(environment_payload, dict):
+                    raise TypeError("scene plan environment must be an object")
+                binding = environment_payload.pop("binding", None)
+                if not isinstance(binding, dict) or binding.get("asset_id") != environment_payload.get("asset_id"):
+                    raise ValueError("scene plan environment has a missing or conflicting asset binding")
+                if set(binding) != {"asset_id", "asset_checksum", "asset_file_path"}:
+                    raise ValueError("scene plan environment binding has unexpected derived fields")
+                if "asset_path" in environment_payload:
+                    raise ValueError("persisted scene environment may not contain an authorized runtime path")
+                remember_binding(binding.get("asset_id"), binding.get("asset_checksum"), binding.get("asset_file_path"))
             scene_payload = {
                 key: value for key, value in scene_payload.items()
                 if key != "camera_keyframes"
@@ -289,12 +340,34 @@ def _asset_bindings_for_scene(
     """Resolve referenced IDs to verified, immutable project asset identities."""
     bindings: dict[str, AssetBinding] = {}
     asset_ids = {item.asset_id for item in scene.objects if item.asset_id is not None}
+    map_ids = {
+        asset_id
+        for material in scene.materials
+        if material.textures is not None
+        for asset_id in material.textures.maps.values()
+    }
+    geometry_ids = {item.asset_id for item in scene.objects if item.asset_id is not None}
+    if figure_asset_id is not None:
+        geometry_ids.add(figure_asset_id)
+    if geometry_ids & map_ids:
+        raise JobError(
+            JobErrorKind.INVALID_MANIFEST,
+            "PBR map assets cannot also be used as geometry assets: "
+            + ", ".join(sorted(geometry_ids & map_ids)),
+        )
     if figure_asset_id is not None:
         asset_ids.add(figure_asset_id)
+    asset_ids.update(map_ids)
+    environment_id = scene.environment.asset_id if scene.environment is not None else None
+    if environment_id is not None:
+        if environment_id in asset_ids:
+            raise JobError(JobErrorKind.INVALID_MANIFEST, "environment asset id overlaps geometry or material maps")
+        asset_ids.add(environment_id)
     for asset_id in sorted(asset_ids):
         assert asset_id is not None
         try:
-            asset: Asset = store.verify_asset(asset_id)
+            usage = "environment" if asset_id == environment_id else "texture" if asset_id in map_ids else "geometry"
+            asset: Asset = store.verify_asset(asset_id, usage=usage)
         except RecordNotFound as exc:
             raise JobError(
                 JobErrorKind.INVALID_MANIFEST,
@@ -306,6 +379,15 @@ def _asset_bindings_for_scene(
                 JobErrorKind.INVALID_MANIFEST,
                 f"Asset {asset_id!r} has no registered file path or checksum",
             )
+        if asset_id == environment_id and (asset.type != "hdri" or not asset.file_path.lower().endswith((".hdr", ".exr"))):
+            raise JobError(JobErrorKind.INVALID_MANIFEST, f"environment Asset {asset_id!r} must be an HDRI .hdr or .exr")
+        if asset_id in map_ids:
+            extension = asset.file_path.rsplit(".", 1)[-1].lower() if "." in asset.file_path else ""
+            if asset.type != "texture" or extension not in {"png", "jpg", "jpeg", "webp"}:
+                raise JobError(
+                    JobErrorKind.INVALID_MANIFEST,
+                    f"PBR map Asset {asset_id!r} must have type='texture' and a .png/.jpg/.jpeg/.webp file",
+                )
         bindings[asset_id] = AssetBinding(
             asset_id=asset.asset_id,
             file_path=asset.file_path,

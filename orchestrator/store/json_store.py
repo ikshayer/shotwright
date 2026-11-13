@@ -39,7 +39,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, TypeVar
+from typing import Any, ClassVar, Literal, TypeVar
 
 from pydantic import ValidationError
 
@@ -56,6 +56,8 @@ from orchestrator.domain.entities import (
     CameraProfile,
     Episode,
     EpisodeOutput,
+    GenerationRun,
+    H3Candidate,
     Location,
     PostProfile,
     Project,
@@ -98,6 +100,9 @@ _PATH_FIELDS: dict[type[Entity], tuple[str, ...]] = {
     Location: ("blend_path",),
     Shot: ("audio_refs", "framing_panel_ref"),
     Timeline: ("audio_tracks",),
+    EpisodeOutput: ("relative_path", "credit_manifest_path"),
+    H3Candidate: ("source_path", "av_path", "wav_path", "report_path"),
+    GenerationRun: ("input_paths", "output_paths", "log_path"),
 }
 
 
@@ -150,6 +155,8 @@ _LAYOUTS: dict[type[Entity], _Layout] = {
     # INTERNAL while tests passed against a patched lookup. Unversioned - a
     # review is a dated opinion about one (target, version), never revised.
     Review: _Layout(False, "review_id", lambda i, _e: f"reviews/{i}.json"),
+    GenerationRun: _Layout(False, "run_id", lambda i, _e: f"generations/{i}.json"),
+    H3Candidate: _Layout(False, "candidate_id", lambda i, _e: f"generated/h3/candidates/{i}.json"),
 }
 
 
@@ -296,6 +303,20 @@ class ProjectStore:
                 return []
             return sorted(p.name for p in parent.iterdir() if self._versions_in_path(p))
 
+    def list_h3_candidates(self, shot_id: str, *, episode_id: str) -> tuple[H3Candidate, ...]:
+        """List immutable candidate receipts for a Shot in stable filename order."""
+        with self._lock:
+            directory = self._resolve("generated/h3/candidates")
+            if not directory.is_dir():
+                return ()
+            found = []
+            for path in sorted(directory.glob("*.json"), key=lambda item: item.name):
+                relative = path.relative_to(self._root.path).as_posix()
+                candidate, _ = self._read_record(H3Candidate, relative)
+                if candidate.episode_id == episode_id and candidate.shot_id == shot_id:
+                    found.append(candidate)
+            return tuple(found)
+
     def append_shot_output(self, output: ShotOutput, *, expected_version: int) -> int:
         """Append an immutable output receipt using its per-Shot ledger token."""
         if type(expected_version) is not int or expected_version < 0:
@@ -439,10 +460,14 @@ class ProjectStore:
                 outputs.append(output)
             return tuple(outputs)
 
-    def verify_asset(self, asset_id: str) -> Asset:
-        """Load an asset record and verify its project-local bytes before use."""
+    def verify_asset(
+        self, asset_id: str, *, usage: Literal["geometry", "texture", "environment"] = "geometry"
+    ) -> Asset:
+        """Load an asset record and verify its bytes for an explicit consumer."""
+        if usage not in {"geometry", "texture", "environment"}:
+            raise ValueError(f"unsupported asset usage {usage!r}; expected geometry, texture, or environment")
         asset = self.load(Asset, asset_id)
-        self._verify_asset_artifact(asset)
+        self._verify_asset_artifact(asset, usage=usage)
         return asset
 
     # -- writes ----------------------------------------------------------------------
@@ -458,6 +483,8 @@ class ProjectStore:
         if layout.versioned:
             raise _invalid(f"{type(entity).__name__} is versioned; use create/update/revise")
         relative = layout.place(self._id_of(entity, layout), None)
+        if isinstance(entity, H3Candidate) and expected_version != 0:
+            raise _invalid("H3Candidate receipts are immutable; only expected_version=0 creation is allowed")
         with self._lock:
             creating = False
             try:
@@ -882,7 +909,9 @@ class ProjectStore:
         if digest.hexdigest() != output.content_sha256:
             raise _invalid(f"ShotOutput artifact hash mismatch: {output.relative_path}")
 
-    def _verify_asset_artifact(self, asset: Asset) -> None:
+    def _verify_asset_artifact(
+        self, asset: Asset, *, usage: Literal["geometry", "texture", "environment"] = "geometry"
+    ) -> None:
         if not asset.file_path or not asset.checksum:
             raise _invalid(f"Asset {asset.asset_id!r} has no registered file path or checksum")
         try:
@@ -908,11 +937,29 @@ class ProjectStore:
                 f"Asset {asset.asset_id!r} is a Blender .blend file, which can execute Python "
                 "on load; only .glb files can be imported as geometry"
             )
-        if extension != ".glb":
-            raise _invalid(
-                f"Asset {asset.asset_id!r} has unsupported geometry format {extension!r}; "
-                "only .glb files can be imported as geometry"
-            )
+        if usage == "environment":
+            if asset.type != "hdri" or extension not in {".hdr", ".exr"}:
+                raise _invalid(f"Asset {asset.asset_id!r} environment usage requires type 'hdri' and a .hdr or .exr file")
+            if extension == ".hdr" and not (head.startswith((b"#?RADIANCE", b"#?RGBE"))):
+                raise _invalid(f"Asset {asset.asset_id!r} is not a Radiance HDR image")
+            if extension == ".exr" and head[:4] != bytes((0x76, 0x2f, 0x31, 0x01)):
+                raise _invalid(f"Asset {asset.asset_id!r} is not an OpenEXR image")
+        elif usage == "geometry":
+            if extension != ".glb":
+                raise _invalid(
+                    f"Asset {asset.asset_id!r} has unsupported geometry format {extension!r}; "
+                    "only .glb files can be imported as geometry"
+                )
+        else:
+            if asset.type != "texture":
+                raise _invalid(
+                    f"Asset {asset.asset_id!r} has type {asset.type!r}; texture usage requires type 'texture'"
+                )
+            if extension not in {".png", ".jpg", ".jpeg", ".webp"}:
+                raise _invalid(
+                    f"Asset {asset.asset_id!r} has unsupported texture format {extension!r}; "
+                    "only .png, .jpg, .jpeg, and .webp files can be used as textures"
+                )
         digest = hashlib.sha256()
         try:
             with artifact.open("rb") as stream:
@@ -945,6 +992,22 @@ class ProjectStore:
             raise _invalid(f"cannot hash EpisodeOutput artifact {output.relative_path}: {exc}", cause=exc) from exc
         if digest.hexdigest() != output.content_sha256:
             raise _invalid(f"EpisodeOutput artifact hash mismatch: {output.relative_path}")
+        if output.credit_manifest_path is not None:
+            try:
+                manifest = self._root.resolve(output.credit_manifest_path)
+            except ContainmentError as exc:
+                raise _invalid(f"EpisodeOutput credit manifest path escapes the project: {exc}", cause=exc) from exc
+            if not manifest.is_file():
+                raise _invalid(f"EpisodeOutput credit manifest is missing or not a file: {output.credit_manifest_path}")
+            manifest_digest = hashlib.sha256()
+            try:
+                with manifest.open("rb") as stream:
+                    while block := stream.read(1024 * 1024):
+                        manifest_digest.update(block)
+            except OSError as exc:
+                raise _invalid(f"cannot hash EpisodeOutput credit manifest {output.credit_manifest_path}: {exc}", cause=exc) from exc
+            if manifest_digest.hexdigest() != output.credit_manifest_sha256:
+                raise _invalid(f"EpisodeOutput credit manifest hash mismatch: {output.credit_manifest_path}")
 
     @staticmethod
     def _version_path(directory: str, version: int) -> str:

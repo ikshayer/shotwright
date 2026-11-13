@@ -19,7 +19,12 @@ from orchestrator.domain.anomaly import (
     StaticSilhouette,
 )
 from orchestrator.domain.base import Invalidation
-from orchestrator.domain.entities import CAMERA_MOTION_MODEL_SEMVER, CameraProfile
+from orchestrator.domain.entities import (
+    CAMERA_MOTION_MODEL_SEMVER,
+    CameraProfile,
+    EnvironmentBinding,
+    PBRTextureSet,
+)
 from orchestrator.domain.seeds import INT32_MAX, derive_seed, jitter
 
 Vec3 = tuple[float, float, float]
@@ -42,6 +47,7 @@ class MaterialSpec(_FrozenModel):
     bump_strength: float = Field(default=0.0, ge=0, le=1)
     emission_strength: float = Field(default=0.0, ge=0)
     metallic: float = Field(default=0.0, ge=0, le=1)
+    textures: PBRTextureSet | None = None
 
     @field_validator("texture_scale")
     @classmethod
@@ -81,6 +87,7 @@ class ObjectSpec(_FrozenModel):
     name: str
     kind: Literal["box", "cylinder", "sphere", "cone", "torus"]
     asset_id: str | None = None
+    fit_mode: Literal["exact", "contain"] = "exact"
     location: Vec3
     dimensions: Vec3
     material: str | None = None
@@ -89,11 +96,18 @@ class ObjectSpec(_FrozenModel):
     keyframes: tuple[KeyframeSpec, ...] = ()
     visibility_keyframes: tuple[VisibilityKeyframeSpec, ...] = ()
 
-    @field_validator("name", "material")
+    @field_validator("name")
     @classmethod
-    def nonempty(cls, value: str) -> str:
+    def nonempty_name(cls, value: str) -> str:
         if not value.strip():
-            raise ValueError("value must not be empty")
+            raise ValueError("name must not be empty")
+        return value
+
+    @field_validator("material")
+    @classmethod
+    def nonempty_material(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("material must not be empty")
         return value
 
     @field_validator("dimensions")
@@ -180,6 +194,7 @@ class SceneSpec(_FrozenModel):
     camera_target: Vec3
     camera_keyframes: tuple[CameraKeyframeSpec, ...] = ()
     world_strength: float | None = Field(default=None, ge=0)
+    environment: EnvironmentBinding | None = None
 
     @model_validator(mode="after")
     def validate_scene(self) -> SceneSpec:
@@ -187,6 +202,8 @@ class SceneSpec(_FrozenModel):
         if len(material_names) != len(set(material_names)):
             raise ValueError("material names must be unique")
         known = set(material_names)
+        if self.environment is not None and self.environment.asset_id in {obj.asset_id for obj in self.objects if obj.asset_id is not None} | {asset_id for material in self.materials if material.textures is not None for asset_id in material.textures.maps.values()}:
+            raise ValueError("environment asset id must not overlap geometry or material map assets")
         for obj in self.objects:
             if obj.material is None and obj.asset_id is not None:
                 continue
@@ -393,6 +410,34 @@ def build_scene_plan(request: RenderRequest) -> dict[str, object]:
             )
         item["asset_checksum"] = binding.checksum
         item["asset_file_path"] = binding.file_path
+    for material in plan["scene"]["materials"]:
+        textures = material.get("textures")
+        if textures is None:
+            continue
+        maps = textures.get("maps")
+        if not isinstance(maps, dict):
+            raise TypeError(f"material {material.get('name')!r} has invalid texture maps")
+        texture_bindings: dict[str, dict[str, str]] = {}
+        for role, asset_id in maps.items():
+            referenced_assets.add(asset_id)
+            binding = request.asset_bindings.get(asset_id)
+            if binding is None or binding.asset_id != asset_id:
+                raise ValueError(f"material {material.get('name')!r} map {role!r} references unregistered asset {asset_id!r}")
+            texture_bindings[role] = {
+                "asset_id": asset_id,
+                "asset_checksum": binding.checksum,
+                "asset_file_path": binding.file_path,
+            }
+        textures["bindings"] = texture_bindings
+    environment = scene_data.get("environment")
+    if environment is not None:
+        asset_id = environment["asset_id"]
+        referenced_assets.add(asset_id)
+        binding = request.asset_bindings.get(asset_id)
+        if binding is None or binding.asset_id != asset_id:
+            raise ValueError(f"environment references unregistered asset {asset_id!r}")
+        environment["binding"] = {"asset_id": asset_id, "asset_checksum": binding.checksum,
+                                  "asset_file_path": binding.file_path}
     unused_bindings = set(request.asset_bindings) - referenced_assets
     if unused_bindings:
         raise ValueError(
@@ -943,6 +988,8 @@ def _scene_payload(request: RenderRequest, camera: dict[str, object]) -> dict[st
     for spec, item in zip(scene.objects, payload["objects"], strict=True):
         if spec.asset_id is None:
             item.pop("asset_id", None)
+        if spec.fit_mode == "exact":
+            item.pop("fit_mode", None)
         if spec.material is None:
             item.pop("material", None)
         if not spec.visibility_keyframes:
@@ -956,7 +1003,9 @@ def _scene_payload(request: RenderRequest, camera: dict[str, object]) -> dict[st
         for key, default in (("kind", "area"), ("target", None)):
             if item.get(key) == default:
                 item.pop(key, None)
-    for item in payload["materials"]:
+    for spec, item in zip(scene.materials, payload["materials"], strict=True):
+        if spec.textures is None:
+            item.pop("textures", None)
         for key, default in {
             "surface": "plain",
             "texture_scale": [1.0, 1.0, 1.0],
@@ -971,6 +1020,8 @@ def _scene_payload(request: RenderRequest, camera: dict[str, object]) -> dict[st
                 item.pop(key, None)
     if scene.world_strength is None:
         payload.pop("world_strength", None)
+    if scene.environment is None:
+        payload.pop("environment", None)
     return payload
 
 

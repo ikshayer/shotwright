@@ -15,6 +15,7 @@ from typing import Protocol, Self
 
 import psutil
 
+from orchestrator.jobs.gpu_slot import GpuExecutionSlot
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.platform.settings import Settings
@@ -226,9 +227,11 @@ def pid_is_alive(pid: int) -> bool:
 class GpuLease:
     def __init__(self, root: ProjectRoot, settings: Settings, *, nvml: NvmlProbe,
                  worker: WorkerControl, pid_alive: Callable[[int], bool] = pid_is_alive,
-                 clock: Callable[[], float] = time.monotonic, ttl_seconds: float = 30.0) -> None:
+                 clock: Callable[[], float] = time.monotonic, ttl_seconds: float = 30.0,
+                 execution_slot: GpuExecutionSlot | None = None) -> None:
         self.root, self.settings, self.nvml, self.worker = root, settings, nvml, worker
         self._pid_alive, self._clock, self.ttl_seconds = pid_alive, clock, ttl_seconds
+        self.execution_slot = execution_slot
         self._path = "jobs/gpu_lease.json"
         root.make_dir("jobs")
         if not root.resolve("jobs/gpu_lease.lock").exists():
@@ -245,30 +248,39 @@ class GpuLease:
         self.baseline_mb = 0.0
 
     def acquire(self, timeout_seconds: float) -> None:
-        deadline = self._clock() + timeout_seconds
-        while True:
-            with _ProcessLock(self._lock_path):
-                record = self._read()
-                now = self._clock()
-                if record is not None:
-                    pid = record.get("pid")
-                    expired = now - float(record.get("heartbeat", now)) > float(record.get("ttl", self.ttl_seconds))
-                    dead = isinstance(pid, int) and not self._safe_alive(pid)
-                    if expired and dead:
-                        self._delete_if_same(record)
-                        record = None
-                if record is None:
-                    pid = self.worker.pid()
-                    if pid is None:
-                        raise JobError(JobErrorKind.WORKER_UNREACHABLE, "GPU worker has no live PID")
-                    self.baseline_mb = self.nvml.device_memory().used_mb
-                    new = {"pid": pid, "heartbeat": now, "ttl": self.ttl_seconds, "token": os.urandom(16).hex()}
-                    self.root.write_text(self._path, json.dumps(new, sort_keys=True))
-                    self._record, self._owned = new, True
-                    return
-            if self._clock() >= deadline:
-                raise JobError(JobErrorKind.WORKER_UNREACHABLE, "timed out waiting for the GPU lease")
-            time.sleep(min(0.01, max(0.0, deadline - self._clock())))
+        slot_acquired = False
+        if self.execution_slot is not None:
+            self.execution_slot.acquire(timeout_seconds)
+            slot_acquired = True
+        try:
+            deadline = self._clock() + timeout_seconds
+            while True:
+                with _ProcessLock(self._lock_path):
+                    record = self._read()
+                    now = self._clock()
+                    if record is not None:
+                        pid = record.get("pid")
+                        expired = now - float(record.get("heartbeat", now)) > float(record.get("ttl", self.ttl_seconds))
+                        dead = isinstance(pid, int) and not self._safe_alive(pid)
+                        if expired and dead:
+                            self._delete_if_same(record)
+                            record = None
+                    if record is None:
+                        pid = self.worker.pid()
+                        if pid is None:
+                            raise JobError(JobErrorKind.WORKER_UNREACHABLE, "GPU worker has no live PID")
+                        self.baseline_mb = self.nvml.device_memory().used_mb
+                        new = {"pid": pid, "heartbeat": now, "ttl": self.ttl_seconds, "token": os.urandom(16).hex()}
+                        self.root.write_text(self._path, json.dumps(new, sort_keys=True))
+                        self._record, self._owned = new, True
+                        return
+                if self._clock() >= deadline:
+                    raise JobError(JobErrorKind.WORKER_UNREACHABLE, "timed out waiting for the GPU lease")
+                time.sleep(min(0.01, max(0.0, deadline - self._clock())))
+        except BaseException:
+            if slot_acquired and not self._owned:
+                self.execution_slot.release()
+            raise
 
     def heartbeat(self) -> None:
         if not self._owned or self._record is None:
@@ -304,6 +316,8 @@ class GpuLease:
                                "GPU worker termination was not confirmed; lease remains held")
             self.worker.respawn()
         self._drop_owned()
+        if self.execution_slot is not None:
+            self.execution_slot.release()
 
     def __enter__(self) -> Self:
         self.acquire(self.settings.resources.vram_release_timeout_seconds)
@@ -342,8 +356,18 @@ class GpuLease:
             self.root.resolve(self._path).unlink(missing_ok=True)
 
     def _drop_owned(self) -> None:
-        if self._record is not None:
-            with _ProcessLock(self._lock_path):
-                self._delete_if_same(self._record)
+        if self._record is None:
+            if self._owned:
+                raise JobError(JobErrorKind.WORKER_UNREACHABLE, "GPU lease record is unavailable; shared slot remains held")
+            return
+        with _ProcessLock(self._lock_path):
+            current = self._read()
+            if current != self._record:
+                raise JobError(JobErrorKind.WORKER_UNREACHABLE,
+                               "GPU lease ownership cannot be verified; shared slot remains held")
+            self._delete_if_same(self._record)
+            if self._read() is not None:
+                raise JobError(JobErrorKind.WORKER_UNREACHABLE,
+                               "GPU lease record removal was not verified; shared slot remains held")
         self._record, self._owned = None, False
 

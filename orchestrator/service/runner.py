@@ -42,6 +42,7 @@ class AdapterKind(StrEnum):
     RENDER = "render"
     GENERATE = "generate"
     DEGRADE = "degrade"
+    H3_CANDIDATE = "h3_candidate"
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,14 @@ class _AdapterShim:
 
     def invoke(self, request: AdapterRequest, job: Job, *, queue: JobQueue) -> AdapterResult:
         payload = request.payload
+        if self.kind is AdapterKind.H3_CANDIDATE:
+            from orchestrator.adapters.minimax_h3 import H3Request
+            model = H3Request.model_validate(payload.get("request") if isinstance(payload, dict) else payload)
+            result = self.adapter.generate_managed(
+                model, job, queue=queue,
+                cancel=self.cancel_check or _cancel_callback(request.payload),
+            )
+            return AdapterResult(artifact_path=result.av_path, value=result)
         if isinstance(payload, dict):
             payload = payload.get("request", payload)
         if self.kind is AdapterKind.SCENE:
@@ -215,6 +224,14 @@ class JobRunner:
             except RecordNotFound as exc:
                 raise RecordNotFound(f"bound Shot {request.record_id!r} does not exist") from exc
             episode_id = shot.episode_id
+            if request.kind is AdapterKind.H3_CANDIDATE:
+                expected = request.payload.get("expected_version") if isinstance(request.payload, dict) else None
+                _, current_token = store.load_with_version(Shot, request.record_id, episode_id=episode_id)
+                if type(expected) is not int or expected != current_token:
+                    from orchestrator.store.json_store import VersionConflict
+                    raise VersionConflict(f"episodes/{episode_id}/shots/{request.record_id}",
+                                          expected if type(expected) is int else -1,
+                                          current_token, shot)
             adapter_payload = _payload_body(request.payload)
             payload_shot_id = _payload_value(adapter_payload, "shot_id")
             payload_version = _payload_value(adapter_payload, "shot_version")
@@ -237,6 +254,8 @@ class JobRunner:
                 shot_id=request.record_id, episode_id=episode_id,
                 run_id=(request.payload.run_id
                         if isinstance(request.payload, (RenderRequest, DegradeRequest))
+                        else request.payload["request"].run_id
+                        if request.kind is AdapterKind.H3_CANDIDATE and isinstance(request.payload, dict)
                         else uuid.uuid4().hex),
             )
             # Admission refusal is part of submit's synchronous contract. The id is
@@ -339,7 +358,8 @@ class JobRunner:
                         JobErrorKind.CANCELLED, "job cancelled before adapter start", active
                     )
                 try:
-                    _begin_shot_work(store, request, active)
+                    if request.kind is not AdapterKind.H3_CANDIDATE:
+                        _begin_shot_work(store, request, active)
                     return adapter.invoke(request, active, queue=queue)
                 except Exception as exc:
                     raise JobError.from_exception(
@@ -349,7 +369,7 @@ class JobRunner:
 
             if self._is_cancelled(key):
                 raise _job_error(JobErrorKind.CANCELLED, "job cancelled before adapter start", job)
-            if request.kind in {AdapterKind.RENDER, AdapterKind.GENERATE}:
+            if request.kind in {AdapterKind.RENDER, AdapterKind.GENERATE, AdapterKind.H3_CANDIDATE}:
                 with self._gpu_lock:
                     value = queue.run(
                         job, invoke_if_not_cancelled,
@@ -373,9 +393,20 @@ class JobRunner:
             result = value if isinstance(value, AdapterResult) else AdapterResult(
                 artifact_path=_artifact_path(request.kind, value, request.payload), value=value
             )
-            self._record_result(store, root, request, job, result)
+            if request.kind is AdapterKind.H3_CANDIDATE:
+                from orchestrator.service.minimax_h3 import persist_h3_candidate
+                persist_h3_candidate(store, job, result.value, request.payload["request"])
+            else:
+                self._record_result(store, root, request, job, result)
         except JobError as exc:
-            if exc.kind is not JobErrorKind.CANCELLED:
+            if request.kind is AdapterKind.H3_CANDIDATE:
+                try:
+                    from orchestrator.service.minimax_h3 import persist_h3_terminal
+                    persist_h3_terminal(store, job, request.payload["request"],
+                                        status="cancelled" if exc.kind is JobErrorKind.CANCELLED else "failed")
+                except Exception as receipt_error:
+                    exc.add_note(f"H3 terminal GenerationRun persistence failed: {type(receipt_error).__name__}: {receipt_error}")
+            if exc.kind is not JobErrorKind.CANCELLED and request.kind is not AdapterKind.H3_CANDIDATE:
                 lifecycle_error = _fail_shot_after_job_error(store, request)
                 if lifecycle_error is not None:
                     exc.message = (
@@ -394,10 +425,17 @@ class JobRunner:
                         origin="runner",
                     ), self.settings)
         except Exception as exc:  # noqa: BLE001 - adapter failures are classified at the job boundary.
+            if request.kind is AdapterKind.H3_CANDIDATE:
+                try:
+                    from orchestrator.service.minimax_h3 import persist_h3_terminal
+                    persist_h3_terminal(store, job, request.payload["request"], status="failed")
+                except Exception as receipt_error:
+                    exc.add_note(f"H3 terminal GenerationRun persistence failed: {type(receipt_error).__name__}: {receipt_error}")
             error = JobError.from_exception(
                 exc, job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id, origin="runner"
             )
-            lifecycle_error = _fail_shot_after_job_error(store, request)
+            lifecycle_error = (None if request.kind is AdapterKind.H3_CANDIDATE
+                               else _fail_shot_after_job_error(store, request))
             if lifecycle_error is not None:
                 error.message = (
                     f"{error.message}; also failed to move the Shot from building to "

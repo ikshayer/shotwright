@@ -1,14 +1,22 @@
-﻿"""The shared, typed operation registry for HTTP, CLI, and agent tools."""
+"""The shared, typed operation registry for HTTP, CLI, and agent tools."""
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from orchestrator.adapters.assets.models import (
+    AssetAcquireRequest,
+    AssetCategoryRequest,
+    AssetPreviewRequest,
+    AssetSearchRequest,
+)
+from orchestrator.service.minimax_h3 import H3CancelBody, H3GenerateBody
 from orchestrator.domain.entities import (
     CameraProfile,
     Episode,
@@ -73,6 +81,40 @@ class ShotProposal(BaseModel):
 
 class RubricRequest(BaseModel):
     scores: RubricScores
+
+
+class ScriptDerivationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_version: int = Field(ge=1)
+    expected_episode_version: int = Field(ge=1)
+    expected_shot_versions: dict[str, int]
+    expected_location_versions: dict[str, int]
+
+    @field_validator("expected_shot_versions", "expected_location_versions")
+    @classmethod
+    def nonnegative_versions(cls, value: dict[str, int]) -> dict[str, int]:
+        if any(type(version) is not int or version < 0 for version in value.values()):
+            raise ValueError("expected versions must be nonnegative integers")
+        return value
+
+
+class AssetBrowserRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    provider: Literal["polyhaven", "sketchfab"] = "polyhaven"
+    q: str | None = Field(None, max_length=200)
+    asset_type: Literal["model", "texture", "hdri"] = "model"
+    limit: int = Field(10, ge=1, le=50)
+    page: int = Field(1, ge=1, le=3)
+    categories: list[str] = Field(default_factory=list, max_length=10)
+
+    @field_validator("categories")
+    @classmethod
+    def safe_categories(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value):
+            raise ValueError("categories must be unique")
+        if any(not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", item) for item in value):
+            raise ValueError("categories must be safe slugs")
+        return value
 
 
 class AssetRegistration(BaseModel):
@@ -157,9 +199,15 @@ OPERATIONS = (
     Operation("load_project", "GET", "/projects/{project_id}", "Load a project", False, "store", None, _call("load_project")),
     Operation("draft_script", "POST", "/projects/{project_id}/episodes/{episode_id}/scripts/draft", "Persist an agent-authored script", True, "service.dependencies.draft_script", ScriptDraft, _call("draft_script")),
     Operation("revise_script", "POST", "/projects/{project_id}/episodes/{episode_id}/scripts/revise", "Revise a script", True, "service.dependencies.revise_script", ScriptRevision, _call("revise_script")),
+    Operation("derive_script_scene_plan", "POST", "/projects/{project_id}/episodes/{episode_id}/scripts/{script_id}/derive", "Derive scene plans from structured script direction", True, "service.script_authoring.derive_script_scene_plan", ScriptDerivationRequest, _call("derive_script_scene_plan")),
+    Operation("list_episode_credits", "GET", "/projects/{project_id}/episodes/{episode_id}/credits", "List episode asset credits and publication blockers", False, "service.credits.collect_episode_credits", None, _call("list_episode_credits")),
     Operation("propose_shots", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/propose", "Persist agent-authored shots", True, "service.dependencies.propose_shots", ShotProposal, _call("propose_shots")),
     Operation("revise_shot", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/revise", "Revise a shot", True, "service.dependencies.revise_shot", ShotRevision, _call("revise_shot")),
-    Operation("search_assets", "GET", "/projects/{project_id}/assets/search", "Search assets", False, "asset search adapter", OpenRequest, _call("search_assets")),
+    Operation("search_assets", "GET", "/projects/{project_id}/assets/search", "Search provider assets", False, "service.sourcing.search_assets", AssetSearchRequest, _call("search_assets")),
+    Operation("list_asset_categories", "GET", "/projects/{project_id}/assets/categories", "List provider asset categories", False, "service.sourcing.list_asset_categories", AssetCategoryRequest, _call("list_asset_categories")),
+    Operation("asset_preview", "GET", "/projects/{project_id}/assets/preview", "Fetch a bounded provider asset thumbnail", False, "service.sourcing.preview_asset", AssetPreviewRequest, _call("asset_preview")),
+    Operation("acquire_asset", "POST", "/projects/{project_id}/assets/acquire", "Acquire and register a provider asset", True, "service.sourcing.acquire_asset", AssetAcquireRequest, _call("acquire_asset")),
+    Operation("asset_browser", "GET", "/projects/{project_id}/assets/browser", "Browse provider assets and project credits", False, "service.sourcing.search_assets", AssetBrowserRequest, _call("asset_browser")),
     Operation("create_asset", "POST", "/projects/{project_id}/assets", "Register a project-local asset file", True, "service.assets.register_asset", AssetRegistration, _call("create_asset"), upload=True),
     Operation("build_scene", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/scene", "Build a scene", True, "scene builder adapter", OpenRequest, _call("build_scene")),
     Operation("render_preview", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/preview", "Render a preview", True, "preview renderer adapter", OpenRequest, _call("render_preview")),
@@ -167,6 +215,10 @@ OPERATIONS = (
     Operation("generate_media", "POST", "/projects/{project_id}/media/generate", "Generate media", True, "media generation adapter", OpenRequest, _call("generate_media")),
     Operation("degrade_media", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/degrade", "Degrade a shot master", True, "PostProfile adapter", OpenRequest, _call("degrade_media")),
     Operation("sample_references", "POST", "/projects/{project_id}/references/sample", "Sample references", True, "reference sampling adapter", OpenRequest, _call("sample_references")),
+    Operation("generate_h3_candidate", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/h3-candidates", "Generate an opt-in MiniMax H3 audiovisual candidate", True, "service.minimax_h3", H3GenerateBody, _call("generate_h3_candidate")),
+    Operation("list_h3_candidates", "GET", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/h3-candidates", "List immutable H3 candidate receipts", False, "store", None, _call("list_h3_candidates")),
+    Operation("cancel_h3_candidate", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/h3-candidates/{job_id}/cancel", "Cancel an H3 candidate job", True, "jobs.queue", H3CancelBody, _call("cancel_h3_candidate")),
+    Operation("inspect_h3", "GET", "/models/minimax-h3", "Inspect configured MiniMax H3 runtime", False, "service.minimax_h3", None, _call("inspect_h3")),
     Operation("report_jobs", "GET", "/projects/{project_id}/jobs", "Report jobs", False, "jobs.queue", None, _call("report_jobs")),
     Operation("apply_typed_feedback", "POST", "/projects/{project_id}/feedback", "Apply typed feedback", True, "service.apply_typed_feedback", OpenRequest, _call("apply_typed_feedback")),
     Operation("score_rubric", "POST", "/projects/{project_id}/rubric/score", "Score rubric criteria", True, "domain.entities.RubricScores", RubricRequest, _call("score_rubric")),
@@ -184,4 +236,5 @@ ASYNC_ADAPTER_OPERATIONS = frozenset({
     "render_master",
     "generate_media",
     "degrade_media",
+    "generate_h3_candidate",
 })

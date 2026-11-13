@@ -10,8 +10,8 @@ import sys
 import time
 
 
-def asset_fit_factors(source_min, source_max, desired) -> tuple[float, float, float]:
-    """Return per-axis scales that fit source bounds to the declared dimensions."""
+def asset_fit_factors(source_min, source_max, desired, *, fit_mode="exact") -> tuple[float, float, float]:
+    """Return exact per-axis factors or one centered, proportion-preserving contain factor."""
     axes = ("x", "y", "z")
     minimum = tuple(float(value) for value in source_min)
     maximum = tuple(float(value) for value in source_max)
@@ -19,6 +19,16 @@ def asset_fit_factors(source_min, source_max, desired) -> tuple[float, float, fl
     if len(minimum) != 3 or len(maximum) != 3 or len(target) != 3:
         raise ValueError("source bounds and desired dimensions must each have three axes")
 
+    if fit_mode not in {"exact", "contain"}:
+        raise ValueError(f"unsupported fit_mode {fit_mode!r}")
+    if fit_mode == "contain":
+        extents = tuple(high-low for low, high in zip(minimum, maximum))
+        if any(not math.isfinite(e) or e <= 1e-9 for e in extents):
+            raise ValueError("source bounds contain a degenerate axis")
+        factor = min(dimension/extent for dimension, extent in zip(target, extents))
+        if not math.isfinite(factor) or factor <= 0:
+            raise ValueError("uniform contain factor is invalid")
+        return (factor, factor, factor)
     factors = []
     for axis, low, high, dimension in zip(axes, minimum, maximum, target):
         extent = high - low
@@ -32,6 +42,223 @@ def asset_fit_factors(source_min, source_max, desired) -> tuple[float, float, fl
             raise ValueError(f"scale factor on {axis} axis is invalid ({factor!r})")
         factors.append(factor)
     return tuple(factors)
+
+
+# Adapted from Blender Codex MCP multi-map material and ARM channel setup (MIT;
+# see THIRD_PARTY_NOTICES.md for the complete notice).
+def _configure_environment(bpy, scene, spec: dict) -> None:
+    """Apply a checksum-verified, packed HDRI to a new scene-owned World."""
+    binding = spec.get("binding")
+    path = binding.get("asset_path") if isinstance(binding, dict) else None
+    expected = binding.get("asset_checksum") if isinstance(binding, dict) else None
+    if not isinstance(path, str) or not os.path.isabs(path) or not isinstance(expected, str):
+        raise RuntimeError("environment has no authorized absolute path/checksum binding")
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as source:
+            while block := source.read(1024 * 1024):
+                digest.update(block)
+    except OSError as exc:
+        raise RuntimeError(f"environment could not be read: {exc}") from exc
+    if digest.hexdigest() != expected:
+        raise RuntimeError("environment checksum changed after plan authorization")
+    extension = os.path.splitext(path)[1].lower()
+    if extension not in {".hdr", ".exr"}:
+        raise RuntimeError(f"unsupported environment format {extension!r}")
+    world = bpy.data.worlds.new(f"CCTV HDRI {spec['asset_id']}")
+    world.use_nodes = True
+    tree = world.node_tree
+    tree.nodes.clear()
+    coordinates = tree.nodes.new("ShaderNodeTexCoord")
+    mapping = tree.nodes.new("ShaderNodeMapping")
+    mapping.inputs["Rotation"].default_value[2] = float(spec["rotation_rad"])
+    environment = tree.nodes.new("ShaderNodeTexEnvironment")
+    background = tree.nodes.new("ShaderNodeBackground")
+    output = tree.nodes.new("ShaderNodeOutputWorld")
+    try:
+        image = bpy.data.images.load(path, check_existing=False)
+        image.colorspace_settings.name = "Non-Color"
+        image.pack()
+        image.filepath = "//" + os.path.basename(path)
+    except Exception as exc:
+        raise RuntimeError(f"environment image could not be decoded, linearized, and packed: {exc}") from exc
+    environment.image = image
+    background.inputs["Strength"].default_value = float(spec["strength"])
+    tree.links.new(coordinates.outputs["Normal"], mapping.inputs["Vector"])
+    tree.links.new(mapping.outputs["Vector"], environment.inputs["Vector"])
+    tree.links.new(environment.outputs["Color"], background.inputs["Color"])
+    tree.links.new(background.outputs["Background"], output.inputs["Surface"])
+    scene.world = world
+
+
+def _configure_pbr_material(bpy, material, spec: dict) -> None:
+    """Configure one material from serialized PBR maps and verified runtime paths."""
+    name = spec.get("name", "<unnamed>")
+    textures = spec.get("textures")
+
+    def fail(role: str, message: str) -> None:
+        raise RuntimeError(f"material {name!r}, role {role!r}: {message}")
+
+    if not isinstance(textures, dict):
+        fail("textures", "expected an object")
+    maps, bindings = textures.get("maps"), textures.get("bindings")
+    roles = ("base_color", "normal_gl", "roughness", "metallic", "arm")
+    if not isinstance(maps, dict) or not isinstance(bindings, dict):
+        fail("textures", "maps and bindings are required")
+    if not maps or maps.get("base_color") is None or set(maps) - set(roles):
+        fail("textures", "invalid map roles")
+    if set(bindings) != set(maps):
+        fail("textures", "bindings must match map roles")
+    uv = textures.get("uv_scale", (1.0, 1.0))
+    strength = textures.get("normal_strength", 1.0)
+    ao_strength = textures.get("ao_strength", 0.0)
+    if not isinstance(uv, (list, tuple)) or len(uv) != 2 or any(
+        isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0 for v in uv
+    ):
+        fail("uv", "scale must be a finite positive pair")
+    if isinstance(strength, bool) or not isinstance(strength, (int, float)) or not math.isfinite(strength) or strength < 0:
+        fail("normal_gl", "strength must be finite and nonnegative")
+    if isinstance(ao_strength, bool) or not isinstance(ao_strength, (int, float)) or not math.isfinite(ao_strength) or not 0 <= ao_strength <= 1:
+        fail("arm", "AO strength must be in [0, 1]")
+    material.use_nodes = True
+    if material.node_tree is None:
+        fail("surface", "node tree unavailable after enabling nodes")
+    nodes, links = material.node_tree.nodes, material.node_tree.links
+    nodes.clear()
+
+    def node(kind: str, role: str):
+        try:
+            return nodes.new(type=kind)
+        except (RuntimeError, TypeError, ValueError, AttributeError) as exc:
+            fail(role, f"node {kind} unavailable: {exc}")
+
+    def sock(sockets, key: str, role: str):
+        result = sockets.get(key)
+        if result is None:
+            fail(role, f"required socket {key!r} unavailable")
+        return result
+
+    def link(output, input_socket, role: str) -> None:
+        try:
+            links.new(output, input_socket)
+        except (RuntimeError, TypeError, ValueError, AttributeError) as exc:
+            fail(role, f"cannot connect sockets: {exc}")
+
+    texcoord = node("ShaderNodeTexCoord", "uv")
+    mapping = node("ShaderNodeMapping", "uv")
+    try:
+        mapping.vector_type = "POINT"
+        sock(mapping.inputs, "Scale", "uv").default_value = (float(uv[0]), float(uv[1]), 1.0)
+    except (RuntimeError, TypeError, ValueError, AttributeError) as exc:
+        fail("uv", f"mapping scale unavailable: {exc}")
+    link(sock(texcoord.outputs, "UV", "uv"), sock(mapping.inputs, "Vector", "uv"), "uv")
+
+    images = {}
+    for role in roles:
+        if role not in maps:
+            continue
+        binding = bindings[role]
+        if not isinstance(binding, dict) or binding.get("asset_id") != maps[role]:
+            fail(role, "binding ID does not match maps")
+        image_path, expected = binding.get("asset_path"), binding.get("asset_checksum")
+        if not isinstance(image_path, str) or not os.path.isabs(image_path) or not os.path.isfile(image_path):
+            fail(role, "authorized absolute image path missing")
+        if not isinstance(expected, str) or len(expected) != 64 or any(c not in "0123456789abcdefABCDEF" for c in expected):
+            fail(role, "registered SHA256 invalid")
+        digest = hashlib.sha256()
+        try:
+            with open(image_path, "rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except OSError as exc:
+            fail(role, f"cannot read image: {exc}")
+        if digest.hexdigest().lower() != expected.lower():
+            fail(role, "image SHA256 differs from registered checksum")
+        try:
+            image = bpy.data.images.load(image_path, check_existing=False)
+        except (RuntimeError, TypeError, ValueError, OSError) as exc:
+            fail(role, f"image decode failed: {exc}")
+        if len(image.size) < 2 or int(image.size[0]) <= 0 or int(image.size[1]) <= 0:
+            fail(role, "decoded image has zero size")
+        color_space = "sRGB" if role == "base_color" else "Non-Color"
+        try:
+            image.colorspace_settings.name = color_space
+        except (RuntimeError, TypeError, ValueError, AttributeError) as exc:
+            fail(role, f"color space {color_space!r} unavailable: {exc}")
+        if image.colorspace_settings.name != color_space:
+            fail(role, f"color space read back as {image.colorspace_settings.name!r}")
+        try:
+            image.pack()
+        except (RuntimeError, OSError, ValueError) as exc:
+            fail(role, f"image packing failed: {exc}")
+        if image.packed_file is None:
+            fail(role, "image did not pack")
+        tex = node("ShaderNodeTexImage", role)
+        tex.image = image
+        link(sock(mapping.outputs, "Vector", role), sock(tex.inputs, "Vector", role), role)
+        sock(tex.outputs, "Color", role)
+        images[role] = tex
+
+    output = node("ShaderNodeOutputMaterial", "surface")
+    principled = node("ShaderNodeBsdfPrincipled", "surface")
+    link(sock(principled.outputs, "BSDF", "surface"), sock(output.inputs, "Surface", "surface"), "surface")
+    if "roughness" not in images and "arm" not in images:
+        sock(principled.inputs, "Roughness", "surface").default_value = spec["roughness"]
+    if "metallic" not in images and "arm" not in images:
+        sock(principled.inputs, "Metallic", "surface").default_value = spec.get("metallic", 0.0)
+    emission_strength = spec.get("emission_strength", 0.0)
+    if emission_strength:
+        emission = principled.inputs.get("Emission Color") or principled.inputs.get("Emission")
+        if emission is not None:
+            emission.default_value = tuple(spec["color"])
+        strength_socket = principled.inputs.get("Emission Strength")
+        if strength_socket is not None:
+            strength_socket.default_value = emission_strength
+    base = sock(images["base_color"].outputs, "Color", "base_color")
+    if "arm" in images:
+        separate = node("ShaderNodeSeparateColor", "arm")
+        try:
+            separate.mode = "RGB"
+        except (RuntimeError, TypeError, ValueError, AttributeError) as exc:
+            fail("arm", f"Separate Color RGB mode unavailable: {exc}")
+        if separate.mode != "RGB":
+            fail("arm", "Separate Color did not retain RGB mode")
+        link(sock(images["arm"].outputs, "Color", "arm"), sock(separate.inputs, "Color", "arm"), "arm")
+        if "roughness" not in images:
+            link(sock(separate.outputs, "Green", "arm"), sock(principled.inputs, "Roughness", "arm"), "arm")
+        if "metallic" not in images:
+            link(sock(separate.outputs, "Blue", "arm"), sock(principled.inputs, "Metallic", "arm"), "arm")
+        if ao_strength > 0:
+            mix = node("ShaderNodeMixRGB", "arm")
+            try:
+                mix.blend_type = "MULTIPLY"
+                mix.inputs[0].default_value = float(ao_strength)
+                color_a, color_b, result = sock(mix.inputs, "Color1", "arm"), sock(mix.inputs, "Color2", "arm"), sock(mix.outputs, "Color", "arm")
+            except (RuntimeError, TypeError, ValueError, AttributeError, KeyError) as exc:
+                fail("arm", f"AO multiply sockets unavailable: {exc}")
+            link(base, color_a, "arm")
+            link(sock(separate.outputs, "Red", "arm"), color_b, "arm")
+            base = result
+    link(base, sock(principled.inputs, "Base Color", "base_color"), "base_color")
+    if "normal_gl" in images:
+        normal = node("ShaderNodeNormalMap", "normal_gl")
+        try:
+            normal.space = "TANGENT"
+            sock(normal.inputs, "Strength", "normal_gl").default_value = float(strength)
+            if hasattr(normal, "convention"):
+                normal.convention = "OPENGL"
+                if normal.convention != "OPENGL":
+                    fail("normal_gl", "OpenGL convention was not retained")
+            # Blender Normal Map defaults to OpenGL (positive-green) tangent convention.
+        except (RuntimeError, TypeError, ValueError, AttributeError, KeyError) as exc:
+            fail("normal_gl", f"tangent normal setup unavailable: {exc}")
+        link(sock(images["normal_gl"].outputs, "Color", "normal_gl"), sock(normal.inputs, "Color", "normal_gl"), "normal_gl")
+        link(sock(normal.outputs, "Normal", "normal_gl"), sock(principled.inputs, "Normal", "normal_gl"), "normal_gl")
+    if "roughness" in images:
+        link(sock(images["roughness"].outputs, "Color", "roughness"), sock(principled.inputs, "Roughness", "roughness"), "roughness")
+    if "metallic" in images:
+        link(sock(images["metallic"].outputs, "Color", "metallic"), sock(principled.inputs, "Metallic", "metallic"), "metallic")
+    material.use_nodes = True
 
 
 def _run(plan_path: str) -> None:
@@ -54,6 +281,7 @@ def _run(plan_path: str) -> None:
     output = plan["outputs"]
     camera_settings = plan["camera"]
     metadata = {
+        "asset_bounds": [],
         "schema_version": 1,
         "shot_id": plan["shot_id"],
         "shot_version": plan["shot_version"],
@@ -159,7 +387,11 @@ def _run(plan_path: str) -> None:
                 mat = bpy.data.materials.new(spec["name"])
                 mat.diffuse_color = tuple(spec["color"])
                 mat.use_nodes = True
-                shader = mat.node_tree.nodes.get("Principled BSDF")
+                if spec.get("textures") is not None:
+                    _configure_pbr_material(bpy, mat, spec)
+                    shader = None
+                else:
+                    shader = mat.node_tree.nodes.get("Principled BSDF")
                 if shader is not None:
                     shader.inputs["Base Color"].default_value = tuple(spec["color"])
                     shader.inputs["Roughness"].default_value = spec["roughness"]
@@ -185,6 +417,19 @@ def _run(plan_path: str) -> None:
                 obj, imported_objects = _import_gltf_asset(
                     bpy, Matrix, Euler, Vector, scene, spec
                 )
+                meshes = [item for item in imported_objects if item.type == "MESH"]
+                points = [item.matrix_world @ Vector(corner) for item in meshes for corner in item.bound_box]
+                placed_min = tuple(min(point[a] for point in points) for a in range(3))
+                placed_max = tuple(max(point[a] for point in points) for a in range(3))
+                metadata["asset_bounds"].append({
+                    "object_name": spec["name"], "asset_id": spec["asset_id"],
+                    "fit_mode": spec.get("fit_mode", "exact"),
+                    "source_min": list(obj.get("cctv_source_min", ())),
+                    "source_max": list(obj.get("cctv_source_max", ())),
+                    "source_dimensions": list(obj.get("cctv_source_dimensions", ())),
+                    "placed_world_min": list(placed_min), "placed_world_max": list(placed_max),
+                    "placed_dimensions": [placed_max[a]-placed_min[a] for a in range(3)],
+                })
             else:
                 if kind == "box":
                     bpy.ops.mesh.primitive_cube_add(size=1, location=spec["location"])
@@ -387,11 +632,16 @@ def _run(plan_path: str) -> None:
                 background.inputs["Color"].default_value = (0.08, 0.082, 0.09, 1.0)
                 background.inputs["Strength"].default_value = 1.6
             scene.world = world
-        if plan["mode"] == "master" and scene_data.get("world_strength") is not None:
+        if plan["mode"] == "master" and scene_data.get("world_strength") is not None and not scene_data.get("environment"):
             background = scene.world.node_tree.nodes.get("Background") if scene.world and scene.world.use_nodes else None
             if background is None:
                 raise RuntimeError("scene world has no Background node for configured world_strength")
             background.inputs["Strength"].default_value = float(scene_data["world_strength"])
+        if plan["mode"] == "master" and scene_data.get("environment") is not None:
+            _configure_environment(bpy, scene, scene_data["environment"])
+            env = scene_data["environment"]
+            binding = env["binding"]
+            metadata["applied_environment"] = {"asset_id": env["asset_id"], "asset_checksum": binding["asset_checksum"], "strength": env["strength"], "rotation_rad": env["rotation_rad"]}
         if plan["mode"] == "master":
             textured = {
                 spec["name"]
@@ -858,7 +1108,7 @@ def _import_gltf_asset(bpy, Matrix, Euler, Vector, scene, spec):
     minimum = Vector(tuple(min(point[axis] for point in corners) for axis in range(3)))
     maximum = Vector(tuple(max(point[axis] for point in corners) for axis in range(3)))
     try:
-        factors = asset_fit_factors(minimum, maximum, spec["dimensions"])
+        factors = asset_fit_factors(minimum, maximum, spec["dimensions"], fit_mode=spec.get("fit_mode", "exact"))
     except ValueError as exc:
         raise RuntimeError(
             f"Asset {spec.get('asset_id')!r} cannot be fitted to declared dimensions: {exc}"
@@ -868,13 +1118,14 @@ def _import_gltf_asset(bpy, Matrix, Euler, Vector, scene, spec):
     root = bpy.data.objects.new(spec["name"], None)
     scene.collection.objects.link(root)
     root.matrix_world = Matrix.Identity(4)
-    imported_set = set(imported)
     center_transform = Matrix.Translation(-center)
+    original_worlds = {obj: obj.matrix_world.copy() for obj in imported}
     for obj in imported:
-        if obj.parent not in imported_set:
-            original_world = obj.matrix_world.copy()
-            obj.parent = root
-            obj.matrix_world = center_transform @ original_world
+        obj.parent = root
+        obj.matrix_world = center_transform @ original_worlds[obj]
+    root["cctv_source_min"] = list(minimum)
+    root["cctv_source_max"] = list(maximum)
+    root["cctv_source_dimensions"] = [maximum[i]-minimum[i] for i in range(3)]
     root.location = tuple(spec["location"])
     root.scale = factors
     root.rotation_euler = Euler(tuple(spec.get("rotation", (0, 0, 0))), "XYZ")

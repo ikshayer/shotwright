@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "documents": [
+    {
+      "role": "canonical_h3_license",
+      "repo": "MiniMaxAI/MiniMax-H3",
+      "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+      "source_filename": "LICENSE",
+      "local_filename": "canonical_LICENSE",
+      "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/resolve/42ed227ee7df40d41602854ae760620d6eb651fe/LICENSE",
+      "expected_bytes": 17604,
+      "expected_sha256": "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44",
+      "git_blob_sha1": "c389b45855337ccec8ddeb389f4fe902abcd0b19"
+    },
+    {
+      "role": "canonical_card",
+      "repo": "MiniMaxAI/MiniMax-H3",
+      "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+      "source_filename": "README.md",
+      "local_filename": "canonical_README.md",
+      "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/resolve/42ed227ee7df40d41602854ae760620d6eb651fe/README.md",
+      "expected_bytes": 38406,
+      "expected_sha256": "f0116a90332496bdfcc827320c603a26b849c73bf804f2674d03682fbbd2334a",
+      "git_blob_sha1": "08b20eb59ca77aaf19627152a0ee61b1ffc83070"
+    },
+    {
+      "role": "quant_license",
+      "repo": "DmitryDB/MiniMax-H3-ComfyUI-Quants",
+      "revision": "06aba4816457400d1dcb12ffd77e37499c8116b1",
+      "source_filename": "LICENSE",
+      "local_filename": "quant_LICENSE",
+      "url": "https://huggingface.co/DmitryDB/MiniMax-H3-ComfyUI-Quants/resolve/06aba4816457400d1dcb12ffd77e37499c8116b1/LICENSE",
+      "expected_bytes": 17604,
+      "expected_sha256": "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44",
+      "git_blob_sha1": "c389b45855337ccec8ddeb389f4fe902abcd0b19"
+    },
+    {
+      "role": "quant_card",
+      "repo": "DmitryDB/MiniMax-H3-ComfyUI-Quants",
+      "revision": "06aba4816457400d1dcb12ffd77e37499c8116b1",
+      "source_filename": "README.md",
+      "local_filename": "quant_README.md",
+      "url": "https://huggingface.co/DmitryDB/MiniMax-H3-ComfyUI-Quants/resolve/06aba4816457400d1dcb12ffd77e37499c8116b1/README.md",
+      "expected_bytes": 7903,
+      "expected_sha256": "5d8deda956120075ab1a0db364656cc6522f30487b866064fc8080ccac8a4213",
+      "git_blob_sha1": "cdf5e248ae63c7eb1685dde66d210dbad0e264f3"
+    },
+    {
+      "role": "native_card",
+      "repo": "Comfy-Org/MiniMax-H3",
+      "revision": "54472221d27c695fca9621b0c3ed52f06c4af707",
+      "source_filename": "README.md",
+      "local_filename": "native_README.md",
+      "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/54472221d27c695fca9621b0c3ed52f06c4af707/README.md",
+      "expected_bytes": 8416,
+      "expected_sha256": "54abb97141870e4aa3c663188a20b820f74ab183de6c349693cac8cffb70eb63",
+      "git_blob_sha1": "a463d5abedad10fd4824a51a36a986b1ddecf2a9"
+    }
+  ],
+  "territory_basis": "User confirmed outside excluded territories on2026-11-09; local internal test authorized."
+}

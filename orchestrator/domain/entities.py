@@ -61,6 +61,31 @@ CAMERA_MOTION_MODEL_SEMVER = "0.1.0"
 # --------------------------------------------------------------------------
 
 
+class BeatSceneDirection(BaseModel):
+    """Structured production direction attached to a narrative beat."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
+
+    location_id: str
+    camera_profile: str = "dvr-2005"
+    framing: str = ""
+    event_sec: float | None = Field(default=None, ge=0)
+    anomaly: AnomalySpec | None = None
+
+    @field_validator("location_id")
+    @classmethod
+    def safe_location_id(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value):
+            raise ValueError("location_id must be a safe id")
+        return value
+
+    @model_validator(mode="after")
+    def valid_event(self) -> BeatSceneDirection:
+        if self.anomaly is not None and self.event_sec is None:
+            raise ValueError("anomaly requires event_sec")
+        return self
+
+
 class Beat(Entity):
     beat_id: str
     target_sec: float = Field(gt=0)
@@ -68,6 +93,7 @@ class Beat(Entity):
     anomaly: str | None = None
     narration_text: str | None = None
     caption_text: str | None = None
+    scene_direction: BeatSceneDirection | None = None
 
 
 class Script(VersionedEntity):
@@ -76,6 +102,7 @@ class Script(VersionedEntity):
     logline: str
     beats: list[Beat] = Field(default_factory=list)
     beat_to_shot: dict[str, str] = Field(default_factory=dict)
+    scenes: list[Location] = Field(default_factory=list)
     approval_review_id: str | None = None
 
     @model_validator(mode="after")
@@ -83,6 +110,16 @@ class Script(VersionedEntity):
         ids = [b.beat_id for b in self.beats]
         if len(ids) != len(set(ids)):
             raise ValueError("beat_id must be unique within a Script")
+        for beat in self.beats:
+            direction = beat.scene_direction
+            if direction is not None and direction.event_sec is not None and direction.event_sec > beat.target_sec:
+                raise ValueError(f"beat {beat.beat_id!r} event_sec must not exceed target_sec")
+        scene_ids = [scene.location_id for scene in self.scenes]
+        if len(scene_ids) != len(set(scene_ids)):
+            raise ValueError("Location blueprints must have unique location_id values")
+        for scene in self.scenes:
+            if scene.version != 1 or scene.supersedes is not None or scene.approval_review_id is not None:
+                raise ValueError("Script Location blueprints must be unapproved version 1 records")
         return self
 
 
@@ -307,6 +344,30 @@ class ShotOutput(Entity):
         return self
 
 
+class EnvironmentBinding(BaseModel):
+    """A registered HDRI used to illuminate a Location or generated scene."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
+
+    asset_id: str
+    strength: float = Field(default=1.0, ge=0)
+    rotation_rad: float = 0.0
+
+    @field_validator("asset_id")
+    @classmethod
+    def safe_environment_id(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value):
+            raise ValueError("environment asset_id must be a safe registered asset id")
+        return value
+
+    @field_validator("rotation_rad")
+    @classmethod
+    def finite_rotation(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("rotation_rad must be finite")
+        return value
+
+
 class AssetPlacement(BaseModel):
     """A registered geometry asset's declared metre envelope and Location transform."""
 
@@ -316,6 +377,7 @@ class AssetPlacement(BaseModel):
     position: tuple[float, float, float]
     dimensions: tuple[float, float, float]
     rotation: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    fit_mode: Literal["exact", "contain"] = "exact"
 
     @field_validator("asset_id")
     @classmethod
@@ -336,6 +398,37 @@ class AssetPlacement(BaseModel):
         return value
 
 
+class PBRTextureSet(BaseModel):
+    """Explicit map roles and scalar settings for an existing room material."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
+
+    maps: dict[Literal["base_color", "normal_gl", "roughness", "metallic", "arm"], str]
+    uv_scale: tuple[float, float] = (1.0, 1.0)
+    normal_strength: float = Field(default=1.0, ge=0)
+    ao_strength: float = Field(default=0.0, ge=0, le=1)
+
+    @field_validator("maps")
+    @classmethod
+    def valid_maps(
+        cls,
+        value: dict[Literal["base_color", "normal_gl", "roughness", "metallic", "arm"], str],
+    ) -> dict[Literal["base_color", "normal_gl", "roughness", "metallic", "arm"], str]:
+        if "base_color" not in value:
+            raise ValueError("maps requires a base_color asset id")
+        for role, asset_id in value.items():
+            if not isinstance(asset_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", asset_id):
+                raise ValueError(f"map {role!r} must reference a safe registered asset id")
+        return value
+
+    @field_validator("uv_scale")
+    @classmethod
+    def valid_uv_scale(cls, value: tuple[float, float]) -> tuple[float, float]:
+        if any(not math.isfinite(scale) or scale <= 0 for scale in value):
+            raise ValueError("uv_scale values must be finite and strictly positive")
+        return value
+
+
 class Location(VersionedEntity):
     location_id: str
     blend_path: str | None = None
@@ -347,6 +440,8 @@ class Location(VersionedEntity):
     )
     scene_look: Literal["bright", "low_key"] = rebuild_triggering("bright")
     placements: list[AssetPlacement] = rebuild_triggering(default_factory=list)
+    material_overrides: dict[str, PBRTextureSet] = rebuild_triggering(default_factory=dict)
+    environment: EnvironmentBinding | None = rebuild_triggering(None)
     camera_rigs: list[str] = Field(default_factory=list)
     approval_review_id: str | None = None
 
@@ -362,11 +457,25 @@ class Location(VersionedEntity):
     @model_validator(mode="after")
     def _asset_ids_exclude_placed_geometry(self) -> Location:
         """Keep texture/HDRI references separate from geometry placements."""
-        overlaps = sorted(set(self.asset_ids) & {item.asset_id for item in self.placements})
+        map_ids = {
+            asset_id
+            for texture_set in self.material_overrides.values()
+            for asset_id in texture_set.maps.values()
+        }
+        if any(not name.strip() for name in self.material_overrides):
+            raise ValueError("material_overrides keys must be nonblank material names")
+        geometry_ids = {item.asset_id for item in self.placements}
+        overlaps = sorted(
+            (set(self.asset_ids) & geometry_ids)
+            | (set(self.asset_ids) & map_ids)
+            | (geometry_ids & map_ids)
+        )
+        if self.environment is not None:
+            overlaps = sorted(set(overlaps) | ({self.environment.asset_id} & (set(self.asset_ids) | geometry_ids | map_ids)))
         if overlaps:
             raise ValueError(
-                "asset_ids is reserved for non-geometry resources and cannot include placed "
-                f"geometry ids: {overlaps}"
+                "asset_ids and material map bindings must not overlap each other or geometry "
+                f"placement ids: {overlaps}"
             )
         return self
 
@@ -526,6 +635,33 @@ class EpisodeOutput(Entity):
     output_fps: StrictInt = Field(gt=0)
     sample_aspect_ratio: str = Field(min_length=1)
     ffmpeg_identity: str = Field(min_length=1)
+    credit_manifest_path: str | None = None
+    credit_manifest_sha256: str | None = None
+
+    @field_validator("credit_manifest_path")
+    @classmethod
+    def _relative_credit_manifest_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if "\x00" in value:
+            raise ValueError("credit_manifest_path must not contain NUL")
+        posix, windows = PurePosixPath(value), PureWindowsPath(value)
+        if posix.is_absolute() or windows.is_absolute() or windows.drive or any(part == ".." for part in value.replace("\\", "/").split("/")):
+            raise ValueError("credit_manifest_path must be project-relative")
+        return value
+
+    @field_validator("credit_manifest_sha256")
+    @classmethod
+    def _credit_sha256_hex(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ValueError("credit_manifest_sha256 must be 64 lowercase hexadecimal characters")
+        return value
+
+    @model_validator(mode="after")
+    def _paired_credit_manifest(self) -> EpisodeOutput:
+        if (self.credit_manifest_path is None) != (self.credit_manifest_sha256 is None):
+            raise ValueError("credit manifest path and SHA256 must be supplied together")
+        return self
 
     @field_validator("storage_resolution")
     @classmethod
@@ -685,12 +821,54 @@ class GenerationRun(Entity):
     #: prompt/script, or the resolved FFmpeg filter graph for a post pass
     invocation: str
     seed: int | None = None
-    settings: dict[str, str | int | float] = Field(default_factory=dict)
+    settings: dict[str, str | bool | int | float] = Field(default_factory=dict)
     input_paths: list[str] = Field(default_factory=list)
     output_paths: list[str] = Field(default_factory=list)
     log_path: str | None = None
     status: str = "pending"
     resource_metrics: dict[str, float] = Field(default_factory=dict)
+
+
+class H3Candidate(Entity):
+    """Immutable generated audiovisual candidate; never a production ShotOutput."""
+    candidate_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_-]+$")
+    episode_id: str = Field(min_length=1)
+    shot_id: str = Field(min_length=1)
+    shot_version: StrictInt = Field(ge=1)
+    job_id: str = Field(min_length=1)
+    run_id: str = Field(min_length=1)
+    source_output_id: str = Field(min_length=1)
+    source_path: str = Field(min_length=1)
+    source_sha256: str
+    prompt_sha256: str
+    seed: StrictInt = Field(ge=0)
+    av_path: str = Field(min_length=1)
+    av_sha256: str
+    wav_path: str = Field(min_length=1)
+    wav_sha256: str
+    report_path: str = Field(min_length=1)
+    report_sha256: str
+    frame_count: StrictInt = Field(gt=0)
+    fps: StrictInt = Field(gt=0)
+    audio_sample_rate: StrictInt = Field(gt=0)
+    audio_channels: StrictInt = Field(gt=0)
+    audio_samples_per_channel: StrictInt = Field(gt=0)
+    experimental: bool = False
+
+    @field_validator("source_sha256", "prompt_sha256", "av_sha256", "wav_sha256", "report_sha256")
+    @classmethod
+    def _h3_hashes(cls, value: str) -> str:
+        if not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ValueError("H3 hashes must be 64 lowercase hexadecimal characters")
+        return value
+
+    @field_validator("source_path", "av_path", "wav_path", "report_path")
+    @classmethod
+    def _h3_relative_paths(cls, value: str) -> str:
+        posix, windows = PurePosixPath(value), PureWindowsPath(value)
+        if "\x00" in value or posix.is_absolute() or windows.is_absolute() or windows.drive or any(p == ".." for p in value.replace("\\", "/").split("/")):
+            raise ValueError("H3 artifact paths must be project-relative")
+        return value
 
 
 class RubricScores(Entity):
@@ -789,12 +967,40 @@ def _assert_camera_profile_fully_tagged() -> None:
 
 
 _assert_camera_profile_fully_tagged()
+Script.model_rebuild(_types_namespace={"Location": Location})
 
 __all__ = [
-    "ArtifactScheduleEntry", "Asset", "AssetPlacement", "Attestation", "Beat", "CameraMode", "CameraProfile",
-    "Episode", "EpisodeOutput", "Export", "GenerationRun", "Invalidation", "Job", "Location",
-    "PostProfile", "PostProfileEncode", "PostProfileOverlay", "PostStage", "Project",
-    "Reference", "Review", "RubricScores",
-    "Script", "Shot", "ShotOutput", "ShotOutputKind", "StyleBible", "StyleClaim",
-    "Timeline", "TimelineEntry",
+    "ArtifactScheduleEntry",
+    "Asset",
+    "AssetPlacement",
+    "Attestation",
+    "Beat",
+    "BeatSceneDirection",
+    "CameraMode",
+    "CameraProfile",
+    "EnvironmentBinding",
+    "Episode",
+    "EpisodeOutput",
+    "Export",
+    "GenerationRun",
+    "H3Candidate",
+    "Invalidation",
+    "Job",
+    "Location",
+    "PostProfile",
+    "PostProfileEncode",
+    "PostProfileOverlay",
+    "PostStage",
+    "Project",
+    "Reference",
+    "Review",
+    "RubricScores",
+    "Script",
+    "Shot",
+    "ShotOutput",
+    "ShotOutputKind",
+    "StyleBible",
+    "StyleClaim",
+    "Timeline",
+    "TimelineEntry",
 ]

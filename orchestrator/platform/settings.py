@@ -125,6 +125,58 @@ class ResourceSettings(_Section):
         return value
 
 
+class AssetProviderSettings(_Section):
+    user_agent: str = "cctv-pipeline/0.1"
+    sketchfab_token_file: Path | None = None
+    request_timeout_seconds: float = Field(30.0, gt=0)
+    max_attempts: int = Field(3, ge=1, le=5)
+    max_search_pages: int = Field(3, ge=1, le=3)
+    max_archive_files: int = Field(128, ge=1)
+
+    @field_validator("user_agent")
+    @classmethod
+    def _valid_provider_agent(cls, value: str) -> str:
+        if "cctv-pipeline" not in value.casefold() or "\r" in value or "\n" in value:
+            raise ValueError("user_agent must identify cctv-pipeline and contain no line breaks")
+        return value
+
+    @field_validator("request_timeout_seconds")
+    @classmethod
+    def _finite_timeout(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("request_timeout_seconds must be finite")
+        return value
+
+
+class MinimaxH3Settings(_Section):
+    enabled: bool = False
+    required_vram_gb: float | None = None
+    required_ram_gb: float | None = None
+    required_disk_gb: float | None = None
+    startup_allowance_seconds: float = Field(600.0, gt=0)
+    execution_timeout_seconds: float = Field(1800.0, gt=0)
+    wall_clock_seconds: float = Field(2400.0, gt=0)
+    throughput_floor_per_second: float | None = None
+
+    @field_validator("required_vram_gb", "required_ram_gb", "required_disk_gb", "throughput_floor_per_second", mode="before")
+    @classmethod
+    def _strict_numeric_when_set(cls, value: object) -> object:
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
+            raise ValueError("H3 reservations and throughput floor must be numeric values, not booleans or strings")
+        if value is not None and (not math.isfinite(value) or value <= 0):
+            raise ValueError("H3 reservations and throughput floor must be finite positive values")
+        return value
+
+    @model_validator(mode="after")
+    def _enabled_is_explicit(self) -> MinimaxH3Settings:
+        if self.enabled and any(value is None for value in (
+            self.required_vram_gb, self.required_ram_gb, self.required_disk_gb,
+            self.throughput_floor_per_second,
+        )):
+            raise ValueError("enabled MiniMax H3 requires explicit VRAM/RAM/disk reservations and throughput floor")
+        return self
+
+
 class Settings(_Section):
     _runtime_secrets: set[str] = PrivateAttr(default_factory=set)
     project_root: Path = Field(Path("projects"), description="Active project root; all writes are contained here.")
@@ -144,6 +196,8 @@ class Settings(_Section):
     budget: BudgetSettings = BudgetSettings()
     retention: RetentionSettings = RetentionSettings()
     resources: ResourceSettings = ResourceSettings()
+    asset_providers: AssetProviderSettings = AssetProviderSettings()
+    minimax_h3: MinimaxH3Settings = MinimaxH3Settings()
     credentials: dict[str, str] = Field(
         default_factory=dict,
         description="provider name -> NAME of the environment variable holding its secret. Never the secret.",
