@@ -134,3 +134,92 @@ Say explicitly what this contract left ambiguous and anything you believe it got
 Every contract in this repository has needed amendments; twelve defects were found in the
 FR-03 one. Assume this is wrong somewhere and say where. The admissions are the most
 valuable part of the report.
+
+---
+
+# Amendment 1 — outcome, and a fifth blocker nobody knew about
+
+Final state on `h3-blockers-verify`: **2055 passed, 58 skipped, 0 failed**; the blocker
+file is **12 passed**. Independently re-verified by the orchestrator over the three
+affected files: 80 passed.
+
+## A1.1 — all four blockers closed, and verified against code that failed first
+
+The test author wrote 11 cases blind; **10 failed against the unfixed tree and all now
+pass**. That ordering is what makes them evidence rather than decoration.
+
+## A1.2 — the socket owner is five descendants deep
+
+The most useful measurement of this round. The implementer's own smoke failed with
+"Windows reported a socket PID different from the `Popen` PID" and it shipped the
+ownership check unverified in the positive direction. Measured chain:
+
+```
+Popen 50572 -> 63312 -> 96352 -> 48848 -> 86288 -> socket owner 90000
+```
+
+Matching the `Popen` PID alone would have **rejected our own server every time**, and the
+adapter could never have run. Tree membership is not defensive over-engineering here; it
+is the only approach that functions. The check is now confirmed to accept a legitimately
+owned descendant listener and still refuse an unowned one.
+
+**Still unverified:** this used a synthetic Python listener chain, not ComfyUI's actual
+startup tree, which may nest differently. The real run is the first test of the real
+ancestry. Because the check fails closed, the expected failure mode is a refusal on first
+contact — treat that as ancestry to be understood, not as a new defect.
+
+## A1.3 — blocker 1 was worse than this contract described
+
+The contract assumed the 6 GiB initial / 2 GiB-across-3-samples runtime floors existed and
+were merely being shadowed by the re-applied admission reservation. The test author found
+the **initial RAM floor missing entirely**, with no stop after three sub-2-GiB samples.
+Both now exist and are tested in both directions: a healthy run whose VRAM has fallen
+because the model took it continues, and a genuinely starved run still stops.
+
+## A1.4 — the H3 build had silently broken five supervision tests
+
+Not inherited debt. Measured both sides: **68 passed at `f0e741a`** (pre-H3), **5 failed**
+on the H3 tree. They went unnoticed because, as the handoff admits, no full repository
+suite was ever run for this build.
+
+They all guard **late execution after timeout or cancel**, and rearm while a lease release
+is pending — the machinery that stops a worker beginning after it should have been killed.
+Authorising a GPU run with those broken would have been the worst available combination.
+
+**My diagnosis was wrong and is recorded as such.** I hypothesised the shared GPU slot;
+the fixtures do not even construct a lease with one. The real causes:
+
+- three failures: `_watch()` gained a `deadline_message` keyword the tests' three-argument
+  wrappers do not accept;
+- two failures: a synchronous `worker.terminate()` blocking inside `_watch()` before lease
+  cleanup could start.
+
+Fixed by preserving the three-argument `_watch` call and carrying the deadline message
+through thread-local context, and by giving the Blender, ComfyUI and H3 supervisors a
+nonblocking stop request. Lease cleanup still joins the worker and verifies shutdown
+before releasing. No test was modified; no timeout, cancellation or lease-release
+guarantee was weakened; unverifiable cleanup still retains the lease and slot.
+
+No shared-slot leak and no order-dependent suite behaviour was found.
+
+## A1.5 — gaps this contract left, for the next round
+
+- **The report schema and error field names are undefined.** The test author assumed
+  `primary_error` / `cleanup_error` and a top-level string `stopped.error`. Pin these.
+- **psutil is the listener-identity mechanism.** Confirmed available (7.2.2) and already
+  the house convention in `jobs/lease.py` and `jobs/queue.py`. This is now settled, but
+  the contract should have said so rather than leaving it to be guessed.
+- **Runtime VRAM and disk cutoffs are unspecified.** Only the RAM floors are stated. The
+  implementer correctly declined to invent thresholds; they still need deciding.
+- **"Newly frozen hash" was ambiguous** — source freeze or artifact receipt. The tests
+  check the proxy receipt hash.
+
+## Outstanding before any GPU run
+
+- **Ruff is not clean: 19 findings.** Five are `BLE001` in the new test file's cleanup,
+  where catching `BaseException` is deliberate and correct and wants a justified `noqa`.
+  The other fourteen are real debt in H3 WIP production code — unused imports, an unused
+  variable and `TRY203` in `service/minimax_h3.py`, plus `BLE001` in `service/runner.py`,
+  `api/cli.py` and `jobs/queue.py`.
+- The end-to-end GPU run itself remains **unauthorised and ungated by this work**. Nothing
+  here has loaded a model, and the adapter has still never run on a GPU.

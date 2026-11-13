@@ -27,3 +27,6 @@ _work/
 
 # agent worktrees and local session state
 .claude/
+
+# Orchestrator pytest scratch root used by agents when the default temp is unwritable
+_vtmp/
