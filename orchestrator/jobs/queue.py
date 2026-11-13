@@ -255,7 +255,7 @@ class JobQueue:
                             and "watchdog could not confirm worker stopped" in last_error.message):
                         try:
                             self._charge_budget(job, budget_key, self.clock() - start)
-                        except Exception as charge_error:
+                        except Exception as charge_error:  # noqa: BLE001 - a ledger failure annotates the primary job error.
                             last_error.add_note(
                                 f"GPU usage ledger update also failed: "
                                 f"{type(charge_error).__name__}: {charge_error}"

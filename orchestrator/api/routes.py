@@ -16,7 +16,6 @@ from orchestrator.adapters.assets.models import (
     AssetPreviewRequest,
     AssetSearchRequest,
 )
-from orchestrator.service.minimax_h3 import H3CancelBody, H3GenerateBody
 from orchestrator.domain.entities import (
     CameraProfile,
     Episode,
@@ -27,6 +26,7 @@ from orchestrator.domain.entities import (
     Script,
     Shot,
 )
+from orchestrator.service.minimax_h3 import H3CancelBody, H3GenerateBody
 
 
 class OpenRequest(BaseModel):

@@ -126,7 +126,7 @@ def _command_callback(operation_name: str):
                     operation_context.job_runner.cancel(payload["project_id"], submitted["job_id"])
                     operation_context.job_runner.wait(payload["project_id"], submitted["job_id"])
                     operation_context.job_runner.close()
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - report a cleanup failure alongside the interrupt, never instead of it.
                     cleanup_error = f"{type(exc).__name__}: {exc}"
             click.echo(json.dumps(error_body(
                 "cancelled", "H3 candidate generation interrupted",

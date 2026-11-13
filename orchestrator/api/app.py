@@ -33,9 +33,9 @@ from orchestrator.domain.entities import (
     Script,
     Shot,
 )
+from orchestrator.jobs.gpu_slot import GpuExecutionSlot
 from orchestrator.jobs.journal import read_job_records
 from orchestrator.jobs.lease import GpuLease, PynvmlProbe
-from orchestrator.jobs.gpu_slot import GpuExecutionSlot
 from orchestrator.jobs.queue import JobQueue, ProjectQuarantine, SystemHostResources
 from orchestrator.platform.containment import ProjectRoot, validate_upload
 from orchestrator.platform.settings import Settings
@@ -45,10 +45,6 @@ from orchestrator.service.assets import (
     validate_asset_source,
 )
 from orchestrator.service.compose import compose_render_request
-from orchestrator.service.minimax_h3 import (
-    H3CancelBody, H3GenerateBody, H3RequestError, H3SetupError,
-    compose_h3_request, effective_h3_settings,
-)
 from orchestrator.service.dependencies import (
     create_camera_profile,
     create_episode,
@@ -60,6 +56,14 @@ from orchestrator.service.dependencies import (
     revise_location,
     revise_script,
     revise_shot,
+)
+from orchestrator.service.minimax_h3 import (
+    H3CancelBody,
+    H3GenerateBody,
+    H3RequestError,
+    H3SetupError,
+    compose_h3_request,
+    effective_h3_settings,
 )
 from orchestrator.service.runner import (
     AdapterKind,

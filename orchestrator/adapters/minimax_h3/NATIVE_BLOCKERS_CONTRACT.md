@@ -223,3 +223,77 @@ No shared-slot leak and no order-dependent suite behaviour was found.
   `api/cli.py` and `jobs/queue.py`.
 - The end-to-end GPU run itself remains **unauthorised and ungated by this work**. Nothing
   here has loaded a model, and the adapter has still never run on a GPU.
+
+---
+
+# Amendment 2 — Ruff clean, and what the lint debt actually was
+
+Ruff: **19 findings to 0**, `orchestrator/` and `tests/`, under the mandated invocation.
+No rule was disabled, no `[tool.ruff.lint]` section was added, and no test was modified
+beyond the justification comments described below.
+
+## A2.1 — A1.5 mischaracterised the debt in two directions
+
+A1.5 called the fourteen production findings "real debt". That was partly wrong, and the
+correction matters more than the count.
+
+- **Five were not debt at all.** The `BLE001` sites in `api/cli.py`, `jobs/queue.py`,
+  `service/runner.py` (x2) and `service/minimax_h3.py` are one deliberate pattern: a
+  **secondary** operation — cleanup, a GPU-ledger charge, a diagnostic sidecar, a terminal
+  receipt — caught broadly so that its failure **annotates** the primary error instead of
+  masking it. `service/runner.py` already carried
+  `# noqa: BLE001 - persist a classified transition failure.` two lines from one of them.
+  The H3 additions simply failed to follow a convention the file had already established.
+  Each now carries its own justification; the behaviour is unchanged.
+- **Four were omitted from A1.5 entirely:** `I001` in `api/app.py`, `api/errors.py`,
+  `api/routes.py` and `service/minimax_h3.py` — in every case an H3 import dropped into
+  the wrong alphabetical slot. Fixed by `ruff --fix` (safe fixes only).
+- **One was worse than "an unused variable".** See A2.2.
+
+The five test `BLE001`s were correctly described. All five sit in a single `finally:`
+whose purpose is to guarantee teardown and collect failures rather than let one failure
+abort the rest; catching `BaseException` there is required, because a leaked listener on
+8298 would block real work. They now say so.
+
+## A2.2 — UNRESOLVED: the terminal path records no content hash
+
+`persist_h3_terminal` computed `_sha256(report_path)` and **discarded it**. That is why
+`F841` fired. Deleting the assignment is correct — but it exposes a real asymmetry, and
+deleting the symptom is not resolving it:
+
+- the **success** path hashes all three artifacts and carries `av_sha256`, `wav_sha256`
+  and `report_sha256` on `H3Candidate`;
+- the **terminal** (failed/cancelled) path records its report by **path only**, because
+  `GenerationRun` has **no content-hash field at all**.
+
+So a failed or cancelled run's report has no integrity receipt, and nothing detects it
+being altered or truncated after the fact. Closing this needs a schema decision — a hash
+field on `GenerationRun`, or an explicit ruling that terminal reports do not get receipts
+— and inventing one here would be exactly the "fully-specified field nothing drives"
+defect this repository has now produced nine times. **It is recorded, not fixed.**
+`settings` and `resource_metrics` are the wrong homes for it; neither means provenance.
+
+A comment at the deletion site points here, so the next author cannot quietly
+reintroduce an unused digest in place of the decision.
+
+## A2.3 — the no-op handler removed, and why it was safe
+
+`persist_h3_terminal` wrapped its final `store.save(run, expected_version=0)` in
+`except Exception: raise` (`TRY203`) under a comment claiming it preserved an
+already-written record. The handler did nothing. The guarantee is real but comes from
+elsewhere: `expected_version=0` makes the save create-only, and an earlier
+`RecordNotFound` probe returns any existing record untouched. The handler is gone and the
+comment now states where the guarantee actually lives.
+
+## A2.4 — three incidental facts worth not rediscovering
+
+- `orchestrator/api/errors.py` carries a **UTF-8 BOM**, and it is **pre-existing**:
+  present at the pre-H3 baseline, before this build. Left as found; the autofix preserved it.
+- Line endings are **not uniform**. `tests/adapters/minimax_h3/test_native_high_blockers.py`
+  is CRLF; the production files touched here are LF. A patch written for one silently
+  matches nothing in the other — it cost a failed edit pass here. Preserve each file's
+  existing endings rather than normalising, which would bury a real diff in whitespace.
+- The enabled rule set is far broader than `pyproject.toml` suggests (it sets only
+  `line-length` and `target-version`, with no `select`, yet `BLE001`, `I001`, `TRY` and
+  `PL` all fire). `E501` is **not** enforced, which is why long `noqa` justifications are
+  acceptable and why existing lines already exceed 100 columns.

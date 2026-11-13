@@ -18,11 +18,11 @@ from typing import Any
 from pydantic import ValidationError
 
 from orchestrator.adapters.assets.models import ProviderConfigurationError
+from orchestrator.adapters.minimax_h3.core import H3RequestError, H3SetupError
 from orchestrator.domain.state import ReviewApprovalError, TransitionError
 from orchestrator.platform.containment import ContainmentError, UploadRejected
 from orchestrator.platform.errors import JobError
 from orchestrator.service.assets import AssetRegistrationInvalid
-from orchestrator.adapters.minimax_h3.core import H3RequestError, H3SetupError
 from orchestrator.service.dependencies import ShotProposalWriteFailure
 from orchestrator.store.json_store import RecordNotFound, VersionConflict
 

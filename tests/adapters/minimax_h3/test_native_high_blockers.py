@@ -925,19 +925,19 @@ server.serve_forever(poll_interval=.05)
     finally:
         try:
             backend.close()
-        except BaseException as exc:  # cleanup fallback below remains mandatory
+        except BaseException as exc:  # noqa: BLE001 - cleanup fallback below remains mandatory for every failure mode.
             cleanup_errors.append(f"backend.close: {type(exc).__name__}: {exc}")
         if tree is not None:
             try:
                 identities.extend((int(row["pid"]), float(row.get("create_time", row.get("created"))))
                                   for row in tree.refresh() if isinstance(row, dict) and row.get("pid") is not None
                                   and row.get("create_time", row.get("created")) is not None)
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 - teardown must run for every failure mode, including BaseException; a leaked listener blocks real work.
                 cleanup_errors.append(f"owned tree final refresh: {type(exc).__name__}: {exc}")
         for pid, created in dict.fromkeys(identities):
             try:
                 _kill_identity(pid, created)
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 - teardown must run for every failure mode, including BaseException; a leaked listener blocks real work.
                 cleanup_errors.append(f"identity {pid}/{created}: {type(exc).__name__}: {exc}")
         for child in (foreign, process):
             if child is not None:
@@ -947,9 +947,9 @@ server.serve_forever(poll_interval=.05)
                     try:
                         child.kill()
                         child.wait(timeout=3)
-                    except BaseException as exc:
+                    except BaseException as exc:  # noqa: BLE001 - teardown must run for every failure mode, including BaseException; a leaked listener blocks real work.
                         cleanup_errors.append(f"Popen PID {child.pid}: {type(exc).__name__}: {exc}")
-                except BaseException as exc:
+                except BaseException as exc:  # noqa: BLE001 - teardown must run for every failure mode, including BaseException; a leaked listener blocks real work.
                     cleanup_errors.append(f"Popen PID {child.pid}: {type(exc).__name__}: {exc}")
         survivors = [(pid, created) for pid, created in dict.fromkeys(identities)
                      if _identity_alive(pid, created)]

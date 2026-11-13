@@ -404,7 +404,7 @@ class JobRunner:
                     from orchestrator.service.minimax_h3 import persist_h3_terminal
                     persist_h3_terminal(store, job, request.payload["request"],
                                         status="cancelled" if exc.kind is JobErrorKind.CANCELLED else "failed")
-                except Exception as receipt_error:
+                except Exception as receipt_error:  # noqa: BLE001 - a receipt failure annotates the primary job error.
                     exc.add_note(f"H3 terminal GenerationRun persistence failed: {type(receipt_error).__name__}: {receipt_error}")
             if exc.kind is not JobErrorKind.CANCELLED and request.kind is not AdapterKind.H3_CANDIDATE:
                 lifecycle_error = _fail_shot_after_job_error(store, request)
@@ -429,7 +429,7 @@ class JobRunner:
                 try:
                     from orchestrator.service.minimax_h3 import persist_h3_terminal
                     persist_h3_terminal(store, job, request.payload["request"], status="failed")
-                except Exception as receipt_error:
+                except Exception as receipt_error:  # noqa: BLE001 - a receipt failure annotates the primary job error.
                     exc.add_note(f"H3 terminal GenerationRun persistence failed: {type(receipt_error).__name__}: {receipt_error}")
             error = JobError.from_exception(
                 exc, job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id, origin="runner"

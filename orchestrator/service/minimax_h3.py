@@ -4,18 +4,20 @@ from __future__ import annotations
 
 import hashlib
 import json
-import uuid
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
 from orchestrator.adapters.minimax_h3 import H3Request, H3Result
 from orchestrator.adapters.minimax_h3.core import H3RequestError, H3SetupError
-from orchestrator.domain.base import ShotStatus
 from orchestrator.domain.entities import (
-    Episode, GenerationRun, H3Candidate, Job, Shot, ShotOutputKind,
+    Episode,
+    GenerationRun,
+    H3Candidate,
+    Job,
+    Shot,
+    ShotOutputKind,
 )
-from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.settings import Settings
 from orchestrator.store.json_store import ProjectStore, RecordNotFound, VersionConflict
 
@@ -172,7 +174,7 @@ def persist_h3_candidate(store: ProjectStore, job: Job, result: H3Result,
                     raise FileExistsError(f"refusing to overwrite H3 metadata diagnostic {sidecar_rel}")
                 root.write_text(sidecar_rel, json.dumps(diagnostic, ensure_ascii=False,
                                                         allow_nan=False, indent=2) + "\n")
-            except Exception as diagnostic_error:
+            except Exception as diagnostic_error:  # noqa: BLE001 - a diagnostic write must not mask the primary failure.
                 primary.add_note(
                     f"H3 metadata-failure sidecar write also failed: "
                     f"{type(diagnostic_error).__name__}: {diagnostic_error}"
@@ -198,7 +200,10 @@ def persist_h3_terminal(store: ProjectStore, job: Job, request: H3Request, *, st
     if not report_path.is_file():
         return None
     report = json.loads(root.read_text(report_rel, encoding="utf-8"))
-    report_hash = _sha256(report_path)
+    # GenerationRun has no content-hash field, so a terminal report is recorded by path
+    # only. The success path hashes all three artifacts onto H3Candidate; the asymmetry
+    # is recorded in NATIVE_BLOCKERS_CONTRACT.md Amendment 2 (A2.2) and still needs a
+    # decision. Do not reintroduce an unused digest here instead of resolving it.
     run = GenerationRun(
         run_id=request.run_id, tool="minimax_h3",
         tool_version=str(report.get("runtime", {}).get("version", "pinned")),
@@ -210,11 +215,9 @@ def persist_h3_terminal(store: ProjectStore, job: Job, request: H3Request, *, st
         log_path=report.get("log_path"), status=status,
         resource_metrics=job.resource_metrics,
     )
-    try:
-        store.save(run, expected_version=0)
-    except Exception:
-        # Preserve an already-written record; a retry cannot safely revise this run id.
-        raise
+    # expected_version=0 keeps this create-only: an already-written record for this run
+    # id raises rather than being revised, which a retry must never do.
+    store.save(run, expected_version=0)
     return run
 
 
