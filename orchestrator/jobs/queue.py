@@ -209,13 +209,13 @@ class JobQueue:
             # GPU-minute ledger. GPU allowance is recomputed once the lease is held.
             self.lease.acquire(timeout_seconds=max(0.0, deadline - self.clock()))
             acquired_here = True
-            # Recorded the moment the lease is held, not after preflight: a preflight that
-            # fails while the release then also fails left a terminal record claiming no
-            # holder for a lease that was genuinely still held.
-            job.lease_holder_pid = self.lease.worker.pid()
             release_failed = False
-            start = self.clock()
             try:
+                # Recorded the moment the lease is held, not after preflight: a preflight that
+                # fails while the release then also fails left a terminal record claiming no
+                # holder for a lease that was genuinely still held.
+                job.lease_holder_pid = self.lease.worker.pid()
+                start = self.clock()
                 # Re-read after any bounded lease wait: another queue may have used
                 # the remaining project budget while this attempt waited for admission.
                 shot_remaining, episode_remaining = self._remaining_budget(job, budget_key)
@@ -242,11 +242,12 @@ class JobQueue:
                 self._transition(job, "running")
                 try:
                     self._watch_context.startup_allowance_seconds = startup_allowance
+                    self._watch_context.deadline_message = deadline_message
                     try:
-                        result = self._watch(worker_fn, job, attempt_deadline,
-                                             deadline_message=deadline_message)
+                        result = self._watch(worker_fn, job, attempt_deadline)
                     finally:
                         del self._watch_context.startup_allowance_seconds
+                        del self._watch_context.deadline_message
                 except JobError as error:
                     last_error = JobError.from_exception(error, job_id=job.job_id,
                                                          shot_id=job.shot_id, run_id=job.run_id)
@@ -362,12 +363,16 @@ class JobQueue:
         )
         job.lease_holder_pid = None
 
-    def _watch(self, worker_fn: Callable[[Job], T], job: Job, deadline: float, *,
-               deadline_message: str = "per-shot wall-clock budget exceeded") -> T:
+    def _watch(self, worker_fn: Callable[[Job], T], job: Job, deadline: float) -> T:
         """Run work in a managed thread; detect stalls and require confirmed worker stop."""
         result: list[T] = []
         errors: list[BaseException] = []
         done = threading.Event()
+        deadline_message = getattr(
+            self._watch_context,
+            "deadline_message",
+            "per-shot wall-clock budget exceeded",
+        )
 
         def invoke() -> None:
             try:
@@ -393,7 +398,13 @@ class JobQueue:
         while not done.wait(0.01):
             now = self.clock()
             if now >= deadline:
-                if not self.lease.worker.terminate():
+                # Adapter supervisors expose a nonblocking stop request; the held-lease
+                # cleanup below joins and verifies shutdown. Legacy worker controls without
+                # that seam must synchronously confirm termination before the attempt retires.
+                request_stop = getattr(self.lease.worker, "request_queue_stop", None)
+                if callable(request_stop):
+                    request_stop()
+                elif not self.lease.worker.terminate():
                     raise JobError(JobErrorKind.INTERNAL,
                                    "watchdog could not confirm worker stopped before hard deadline")
                 raise JobError(JobErrorKind.BUDGET_EXCEEDED, deadline_message)

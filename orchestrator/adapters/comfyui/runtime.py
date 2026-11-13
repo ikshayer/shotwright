@@ -256,6 +256,16 @@ class OwnedComfyWorker(ComfyWorkerControl):
             if self._attempt_stop is not None:
                 self._attempt_stop.set()
 
+    def request_queue_stop(self) -> None:
+        """Fence the active queue token without blocking on attempt teardown."""
+        with self._lock:
+            epoch = self._epoch
+            lease = self._lease_provider() if self._lease_provider else None
+            record = getattr(lease, "_record", None)
+            token = record.get("token") if isinstance(record, dict) else None
+        if epoch is not None and isinstance(token, str):
+            self.request_stop(epoch, token)
+
     def publish(self, epoch: object, token: str, deadline: float, writer: Callable[[], None],
                 *, deadline_clock: Callable[[], float] = time.monotonic,
                 deadline_value: float | None = None) -> None:

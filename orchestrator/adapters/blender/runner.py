@@ -172,6 +172,10 @@ class _Supervisor(WorkerControl):
         reason = JobErrorKind.BUDGET_EXCEEDED if not self._stop.is_set() else self._stop_reason
         return self._stop_and_join(reason)
 
+    def request_queue_stop(self) -> None:
+        """Fence new launches and signal the current attempt without joining it."""
+        self._signal_stop(JobErrorKind.BUDGET_EXCEEDED)
+
     def respawn(self) -> int:
         with self._lock:
             self._stop.clear()
@@ -183,7 +187,9 @@ class _Supervisor(WorkerControl):
     def stop_for(self, reason: JobErrorKind) -> bool:
         return self._stop_and_join(reason)
 
-    def _stop_and_join(self, reason: JobErrorKind | None) -> bool:
+    def _signal_stop(
+        self, reason: JobErrorKind | None,
+    ) -> tuple[subprocess.Popen[bytes] | None, threading.Thread | None]:
         with self._lock:
             if self._lease_provider is not None:
                 lease = self._lease_provider()
@@ -201,6 +207,10 @@ class _Supervisor(WorkerControl):
                 process.terminate()
             except OSError:
                 pass
+        return process, attempt
+
+    def _stop_and_join(self, reason: JobErrorKind | None) -> bool:
+        process, attempt = self._signal_stop(reason)
         if attempt is not None and attempt is not threading.current_thread():
             attempt.join(timeout=8)
             if attempt.is_alive():

@@ -92,6 +92,17 @@ class H3WorkerControl:
     def stopped(self) -> bool:
         return self._stop_event.is_set()
 
+    def request_queue_stop(self) -> None:
+        """Fence future H3 work; lease cleanup performs and verifies backend stop."""
+        with self._lock:
+            if isinstance(self._token, str):
+                self._blocked_tokens.add(self._token)
+            lease = self._lease_provider() if self._lease_provider else None
+            record = getattr(lease, "_record", None)
+            if isinstance(record, dict) and isinstance(record.get("token"), str):
+                self._blocked_tokens.add(record["token"])
+            self._stop_event.set()
+
     def unload(self) -> None:
         if not self.terminate():
             raise JobError(JobErrorKind.WORKER_UNREACHABLE, "H3 children or attempt did not stop; GPU lease retained")
