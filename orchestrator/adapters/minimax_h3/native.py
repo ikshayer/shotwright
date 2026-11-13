@@ -845,10 +845,20 @@ class NativeBackend:
                     )
                 except AttributeError:
                     pass
-            if cleanup:
-                outcome_error = _cleanup_failure_record(cleanup, physical=False)
-                if outcome_error:
-                    self._last_cleanup_error = {**(self._last_cleanup_error or {}), **outcome_error}
+            if cleanup and not _cleanup_verified(cleanup):
+                # Gated on the predicate, not on the record's truthiness.
+                # `_cleanup_failure_record` always returns a populated dict, so the former
+                # `if outcome_error:` test was never false: every run with a cleanup
+                # receipt was marked as having failed cleanup, carrying the fallback
+                # message "shutdown outcome failed" with an empty reason list. The first
+                # GPU run recorded exactly that, and such noise masks a real failure.
+                #
+                # This block cannot be folded into the check below: when `primary_error`
+                # is propagating, the `finally` exits by re-raising and that check is
+                # never reached, so this is the only place a failing run captures outcome
+                # evidence. Both sites now ask `_cleanup_verified` the same question.
+                self._last_cleanup_error = {**(self._last_cleanup_error or {}),
+                                            **_cleanup_failure_record(cleanup, physical=False)}
         if not _cleanup_verified(cleanup):
             failure = _cleanup_failure_record(cleanup, physical=False)
             self._last_cleanup_error = {**(self._last_cleanup_error or {}), **failure}

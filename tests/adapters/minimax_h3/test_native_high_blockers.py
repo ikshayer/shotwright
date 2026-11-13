@@ -1141,3 +1141,34 @@ def test_shifted_container_and_video_origins_preserve_exact_trim_and_frame_grid(
     assert receipt["sha256"] == proxy_hash, (
         f"prepared proxy hash was {receipt['sha256']!r}, but real decoded proxy bytes hash to {proxy_hash}"
     )
+
+
+def test_a_clean_shutdown_is_not_recorded_as_a_cleanup_failure(tmp_path, monkeypatch):
+    """A3.8: an aborted run whose cleanup succeeded must carry no cleanup_error.
+
+    `_cleanup_failure_record` always returns a populated dict, so the former
+    `if outcome_error:` gate was never false -- every run that produced a cleanup
+    receipt was marked as having failed cleanup, carrying the fallback message
+    "shutdown outcome failed" with an empty reason list. The first GPU run recorded
+    exactly that. The noise can mask a real cleanup failure, which
+    `test_primary_and_verified_cleanup_failures_are_retained_separately` above
+    asserts must still be reported -- the two tests are the pair.
+    """
+    with _native_case(tmp_path, monkeypatch, history_mode="primary") as case:
+        with pytest.raises(JobError):
+            _queued_native_run(case)
+        report_rel = (
+            f"generated/h3/{case.request.shot_id}/v{case.request.shot_version:04d}"
+            f"/{case.request.run_id}/report.json"
+        )
+        report = json.loads(case.project.resolve(report_rel).read_text(encoding="utf-8"))
+        stopped = report.get("cleanup") or {}
+        inner = stopped.get("cleanup")
+        assert (
+            isinstance(inner, dict)
+            and inner.get("verified_stopped") is True
+            and inner.get("survivors") == []
+        ), f"precondition: this case must shut down cleanly; got {stopped!r}"
+        assert report.get("cleanup_error") is None, (
+            f"a clean shutdown was recorded as a cleanup failure: {report.get('cleanup_error')!r}"
+        )

@@ -481,3 +481,150 @@ not a pass. It needs no GPU, so it can be closed separately.
 Harness and artifacts: `_work/h3_stage/` (gitignored) — `settings.toml` with provisional
 reservations, `stage_a_verify.py`, `stage_b_run.py`, and the run receipt under
 `_work/h3_stage/projects/generated/h3/stageb/v0001/stagebrun1/`.
+
+# Amendment 4 — the creator's four decisions, and two things we had wrong
+
+Recorded 2026-11-13, after the creator answered the open decisions from Amendment 3.
+Two entries below correct earlier text in this document rather than extending it.
+
+## A4.1 — A2.2 RESOLVED: `output_hashes` on `GenerationRun`
+
+**Decision (creator): add the field.** A terminal report now carries a receipt.
+
+`GenerationRun` gains `output_hashes: dict[str, str]`, keyed by the same relative path
+`output_paths` uses. Two validators, both load-bearing:
+
+- digests must be 64 lowercase hexadecimal characters, matching `H3Candidate`'s existing
+  convention rather than inventing a second one;
+- **keys must be a subset of `output_paths`.** Without this the two fields drift and a
+  receipt can name a path nothing resolves back to a file — a field that looks driven and
+  is not, which is the exact defect shape this repository has produced nine times.
+
+It defaults to an empty mapping because `GenerationRun` is the *generic* run entity:
+FFmpeg and Blender runs share it and may have nothing to receipt. A required field would
+have broken them.
+
+**It is driven in the same change**, which was the whole point of taking the decision
+rather than adding the field: `persist_h3_terminal` hashes the report and records
+path-to-digest. The digest is taken from the bytes on disk, not from re-serialising the
+parsed `report` object — a receipt for a re-encoding would not detect the file itself being
+altered, which is the only thing it exists to detect.
+
+**A coverage hole found on the way in.** `persist_h3_terminal` had **no tests of any kind**,
+despite being reachable from `runner.py:405` and `:431` on both the failed and cancelled
+paths. `tests/service/test_h3_terminal_receipt.py` (17 tests) is the first thing pinning its
+contract, including that it stays create-only on a retry.
+
+**One test trap, recorded so it is not repeated.** Two of the rejection tests passed
+*before* the implementation, for the wrong reason: `GenerationRun` is strict, so
+`output_hashes` was refused as an unknown field, not by the validator under test. The
+discriminator is `test_a_well_formed_receipt_is_accepted`, which failed beforehand. A
+rejection test alone cannot distinguish "validated" from "field does not exist".
+
+## A4.2 — CORRECTION to A3.8: the defect was an always-true gate, not a classification
+
+**A3.8 as written above is wrong about the cause.** It says the shutdown outcome failed
+because of the requested-stop `InterruptedError`, and suggests distinguishing a requested
+stop from an unexpected interruption. That work had **already been done** — both
+`_cleanup_verified` and `_cleanup_failure_record` carried a `requested_stop` exclusion
+before the GPU run, added in `ad4452b`.
+
+The guard worked. The real defect was downstream of it, in the `finally` block of
+`execute()`, which called `_cleanup_failure_record` and then gated on the truthiness of the
+record it returned. That function *always* returns a populated dict, so the gate could
+never be false. **Every run that produced a cleanup receipt was recorded as having failed
+cleanup**, whether or not anything failed.
+
+The proof is in the GPU run's own report: the message is `shutdown outcome failed`, which
+is the fallback used when the collected reason list is **empty**. The guard had correctly
+removed the only candidate reason; the truthiness test recorded a failure regardless.
+
+The gate is now `_cleanup_verified`, the same predicate the post-`finally` check uses, so
+both sites ask one question. The block cannot be folded into that check: when the primary
+error is propagating, the `finally` exits by re-raising and the check below is never
+reached, so this is the only place a failing run captures outcome evidence.
+
+`test_a_clean_shutdown_is_not_recorded_as_a_cleanup_failure` reproduces the GPU run's
+record **byte-for-byte** against unfixed code, and its companion
+`test_primary_and_verified_cleanup_failures_are_retained_separately` still asserts that a
+genuine cleanup failure *is* reported — the pair is what keeps the fix from over-correcting
+into silence.
+
+## A4.3 — reservation semantics: working-set under offload, not model size
+
+**Decision (creator):** the job is not inadmissible; the model is quantized and generates
+media today, so `required_vram_gb` means **peak working-set VRAM under ComfyUI's offload**,
+not resident model size. Model size is provenance, recorded separately.
+
+This had to be decided before the numbers could be measured. `jobs/queue.py:112` admits by
+comparing free VRAM against `required_vram_gb`; the H3 weights total **28.65 GB against
+11.94 GB of VRAM**, so a literal reading makes the job permanently inadmissible — a gate
+nothing can ever pass. The provisional 8.0 in `_work/h3_stage/settings.toml` was already
+silently assuming the working-set reading.
+
+Why it fits, from `model_catalog.json`: the weights are **already quantized** — NVFP4
+diffusion, NVFP4-AWQ text encoder, INT8 video VAE. 28.65 GB *is* the post-quantization
+total. The text encoder is the largest single piece at 15.69 GB and runs sequentially
+before diffusion, so the peak is the largest stage, not the sum.
+
+**The four numbers need no new instrumentation.** `events/resources.jsonl` already records
+whole-device GPU used/total/free, available RAM, free disk per drive and the Windows commit
+figures, each tagged with a `phase`. Whole-device is also the *correct* measure, because
+admission compares against free VRAM on the device rather than against one process's share.
+
+**Caveat for the measurement run:** the observed sampling interval was **~15 s** (5 samples
+over 60 s). That captures a plateau but can miss a transient load spike, and the peak is
+the number being measured. The internal throttle floor is 1 s, so tighten the interval for
+the run that sets these values, or the reservation will be derived from an average dressed
+as a maximum.
+
+## A4.4 — CORRECTION: Phase 1's §4.3 gate passes; ratification is the blocker
+
+Amendment 3 and A3.9 both state that Phase 1 is unaccepted because "§4.3 criterion 5 fails
+on 2 of 3 anomaly frames, FR-04 unmet". The first half is true and the conclusion does not
+follow; the second half is not the PRD's claim.
+
+- **Criterion 5 does fail on 2 of 3 anomaly frames** — 8.4 s (figure clipped at the right
+  frame edge) and 12 s (figure lost in shadow, right-third luminance 25.99 against a 26.1
+  baseline). 9 s passes.
+- **The gate passes anyway.** §4.3 requires 4 or more of 5 on at least 80% of sampled
+  frames with **criterion 3** mandatory — criterion 5 is not mandatory. All 7 samples score
+  4 or better and criterion 3 passes on all 7. `spikes/15_phase1_exit/FINDINGS.md:31` reads
+  **"Result: PASS."** The verdict also survives the stricter reading in which the four
+  pre-anomaly samples scoring criterion 5 not-applicable are excluded rather than counted
+  as passes: 3 anomaly frames, all 4 or better, still 100%.
+- **What actually blocks it** is the line above the sheet: "pre-scored by the orchestrator,
+  **awaiting creator ratification**". The engineering gate is met; the sign-off is not.
+- **"FR-04 unmet" is a HANDOFF interpretation, not PRD text.** FR-04 requires supervised
+  Blender control, the master render spec, Eevee Next as default, and recording the Blender
+  version. It is implemented and has rendered real masters. The label comes from reading
+  the Phase 1 *slice* ("builds a believable hallway from a text brief") into FR-04, but
+  PRD:616 states **"The Phase 1 Exit clause governs, not the slice description."**
+- **`HANDOFF.md` is stale on this point.** It says scenes are built by hardcoded functions;
+  `orchestrator/service/script_authoring.py` provides `derive_script_scene_plan`, wired at
+  `api/app.py:229` behind a real route at `api/routes.py:202`.
+
+Genuinely open on Phase 1, none of it H3's business: AT-15's budget (the 15 s render took
+1047 s against a 900 s default and needed a 0.000249 throughput floor), publication rights
+on the generated figure and the overlay font (internal-evaluation only), and the spike's own
+recommendation to restage the walk across the lit window — "one parameter change and one
+render".
+
+**Consequence for A3.9.** Its claim that exercising `compose_h3_request` "would have
+required building the entire Phase 1 render chain first" overstates the obstacle. Rendered
+projects already exist on disk (`_work/phase1_exit/exit/` among them), and `settings.toml`
+is optional — `platform/settings.py:182` defaults the project root to a relative `projects`
+directory and the spike harnesses build `Settings` in code. The service binding can be
+closed against an existing project root without a render and without a GPU.
+
+## A4.5 — verification
+
+Full suite **2093 passed, 58 skipped, 0 failed** (2075 baseline + 17 receipt tests + 1
+cleanup regression). Ruff **clean**. Evidence ordering for both fixes: the tests were
+written first and failed against unfixed code — 8 failures for the receipt, including
+`'GenerationRun' object has no attribute 'output_hashes'`, and for the cleanup gate the GPU
+run's record reproduced byte-for-byte.
+
+The pytest summary line did not survive the background redirect; the count above is derived
+from the progress output (100% reached, 58 skip markers, zero failure or error markers) and
+reconciles exactly with the baseline plus the new tests.

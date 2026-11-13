@@ -827,6 +827,35 @@ class GenerationRun(Entity):
     log_path: str | None = None
     status: str = "pending"
     resource_metrics: dict[str, float] = Field(default_factory=dict)
+    #: Content receipts for `output_paths`, keyed by the same relative path.
+    #: A *terminal* run (failed/cancelled) records its report here; the success
+    #: path hashes its artifacts onto the tool's own entity (e.g. `H3Candidate`).
+    #: Optional because FFmpeg and Blender runs share this entity and may have
+    #: nothing to receipt, but never free-form: see the validators below.
+    output_hashes: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("output_hashes")
+    @classmethod
+    def _run_output_hashes(cls, value: dict[str, str]) -> dict[str, str]:
+        for path, digest in value.items():
+            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError(
+                    f"GenerationRun output hash for {path!r} must be 64 lowercase hexadecimal characters"
+                )
+        return value
+
+    @model_validator(mode="after")
+    def _hashes_reference_declared_outputs(self) -> GenerationRun:
+        """A receipt must name a path this run actually declares as an output.
+
+        Without this the two fields drift: a hash could name a path `output_paths`
+        never listed, so nothing could resolve it back to a file and the receipt
+        would be unverifiable -- a field that looks driven but is not.
+        """
+        unknown = sorted(set(self.output_hashes) - set(self.output_paths))
+        if unknown:
+            raise ValueError(f"GenerationRun output hashes name undeclared outputs: {unknown}")
+        return self
 
 
 class H3Candidate(Entity):

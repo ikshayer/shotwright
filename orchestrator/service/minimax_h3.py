@@ -200,10 +200,12 @@ def persist_h3_terminal(store: ProjectStore, job: Job, request: H3Request, *, st
     if not report_path.is_file():
         return None
     report = json.loads(root.read_text(report_rel, encoding="utf-8"))
-    # GenerationRun has no content-hash field, so a terminal report is recorded by path
-    # only. The success path hashes all three artifacts onto H3Candidate; the asymmetry
-    # is recorded in NATIVE_BLOCKERS_CONTRACT.md Amendment 2 (A2.2) and still needs a
-    # decision. Do not reintroduce an unused digest here instead of resolving it.
+    # A2.2, resolved: hash the report before building the record, so a failed or
+    # cancelled run carries the same kind of integrity receipt the success path puts on
+    # H3Candidate. Hashed from the bytes on disk rather than re-serialising `report`,
+    # because a receipt for a re-encoding of the parsed object would not detect the file
+    # itself being altered -- which is the only thing it exists to detect.
+    report_hash = _sha256(report_path)
     run = GenerationRun(
         run_id=request.run_id, tool="minimax_h3",
         tool_version=str(report.get("runtime", {}).get("version", "pinned")),
@@ -212,6 +214,7 @@ def persist_h3_terminal(store: ProjectStore, job: Job, request: H3Request, *, st
                   "height": request.height, "fps": request.fps, "steps": request.steps,
                   "experimental": request.experimental},
         input_paths=[request.video_path], output_paths=[report_rel],
+        output_hashes={report_rel: report_hash},
         log_path=report.get("log_path"), status=status,
         resource_metrics=job.resource_metrics,
     )
