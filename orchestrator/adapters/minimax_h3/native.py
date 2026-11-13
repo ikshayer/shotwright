@@ -16,6 +16,7 @@ import time
 import uuid
 from array import array
 from collections.abc import Callable
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,14 @@ _CATALOG_SHA256 = "d44bbcebfdf2635f9a9ca9c1e37e7788fac57bb9fde021a9d1132ab08649b
 _DOC_CATALOG_SHA256 = "9712c30a721268abc77ad1eac92e266a23737f5555c3ebdc04e0775282ebb5a1"
 _SOURCE_RECEIPT_SHA256 = "220c4f772a09332bbec353f6a0a89c47ad9d52453991fb42079965ed00532575"
 _EASY_STAGE_SHA256 = "c3c3984ad115e623fb395852e66c80ff8bdaa312f83738d583353a952b4c1655"
+_GIB = 1024**3
+_INITIAL_AVAILABLE_RAM_BYTES = 6 * _GIB
+_LOW_AVAILABLE_RAM_BYTES = 2 * _GIB
+_LOW_RAM_SAMPLES_TO_STOP = 3
+
+
+class _ListenerOwnershipError(H3SetupError):
+    """The loopback listener could not be positively tied to the owned process tree."""
 
 
 class NativeBackend:
@@ -62,6 +71,12 @@ class NativeBackend:
         self._unsafe_cleanup = False
         self._resource_samples: list[dict[str, Any]] = []
         self._last_resource_check = 0.0
+        self._admission_checked = False
+        self._admission_sample: dict[str, Any] | None = None
+        self._runtime_initial_checked = False
+        self._runtime_low_ram_samples = 0
+        self._last_listener_identity: dict[str, Any] | None = None
+        self._last_submission_listener: dict[str, Any] | None = None
         self._attempt_cfg: Any = None
         self._attempt_root: ProjectRoot | None = None
         self._attempt_run_rel: str | None = None
@@ -152,23 +167,36 @@ class NativeBackend:
             demuxers = set(str(meta["format"]["format_name"]).split(","))
             streams = meta.get("streams", [])
             video = next(row for row in streams if row.get("codec_type") == "video")
-            video_start = float(video.get("start_time", container_start))
+            raw_video_start = video.get("start_time")
+            video_start = (None if raw_video_start in (None, "N/A")
+                           else float(raw_video_start))
             stream_duration = video.get("duration")
             if stream_duration not in (None, "N/A"):
                 video_duration = float(stream_duration)
             elif video.get("nb_frames") not in (None, "N/A"):
                 rate_num, rate_den = map(int, video.get("avg_frame_rate", video["r_frame_rate"]).split("/"))
+                if rate_num <= 0 or rate_den <= 0:
+                    raise ValueError("video stream frame rate is invalid")
                 video_duration = int(video["nb_frames"]) * rate_den / rate_num
-            else:
+            elif video_start is not None:
                 # Bound a stream with no explicit duration at the container end,
                 # accounting for an earlier audio-origin timestamp.
                 video_duration = container_start + container_duration - video_start
+            else:
+                raise ValueError("video stream has no origin or finite duration")
         except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
             raise JobError(JobErrorKind.CORRUPT_ARTIFACT, "H3 source timing is unavailable", cause=exc) from exc
         except StopIteration as exc:
             raise JobError(JobErrorKind.INVALID_MANIFEST, "H3 source contains no video stream", cause=exc) from exc
-        if (not all(math.isfinite(value) for value in (container_duration, container_start, video_start, video_duration))
-                or video_duration <= 0 or request.start_seconds + request.duration_seconds > video_duration + 1e-6):
+        if (not all(math.isfinite(value) for value in (container_duration, container_start, video_duration))
+                or (video_start is not None and not math.isfinite(video_start)) or video_duration <= 0):
+            raise JobError(JobErrorKind.INVALID_MANIFEST, "requested H3 interval is outside the source video")
+        try:
+            interval_end = Decimal(str(request.start_seconds)) + Decimal(str(request.duration_seconds))
+            source_end = Decimal(str(video_duration))
+        except InvalidOperation as exc:
+            raise JobError(JobErrorKind.CORRUPT_ARTIFACT, "H3 source timing is not finite decimal time", cause=exc) from exc
+        if interval_end > source_end:
             raise JobError(JobErrorKind.INVALID_MANIFEST, "requested H3 interval is outside the source video")
         allowed_demuxers = {"mp4", "mov", "matroska", "webm", "avi"}
         if not demuxers.intersection(allowed_demuxers):
@@ -178,7 +206,15 @@ class NativeBackend:
         filters = (f"setpts=PTS-STARTPTS,trim=start={request.start_seconds:.9f}:duration={request.duration_seconds:.9f},"
                    f"setpts=PTS-STARTPTS,scale={request.width}:{request.height}:force_original_aspect_ratio=decrease,"
                    f"pad={request.width}:{request.height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps={request.fps}")
-        command = [ffmpeg, "-hide_banner", "-nostdin", "-y", "-protocol_whitelist", "file,pipe", "-i", str(source), "-map", "0:v:0", "-an", "-sn", "-dn", "-vf", filters, "-frames:v", str(round(request.duration_seconds * request.fps)), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output)]
+        # Preserve source PTS at demux, then normalize the first decoded video
+        # frame to zero before trimming.  This makes start_seconds relative to
+        # the video stream even when the container or an audio stream starts
+        # earlier.  There is deliberately no input-side -ss seek to double-apply
+        # the media origin.
+        command = [ffmpeg, "-hide_banner", "-nostdin", "-y", "-protocol_whitelist", "file,pipe",
+                   "-copyts", "-i", str(source), "-map", "0:v:0", "-an", "-sn", "-dn",
+                   "-vf", filters, "-frames:v", str(round(request.duration_seconds * request.fps)),
+                   "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output)]
         run_receipt = self._run_owned(command, cwd=self.root.path, cancel=cancel,
                                       timeout=120, env=self._contained_env(run_rel + "/temp"))
         if not output.is_file() or output.stat().st_size <= 0:
@@ -192,7 +228,10 @@ class NativeBackend:
             if proxy_probe.returncode or len(video_streams) != 1 or any(stream["codec_type"] == "audio" for stream in proxy_info["streams"]):
                 raise ValueError("proxy streams are invalid")
             row = video_streams[0]
-            if (int(row["width"]), int(row["height"]), row["avg_frame_rate"], int(row["nb_read_frames"])) != (request.width, request.height, f"{request.fps}/1", int(request.duration_seconds * request.fps)):
+            if (int(row["width"]), int(row["height"]), row["avg_frame_rate"],
+                    row.get("sample_aspect_ratio"), int(row["nb_read_frames"])) != (
+                    request.width, request.height, f"{request.fps}/1", "1:1",
+                    int(request.duration_seconds * request.fps)):
                 raise ValueError("proxy does not match the requested exact frame grid")
         except (ValueError, TypeError, KeyError, IndexError, json.JSONDecodeError) as exc:
             raise JobError(JobErrorKind.CORRUPT_ARTIFACT, f"H3 silent proxy failed full validation: {exc}", cause=exc) from exc
@@ -203,7 +242,18 @@ class NativeBackend:
                 "source_path": request.video_path, "source_duration_seconds": video_duration,
                 "source_container_duration_seconds": container_duration,
                 "source_container_start_seconds": container_start,
-                "source_video_start_seconds": video_start, "command": command,
+                "source_video_start_seconds": video_start,
+                "timestamp_normalization": {
+                    "basis": "first decoded video-frame PTS (video stream origin)",
+                    "decode_side": True,
+                    "input_timestamps_preserved": True,
+                    "filter": "setpts=PTS-STARTPTS before trim; reset after trim",
+                    "requested_interval_relative_to_video_origin": {
+                        "start_seconds": request.start_seconds,
+                        "duration_seconds": request.duration_seconds,
+                    },
+                },
+                "command": command,
                 "process": run_receipt}
 
     def _contained_env(self, temp_rel: str) -> dict[str, str]:
@@ -279,38 +329,112 @@ class NativeBackend:
             return False
         return check
 
-    def _check_resources(self, *, force: bool) -> dict[str, Any]:
-        now = time.monotonic()
-        if not force and now - self._last_resource_check < 1.0 and self._resource_samples:
-            return self._resource_samples[-1]
+    def _read_resource_sample(self) -> tuple[dict[str, Any], int, int, float]:
         if self._resources is not None:
             sample = self._resources()
         else:
             helper = _load_helper(self.repository_root)
             sample = helper.resources(helper.PynvmlProbe(device_index=0), self._tree)
-        required_ram = float(self._attempt_cfg.required_ram_gb)
-        required_disk = float(self._attempt_cfg.required_disk_gb)
-        required_vram = float(self._attempt_cfg.required_vram_gb)
-        if any(not math.isfinite(x) or x <= 0 for x in (required_ram, required_disk, required_vram)):
-            raise H3SetupError("MiniMax H3 requires explicit finite positive RAM, disk, and VRAM reservations")
         try:
+            if not isinstance(sample, dict):
+                raise TypeError("resource probe did not return an object")
             ram = int(sample["ram_available_bytes"])
             disk = int(sample["disk_free_bytes"])
             gpu = sample["gpu_whole_device_mb"]
             vram = float(gpu["free_mb"])
         except (TypeError, KeyError, ValueError) as exc:
             raise JobError(JobErrorKind.INTERNAL, "H3 resource telemetry is malformed", cause=exc) from exc
-        if (ram < required_ram * 1024**3 or disk < required_disk * 1024**3
-                or vram < required_vram * 1024):
-            raise JobError(JobErrorKind.BUDGET_EXCEEDED,
-                           "Current H3 RAM, disk, or whole-device VRAM is below configured operator admission reservations")
-        record = {**sample, "utc_recorded": time.time(), "admission_reservations_gb": {
-            "ram": required_ram, "disk": required_disk, "vram": required_vram}}
+        if ram < 0 or disk < 0 or not math.isfinite(vram) or vram < 0:
+            raise JobError(JobErrorKind.INTERNAL, "H3 resource telemetry contains invalid negative or nonfinite values")
+        return sample, ram, disk, vram
+
+    def _record_resource_sample(self, sample: dict[str, Any], *, phase: str,
+                                details: dict[str, Any] | None = None) -> dict[str, Any]:
+        record = {**sample, "utc_recorded": time.time(), "phase": phase}
+        if details:
+            record.update(details)
         self._resource_samples.append(record)
-        self._last_resource_check = now
         if self._attempt_root is not None and self._attempt_run_rel is not None:
             self._attempt_root.append_line(self._attempt_run_rel + "/events/resources.jsonl",
                                            json.dumps(record, ensure_ascii=False, allow_nan=False))
+        return record
+
+    def _check_admission_resources(self) -> dict[str, Any]:
+        """Apply operator reservations once, before any H3 model process is launched."""
+        if self._admission_checked and self._admission_sample is not None:
+            return self._admission_sample
+        cfg = self._attempt_cfg
+        try:
+            required_ram = float(cfg.required_ram_gb)
+            required_disk = float(cfg.required_disk_gb)
+            required_vram = float(cfg.required_vram_gb)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise H3SetupError("MiniMax H3 requires explicit finite positive RAM, disk, and VRAM reservations") from exc
+        if any(not math.isfinite(x) or x <= 0 for x in (required_ram, required_disk, required_vram)):
+            raise H3SetupError("MiniMax H3 requires explicit finite positive RAM, disk, and VRAM reservations")
+        sample, ram, disk, vram = self._read_resource_sample()
+        if (ram < required_ram * _GIB or disk < required_disk * _GIB
+                or vram < required_vram * 1024):
+            record = self._record_resource_sample(sample, phase="admission", details={
+                "admission_reservations_gb": {"ram": required_ram, "disk": required_disk, "vram": required_vram},
+                "admission_passed": False,
+            })
+            self._admission_sample = record
+            self._admission_checked = True
+            raise JobError(JobErrorKind.BUDGET_EXCEEDED,
+                           "Current H3 RAM, disk, or whole-device VRAM is below configured operator admission reservations")
+        record = self._record_resource_sample(sample, phase="admission", details={
+            "admission_reservations_gb": {"ram": required_ram, "disk": required_disk, "vram": required_vram},
+            "admission_passed": True,
+        })
+        self._admission_sample = record
+        self._admission_checked = True
+        return record
+
+    def _check_resources(self, *, force: bool) -> dict[str, Any]:
+        """Apply the fixed runtime RAM floors; operator reservations are admission-only."""
+        now = time.monotonic()
+        if not force and now - self._last_resource_check < 1.0 and self._resource_samples:
+            last = self._resource_samples[-1]
+            if last.get("phase") == "runtime":
+                return last
+        if not self._runtime_initial_checked:
+            raise H3SetupError("MiniMax H3 runtime monitoring started without the initial 6 GiB RAM check")
+        sample, ram, _disk, _vram = self._read_resource_sample()
+        self._runtime_low_ram_samples = (
+            self._runtime_low_ram_samples + 1 if ram < _LOW_AVAILABLE_RAM_BYTES else 0
+        )
+        record = self._record_resource_sample(sample, phase="runtime", details={
+            "runtime_ram_floor_policy": {
+                "initial_available_ram_bytes": _INITIAL_AVAILABLE_RAM_BYTES,
+                "stop_below_available_ram_bytes": _LOW_AVAILABLE_RAM_BYTES,
+                "consecutive_samples_to_stop": _LOW_RAM_SAMPLES_TO_STOP,
+            },
+            "low_available_ram_consecutive_samples": self._runtime_low_ram_samples,
+        })
+        self._last_resource_check = now
+        if self._runtime_low_ram_samples >= _LOW_RAM_SAMPLES_TO_STOP:
+            raise JobError(JobErrorKind.BUDGET_EXCEEDED,
+                           "H3 available RAM remained below 2 GiB for three runtime samples")
+        return record
+
+    def _check_initial_runtime_resources(self) -> dict[str, Any]:
+        """Enforce the existing 6 GiB prelaunch runtime floor, independent of reservations."""
+        sample, ram, _disk, _vram = self._read_resource_sample()
+        record = self._record_resource_sample(sample, phase="runtime_initial", details={
+            "runtime_ram_floor_policy": {
+                "initial_available_ram_bytes": _INITIAL_AVAILABLE_RAM_BYTES,
+                "stop_below_available_ram_bytes": _LOW_AVAILABLE_RAM_BYTES,
+                "consecutive_samples_to_stop": _LOW_RAM_SAMPLES_TO_STOP,
+            },
+            "initial_available_ram_bytes": ram,
+        })
+        self._last_resource_check = time.monotonic()
+        if ram < _INITIAL_AVAILABLE_RAM_BYTES:
+            raise JobError(JobErrorKind.BUDGET_EXCEEDED,
+                           "H3 available RAM is below the existing 6 GiB initial runtime floor")
+        self._runtime_low_ram_samples = 0
+        self._runtime_initial_checked = True
         return record
 
     def verify_and_export(self, request: H3Request, *, run_rel: str, av_path: str,
@@ -412,12 +536,17 @@ class NativeBackend:
                               "seed": self._attempt_seed,
                               "runtime": self._attempt_provenance,
                               "resource_samples": self._resource_samples,
+                              "listener_before_prompt": self._last_submission_listener,
                               "log_path": run_rel + "/events/runtime-evidence.json",
                               "experimental": request.experimental,
                               "primary_error": {"type": type(exc).__name__, "message": str(exc)},
                               "cleanup": cleanup_record,
                               "cleanup_error": cleanup_error,
-                              "submission_ambiguous": root.resolve(run_rel + "/events/submission-marker.json").exists()}
+                              "submission_ambiguous": (
+                                  root.resolve(run_rel + "/events/submission-marker.json").exists()
+                                  and not root.resolve(run_rel + "/events/submission-response.json").exists()
+                                  and not root.resolve(run_rel + "/events/submission-refused.json").exists()
+                              )}
                     _write_json(root, report_rel, report)
             except BaseException as report_error:  # noqa: BLE001
                 try:
@@ -437,18 +566,29 @@ class NativeBackend:
         run_rel = f"generated/h3/{request.shot_id}/v{request.shot_version:04d}/{request.run_id}"
         if root.resolve(run_rel).exists():
             raise JobError(JobErrorKind.CORRUPT_ARTIFACT, "refusing to overwrite an existing H3 run directory")
+        if self._active is not None or self._children:
+            raise JobError(JobErrorKind.INTERNAL, "MiniMax H3 cannot start while prior owned processes remain tracked")
+        self._tree = None
+        self._session_rel = None
         self._attempt_cfg = cfg
         self._attempt_root = root
         self._attempt_run_rel = run_rel
         self._resource_samples = []
         self._last_resource_check = 0.0
+        self._admission_checked = False
+        self._admission_sample = None
+        self._runtime_initial_checked = False
+        self._runtime_low_ram_samples = 0
+        self._last_listener_identity = None
+        self._last_submission_listener = None
+        self._last_cleanup_error = None
         self._attempt_provenance = {}
         self._attempt_seed = None
         root.make_dir(run_rel)
         root.make_dir(run_rel + "/events")
         root.make_dir(run_rel + "/logs")
         root.make_dir(run_rel + "/bundle")
-        self._check_resources(force=True)
+        self._check_initial_runtime_resources()
         if cancel and cancel():
             raise JobError(JobErrorKind.CANCELLED, "H3 generation cancelled before runtime verification")
         self._verify_cancel = cancel
@@ -493,9 +633,11 @@ class NativeBackend:
         _write_json(repo, session_rel + "/prepared.json", prepared)
         log_rel = session_rel + "/supervisor.log"
         log_path = repo.resolve(log_rel)
+        self._check_admission_resources()
         with log_path.open("xb") as log:
             controller = controller_path
             command = [sys.executable, "-B", str(controller), "serve", "--session", session_rel]
+            self._check_resources(force=True)
             with self._launch_lock:
                 if self._resource_stop.is_set() or self._closed:
                     raise JobError(JobErrorKind.CANCELLED, "H3 supervisor launch blocked by stop or close")
@@ -550,10 +692,23 @@ class NativeBackend:
             root.write_text(run_rel + "/events/submission-request.json", json.dumps({
                 "graph": graph, "prompt_sha256": prompt_hash, "seed": seed,
                 "source_sha256": source_before, "proxy_sha256": proxy["sha256"]}, ensure_ascii=False, allow_nan=False))
-            root.write_text(run_rel + "/events/submission-marker.json", "POST /prompt will be attempted exactly once\n")
+            root.write_text(run_rel + "/events/submission-marker.json",
+                            "POST /prompt will be attempted at most once after listener ownership verification\n")
             # A transport failure here is ambiguous. The marker is retained and no retry is made.
             try:
                 submitted = self._request("POST", "/prompt", {"prompt": graph, "client_id": str(uuid.uuid4())}, timeout=30)
+            except _ListenerOwnershipError as exc:
+                # Ownership failures are definitive refusals, not ambiguous HTTP outcomes.
+                try:
+                    root.write_text(run_rel + "/events/submission-refused.json", json.dumps({
+                        "post_attempted": False, "reason": str(exc),
+                    }, ensure_ascii=False) + "\n")
+                except OSError as record_error:
+                    try:
+                        exc.add_note(f"Ownership refusal evidence could not be persisted: {record_error}")
+                    except AttributeError:
+                        pass
+                raise
             except Exception as exc:
                 raise JobError(JobErrorKind.WORKER_UNREACHABLE,
                                f"H3 /prompt submission outcome is ambiguous; no retry was attempted: {exc}",
@@ -648,21 +803,57 @@ class NativeBackend:
             if source_after != source_before or proxy_after != proxy["sha256"]:
                 raise JobError(JobErrorKind.CORRUPT_ARTIFACT, "H3 source or proxy changed during generation")
         finally:
-            cleanup = self._stop_server(repo, session_rel, process, self._tree)
+            primary_error = sys.exc_info()[1]
+            cleanup: dict[str, Any] = {}
+            try:
+                cleanup = self._stop_server(repo, session_rel, process, self._tree)
+            except BaseException as cleanup_exception:
+                self._last_cleanup_error = {"type": type(cleanup_exception).__name__,
+                                            "message": str(cleanup_exception)}
+                self._unsafe_cleanup = True
+                if primary_error is None:
+                    raise JobError(JobErrorKind.INTERNAL,
+                                   "H3 owned server cleanup could not be verified; GPU lease must remain held",
+                                   cause=cleanup_exception) from cleanup_exception
+                try:
+                    primary_error.add_note(
+                        f"H3 cleanup exception retained separately: {type(cleanup_exception).__name__}: {cleanup_exception}"
+                    )
+                except AttributeError:
+                    pass
             self._active = None
             try:
-                root.write_text(run_rel + "/events/server-stopped.json", json.dumps(cleanup, ensure_ascii=False, allow_nan=False))
+                root.write_text(run_rel + "/events/server-stopped.json",
+                                json.dumps(cleanup, ensure_ascii=False, allow_nan=False))
                 self._copy_runtime_evidence(repo, root, session_rel, run_rel)
             except BaseException as evidence_error:  # noqa: BLE001
-                self._last_cleanup_error = {"cleanup": cleanup,
-                                            "evidence_error": f"{type(evidence_error).__name__}: {evidence_error}"}
-            if not _process_cleanup_verified(cleanup):
-                self._last_cleanup_error = cleanup
+                self._last_cleanup_error = {
+                    **(self._last_cleanup_error or {}),
+                    "evidence_error": f"{type(evidence_error).__name__}: {evidence_error}",
+                }
+            if cleanup and not _process_cleanup_verified(cleanup):
+                physical_error = _cleanup_failure_record(cleanup, physical=True)
+                self._last_cleanup_error = {**(self._last_cleanup_error or {}), **physical_error}
                 self._stop_requested = False
-                raise JobError(JobErrorKind.INTERNAL, "H3 owned server cleanup is unresolved; GPU lease must remain held")
+                if primary_error is None:
+                    raise JobError(JobErrorKind.INTERNAL,
+                                   "H3 owned server cleanup is unresolved; GPU lease must remain held")
+                try:
+                    primary_error.add_note(
+                        "H3 physical cleanup was unresolved; details retained in cleanup_error"
+                    )
+                except AttributeError:
+                    pass
+            if cleanup:
+                outcome_error = _cleanup_failure_record(cleanup, physical=False)
+                if outcome_error:
+                    self._last_cleanup_error = {**(self._last_cleanup_error or {}), **outcome_error}
         if not _cleanup_verified(cleanup):
-            raise JobError(JobErrorKind.BUDGET_EXCEEDED,
-                           "MiniMax H3 native supervisor reported a watchdog cutoff; result is not accepted")
+            failure = _cleanup_failure_record(cleanup, physical=False)
+            self._last_cleanup_error = {**(self._last_cleanup_error or {}), **failure}
+            detail = failure.get("message") or "supervisor shutdown outcome was not successful"
+            raise JobError(JobErrorKind.INTERNAL,
+                           f"MiniMax H3 cleanup outcome failed despite physical cleanup verification: {detail}")
         checked = self.verify_and_export(request, run_rel=run_rel, av_path=av_rel, cancel=cancel)
         if _hash_file(root.resolve(request.video_path), cancel) != source_before:
             raise JobError(JobErrorKind.CORRUPT_ARTIFACT, "H3 source changed during AV validation/export")
@@ -673,6 +864,7 @@ class NativeBackend:
                   "settings": request.model_dump(mode="json"), "experimental": request.experimental,
                   "runtime": runtime["provenance"], "proxy": proxy, "history": history,
                   "server_ready": ready, "cleanup": cleanup, "output": checked,
+                  "listener_before_prompt": self._last_submission_listener,
                   "resource_samples": self._resource_samples,
                   "log_path": run_rel + "/events/runtime-evidence.json",
                   "capacity": "Operator admission reservations; native H3 capacity remains unmeasured."}
@@ -688,17 +880,81 @@ class NativeBackend:
                         audio_channels=checked["audio_channels"], audio_samples_per_channel=checked["audio_samples_per_channel"],
                         seed=seed, experimental=request.experimental)
 
+    def _assert_owned_listener(self, tree: Any, *, action: str) -> dict[str, Any]:
+        """Fail closed unless every 8298 listener is a live PID/create-time in our tree."""
+        prefix = f"MiniMax H3 listener ownership failure before {action}"
+        if tree is None:
+            raise _ListenerOwnershipError(f"{prefix}: owned process tree is unavailable")
+        try:
+            import psutil
+
+            connections = psutil.net_connections(kind="tcp")
+            listeners = [row for row in connections
+                         if row.status == psutil.CONN_LISTEN
+                         and getattr(row.laddr, "port", None) == 8298]
+            if not listeners:
+                raise _ListenerOwnershipError(f"{prefix}: the OS reported no listener on port 8298")
+
+            owned_rows = tree.refresh()
+            if not isinstance(owned_rows, list):
+                raise _ListenerOwnershipError(f"{prefix}: owned process identities could not be read")
+            listener_identities: set[tuple[int, float]] = set()
+            for listener in listeners:
+                pid = listener.pid
+                if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+                    raise _ListenerOwnershipError(f"{prefix}: the OS did not provide a positive listener PID")
+                try:
+                    created = psutil.Process(pid).create_time()
+                except Exception as exc:  # OS denial or PID race is unidentifiable, hence foreign.
+                    raise _ListenerOwnershipError(
+                        f"{prefix}: the OS refused create-time for listener PID {pid}: {type(exc).__name__}: {exc}"
+                    ) from exc
+                if not isinstance(created, (int, float)) or not math.isfinite(float(created)):
+                    raise _ListenerOwnershipError(f"{prefix}: listener PID {pid} has no finite process create-time")
+                created = float(created)
+                member = any(
+                    row.get("pid") == pid
+                    and row.get("live_identity_verified") is True
+                    and row.get("identity_state") == "verified_live"
+                    and row.get("create_time", row.get("created")) == created
+                    for row in owned_rows if isinstance(row, dict)
+                )
+                if not member:
+                    raise _ListenerOwnershipError(
+                        f"{prefix}: listener PID {pid} create-time {created!r} is not a verified member of the owned tree"
+                    )
+                listener_identities.add((pid, created))
+            if len(listener_identities) != 1:
+                raise _ListenerOwnershipError(f"{prefix}: port 8298 has multiple listener process identities")
+        except _ListenerOwnershipError:
+            raise
+        except Exception as exc:  # Incomplete OS process information is not ownership proof.
+            raise _ListenerOwnershipError(
+                f"{prefix}: OS listener PID/create-time membership could not be established: {type(exc).__name__}: {exc}"
+            ) from exc
+        pid, created = next(iter(listener_identities))
+        self._last_listener_identity = {"pid": pid, "create_time": created, "port": 8298,
+                                        "ownership": "verified_member_of_owned_tree", "action": action}
+        return dict(self._last_listener_identity)
+
     def _request(self, method: str, path: str, payload: dict[str, Any] | None = None,
                  *, timeout: float = 10) -> dict[str, Any]:
         if self._http is not None:
             return self._http(method, path, payload, timeout=timeout)
+        # The injected HTTP seam is fixture-only. Real loopback requests always
+        # prove the actual listener identity at the last point before connecting.
         import urllib.request
         req = urllib.request.Request("http://127.0.0.1:8298" + path,
                                      data=None if payload is None else json.dumps(payload, allow_nan=False).encode(),
                                      method=method, headers={"Content-Type": "application/json"})
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(req, timeout=timeout) as response:
-            value = json.loads(response.read())
+        listener_identity = self._assert_owned_listener(self._tree, action=f"{method} {path}")
+        try:
+            with opener.open(req, timeout=timeout) as response:
+                value = json.loads(response.read())
+        finally:
+            if method == "POST" and path == "/prompt":
+                self._last_submission_listener = listener_identity
         if not isinstance(value, dict):
             raise JobError(JobErrorKind.CORRUPT_ARTIFACT, "H3 HTTP response was not an object")
         return value
@@ -711,14 +967,17 @@ class NativeBackend:
         except BaseException as exc:  # noqa: BLE001
             before, before_error = [], f"{type(exc).__name__}: {exc}"
         try:
+            if self._http is None:
+                self._assert_owned_listener(tree, action="owned-server STOP")
             repo.write_text(session_rel + "/STOP", "managed H3 generation complete\n")
         except BaseException as exc:  # noqa: BLE001
             stop_error = f"{type(exc).__name__}: {exc}"
         else:
             stop_error = None
         wait_error = None
+        wait_result: int | None = None
         try:
-            process.wait(timeout=30)
+            wait_result = process.wait(timeout=30)
         except BaseException as exc:  # noqa: BLE001
             wait_error = f"{type(exc).__name__}: {exc}"
             try:
@@ -746,6 +1005,12 @@ class NativeBackend:
             stopped = json.loads(repo.read_text(stopped_rel))
         except BaseException as exc:  # noqa: BLE001
             stopped = {"status": "missing", "error": f"{type(exc).__name__}: {exc}"}
+        if not isinstance(stopped, dict):
+            stopped = {"status": "malformed", "error": "stopped receipt was not a JSON object"}
+        returncode = getattr(process, "returncode", None)
+        if returncode is None and isinstance(wait_result, int) and not isinstance(wait_result, bool):
+            returncode = wait_result
+        stopped["supervisor_returncode"] = returncode
         stopped["outer_tree_before_stop"] = before
         stopped["outer_tree_after_exit"] = after
         stopped["outer_tree_had_live_descendants"] = live_after
@@ -1205,28 +1470,91 @@ def _write_json(root: ProjectRoot, relative: str, value: Any) -> None:
 
 
 def _process_cleanup_verified(receipt: dict[str, Any]) -> bool:
-    """Require fresh process-tree and worker cleanup proof independent of run outcome."""
+    """Verify physical cleanup, without conflating it with supervisor success."""
     cleanup = receipt.get("cleanup")
     return (receipt.get("status") == "stopped" and receipt.get("watchdog_joined") is True
             and isinstance(cleanup, dict) and cleanup.get("verified_stopped") is True
             and not cleanup.get("survivors") and not cleanup.get("failures")
-            and not cleanup.get("unverifiable_identities") and not receipt.get("watchdog_cleanup_error")
-            and not receipt.get("coordinator_wait_error") and not receipt.get("stop_marker_error")
+            and not cleanup.get("unverifiable_identities")
             and not receipt.get("outer_tree_before_error") and not receipt.get("outer_tree_after_error")
-            and not receipt.get("outer_tree_had_live_descendants")
             and _process_tree_verified(receipt.get("outer_tree_cleanup", {}))
             )
 
 
 def _cleanup_verified(receipt: dict[str, Any]) -> bool:
-    """Require physical cleanup plus no independent watchdog failure."""
+    """Require physical cleanup and a successful supervisor/stop outcome."""
     if not _process_cleanup_verified(receipt):
+        return False
+    if receipt.get("supervisor_returncode") != 0:
+        return False
+    if receipt.get("error") not in (None, ""):
+        return False
+    if any(receipt.get(key) for key in ("watchdog_cleanup_error", "coordinator_wait_error",
+                                        "stop_marker_error", "outer_tree_had_live_descendants")):
         return False
     failure = receipt.get("watchdog_failure")
     if failure is None:
         return True
     return (isinstance(failure, dict) and failure.get("type") == "InterruptedError"
             and failure.get("error") == "Creator requested session stop")
+
+
+def _cleanup_failure_record(receipt: dict[str, Any], *, physical: bool) -> dict[str, Any]:
+    """Return separate, serializable evidence for cleanup or outcome failure."""
+    if not isinstance(receipt, dict):
+        return {"type": "NativeCleanupError", "message": "shutdown receipt is not an object",
+                "physical_cleanup_verified": False}
+    cleanup = receipt.get("cleanup")
+    physical_verified = _process_cleanup_verified(receipt)
+    watchdog_failure = receipt.get("watchdog_failure")
+    reasons: list[str] = []
+    if physical:
+        if receipt.get("status") != "stopped":
+            reasons.append(f"supervisor status={receipt.get('status')!r}")
+        if receipt.get("watchdog_joined") is not True:
+            reasons.append("watchdog was not confirmed joined")
+        if not isinstance(cleanup, dict):
+            reasons.append("supervisor cleanup receipt is missing or malformed")
+        else:
+            if cleanup.get("verified_stopped") is not True:
+                reasons.append("supervisor did not verify child-process cleanup")
+            if cleanup.get("survivors"):
+                reasons.append("supervisor cleanup reports survivors")
+            if cleanup.get("failures"):
+                reasons.append("supervisor cleanup reports failures")
+            if cleanup.get("unverifiable_identities"):
+                reasons.append("supervisor cleanup reports unverifiable identities")
+        if receipt.get("outer_tree_before_error") or receipt.get("outer_tree_after_error"):
+            reasons.append("outer process-tree identity observation failed")
+        if not _process_tree_verified(receipt.get("outer_tree_cleanup", {})):
+            reasons.append("outer process-tree cleanup is unverified")
+    else:
+        if not physical_verified:
+            reasons.append("physical process cleanup could not be verified")
+        if receipt.get("supervisor_returncode") != 0:
+            reasons.append(f"supervisor returncode={receipt.get('supervisor_returncode')!r}")
+        if receipt.get("error") not in (None, ""):
+            reasons.append(f"supervisor stopped.error={receipt.get('error')!r}")
+        for key, label in (("watchdog_cleanup_error", "watchdog cleanup error"),
+                           ("coordinator_wait_error", "supervisor wait error"),
+                           ("stop_marker_error", "STOP control error")):
+            if receipt.get(key):
+                reasons.append(f"{label}: {receipt[key]}")
+        if receipt.get("outer_tree_had_live_descendants"):
+            reasons.append("outer process tree required forced descendant cleanup")
+        requested_stop = (isinstance(watchdog_failure, dict)
+                          and watchdog_failure.get("type") == "InterruptedError"
+                          and watchdog_failure.get("error") == "Creator requested session stop")
+        if watchdog_failure is not None and not requested_stop:
+            reasons.append(f"watchdog failure: {watchdog_failure!r}")
+    return {"type": "NativeCleanupError", "message": "; ".join(reasons) or "shutdown outcome failed",
+            "physical_cleanup_verified": physical_verified,
+            "supervisor_returncode": receipt.get("supervisor_returncode"),
+            "stopped_error": receipt.get("error"),
+            "watchdog_cleanup_error": receipt.get("watchdog_cleanup_error"),
+            "coordinator_wait_error": receipt.get("coordinator_wait_error"),
+            "stop_marker_error": receipt.get("stop_marker_error"),
+            "watchdog_failure": watchdog_failure}
 
 
 def _same_api_graph(actual: Any, expected: dict[str, Any]) -> bool:
