@@ -24,7 +24,7 @@ import psutil
 import pytest
 
 from orchestrator.adapters.minimax_h3 import H3Request, MinimaxH3Adapter
-from orchestrator.adapters.minimax_h3.core import build_api_graph
+from orchestrator.adapters.minimax_h3.core import H3SetupError, build_api_graph
 from orchestrator.adapters.minimax_h3.native import NativeBackend
 from orchestrator.domain.entities import Job
 from orchestrator.jobs.lease import GpuLease
@@ -652,6 +652,316 @@ def _port_is_free(port: int) -> bool:
         except OSError:
             return False
         return True
+
+
+def test_owned_descendant_listener_is_accepted_and_foreign_identity_refused(tmp_path, monkeypatch):
+    """A real descendant listener passes; an additional unowned socket identity fails closed."""
+    if not _port_is_free(8298):
+        pytest.skip("port 8298 is already occupied; refusing to touch a listener not created by this test")
+
+    server_code = r'''
+import json, os, sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+sys.path.insert(0, sys.argv[4])
+import psutil
+from orchestrator.platform.containment import ProjectRoot
+root = ProjectRoot(sys.argv[1])
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *_args):
+        pass
+    def do_GET(self):
+        root.append_line('owned-listener-requests.jsonl', json.dumps({'path': self.path, 'pid': os.getpid()}))
+        body = json.dumps({'path': self.path, 'pid': os.getpid()}).encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+server = ThreadingHTTPServer(('127.0.0.1', int(sys.argv[2])), Handler)
+root.write_text(sys.argv[3], json.dumps({'pid': os.getpid(), 'create_time': psutil.Process(os.getpid()).create_time(),
+                                        'parent_pid': os.getppid(), 'port': server.server_port}))
+server.serve_forever(poll_interval=.05)
+'''
+    worker_code = r'''
+import json, os, subprocess, sys, time
+import psutil
+sys.path.insert(0, sys.argv[3])
+from orchestrator.platform.containment import ProjectRoot
+root = ProjectRoot(sys.argv[2])
+root.write_text('owned-worker-self.json', json.dumps({'pid': os.getpid(),
+                'create_time': psutil.Process(os.getpid()).create_time(), 'parent_pid': os.getppid()}))
+server = subprocess.Popen([sys.executable, '-B', '-c', sys.argv[1], sys.argv[2], '8298',
+                           'owned-listener-ready.json', sys.argv[3]],
+                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                          creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+root.write_text('owned-server-launcher.json', json.dumps({'pid': server.pid,
+                'create_time': psutil.Process(server.pid).create_time(), 'parent_pid': os.getpid()}))
+while server.poll() is None:
+    time.sleep(.02)
+'''
+    launcher_code = r'''
+import json, os, subprocess, sys, time
+import psutil
+sys.path.insert(0, sys.argv[4])
+from orchestrator.platform.containment import ProjectRoot
+root = ProjectRoot(sys.argv[3])
+root.write_text('owned-launcher-self.json', json.dumps({'pid': os.getpid(),
+                'create_time': psutil.Process(os.getpid()).create_time(), 'parent_pid': os.getppid()}))
+worker = subprocess.Popen([sys.executable, '-B', '-c', sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]],
+                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                          creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+root.write_text('owned-worker-launcher.json', json.dumps({'pid': worker.pid,
+                'create_time': psutil.Process(worker.pid).create_time(), 'parent_pid': os.getpid()}))
+while worker.poll() is None:
+    time.sleep(.02)
+'''
+    foreign_code = r'''
+import json, os, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+sys.path.insert(0, sys.argv[3])
+import psutil
+from orchestrator.platform.containment import ProjectRoot
+root = ProjectRoot(sys.argv[1])
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *_args):
+        pass
+server = HTTPServer(('127.0.0.1', 0), Handler)
+root.write_text('foreign-listener-ready.json', json.dumps({'pid': os.getpid(),
+                'create_time': psutil.Process(os.getpid()).create_time(),
+                'parent_pid': os.getppid(), 'port': server.server_port}))
+server.serve_forever(poll_interval=.05)
+'''
+
+    project = ProjectRoot(tmp_path)
+    temp = str(project.make_dir("_work/owned-listener-temp"))
+    env = dict(os.environ)
+    env.update({"TEMP": temp, "TMP": temp, "TMPDIR": temp})
+    repository = ProjectRoot(Path(__file__).resolve().parents[3])
+    popen_calls: list[list[str]] = []
+
+    def owned_popen(argv: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
+        popen_calls.append(list(argv))
+        return subprocess.Popen(argv, **kwargs)
+
+    backend = NativeBackend(project, Settings(), popen=owned_popen, repository_root=repository)
+
+    command = [sys.executable, "-B", "-c", launcher_code, worker_code, server_code,
+               str(project.path), str(repository.path)]
+    process: subprocess.Popen[bytes] | None = None
+    foreign: subprocess.Popen[bytes] | None = None
+    tree: Any = None
+    identities: list[tuple[int, float]] = []
+    cleanup_errors: list[str] = []
+    original_net_connections = psutil.net_connections
+    try:
+        process = backend._launch_popen(
+            command, cwd=project.path, env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        root_created = psutil.Process(process.pid).create_time()
+        identities.append((process.pid, root_created))
+        tree = backend._owned_tree(process)
+        tree.graceful_seconds = 1.0
+        tree.forced_seconds = 1.0
+        backend._tree = tree
+        _wait_for(lambda: project.resolve("owned-listener-ready.json").is_file())
+        listener = json.loads(project.read_text("owned-listener-ready.json"))
+        launcher = json.loads(project.read_text("owned-launcher-self.json"))
+        worker_launcher = json.loads(project.read_text("owned-worker-launcher.json"))
+        worker = json.loads(project.read_text("owned-worker-self.json"))
+        server_launcher = json.loads(project.read_text("owned-server-launcher.json"))
+        launcher_pid = int(launcher["pid"])
+        worker_launcher_pid = int(worker_launcher["pid"])
+        worker_pid = int(worker["pid"])
+        server_launcher_pid = int(server_launcher["pid"])
+        listener_pid = int(listener["pid"])
+        identities.extend((
+            (launcher_pid, float(launcher["create_time"])),
+            (worker_launcher_pid, float(worker_launcher["create_time"])),
+            (worker_pid, float(worker["create_time"])),
+            (server_launcher_pid, float(server_launcher["create_time"])),
+            (listener_pid, float(listener["create_time"])),
+        ))
+
+        owned_rows = tree.refresh()
+        tree_rows = {int(row["pid"]): row for row in owned_rows if isinstance(row, dict) and "pid" in row}
+        listener_rows = [row for row in original_net_connections(kind="tcp")
+                         if row.status == psutil.CONN_LISTEN and getattr(row.laddr, "port", None) == 8298]
+        actual_socket_pid = listener_rows[0].pid if len(listener_rows) == 1 else None
+        actual_socket_created = (psutil.Process(actual_socket_pid).create_time()
+                                 if isinstance(actual_socket_pid, int) and actual_socket_pid > 0 else None)
+        observed_parent_pairs = [
+            (launcher_pid, psutil.Process(launcher_pid).ppid()),
+            (worker_launcher_pid, psutil.Process(worker_launcher_pid).ppid()),
+            (worker_pid, psutil.Process(worker_pid).ppid()),
+            (server_launcher_pid, psutil.Process(server_launcher_pid).ppid()),
+            (listener_pid, psutil.Process(listener_pid).ppid()),
+        ]
+        assert len(popen_calls) == 1 and popen_calls[0] == command, (
+            f"adapter popen seam was not used exactly once for the listener launcher; observed calls={len(popen_calls)}"
+        )
+        assert len(listener_rows) == 1 and actual_socket_pid == listener_pid, (
+            f"OS socket owner did not match the real listener process; observed rows="
+            f"{[(getattr(row, 'pid', None), getattr(row.laddr, 'port', None), row.status) for row in listener_rows]!r}, "
+            f"ready identity={listener!r}"
+        )
+        assert actual_socket_pid != process.pid, (
+            f"expected socket owner to be a descendant rather than Popen PID {process.pid}; observed socket PID={actual_socket_pid}"
+        )
+        assert actual_socket_created == float(listener["create_time"]), (
+            f"OS listener PID/create-time differed from child report; observed={(actual_socket_pid, actual_socket_created)!r}, "
+            f"reported={(listener_pid, listener['create_time'])!r}"
+        )
+        records = [launcher, worker_launcher, worker, server_launcher, listener]
+        recorded_parent_pairs = [(int(item["pid"]), int(item["parent_pid"])) for item in records]
+        tree_parent_pairs = [(pid, int(tree_rows[pid]["parent_pid"])) for pid, _parent in recorded_parent_pairs
+                             if pid in tree_rows and tree_rows[pid].get("parent_pid") is not None]
+        assert observed_parent_pairs == recorded_parent_pairs and tree_parent_pairs == recorded_parent_pairs, (
+            f"process ancestry measurements disagreed between fixture, OS, and OwnedProcessTree; "
+            f"fixture={recorded_parent_pairs!r}, OS={observed_parent_pairs!r}, tree={tree_parent_pairs!r}"
+        )
+        ancestry: list[int] = []
+        ancestry_seen: set[int] = set()
+        ancestry_pid = listener_pid
+        while ancestry_pid in tree_rows and ancestry_pid not in ancestry_seen:
+            ancestry_seen.add(ancestry_pid)
+            ancestry.append(ancestry_pid)
+            parent_pid = tree_rows[ancestry_pid].get("parent_pid")
+            if parent_pid is None:
+                break
+            ancestry_pid = int(parent_pid)
+        assert (ancestry and ancestry[0] == listener_pid and ancestry[-1] == process.pid
+                and len(ancestry) >= 3 and tree_rows[listener_pid].get("parent_pid") != process.pid), (
+            f"socket owner was not a non-direct descendant reachable from the Popen identity; "
+            f"observed ancestry={ancestry!r}, Popen PID={process.pid}, socket PID={listener_pid}, "
+            f"tree rows={tree_rows!r}"
+        )
+        assert all(
+            pid in tree_rows and tree_rows[pid].get("live_identity_verified") is True
+            and tree_rows[pid].get("identity_state") == "verified_live"
+            for pid in (process.pid, launcher_pid, worker_launcher_pid, worker_pid, server_launcher_pid, listener_pid)
+        ), f"OwnedProcessTree did not verify the full live ancestry; observed tree rows={tree_rows!r}"
+
+        accepted_identity = backend._assert_owned_listener(tree, action="positive ownership test")
+        response = backend._request("GET", "/owned-positive-probe", timeout=3)
+        assert accepted_identity["pid"] == listener_pid and accepted_identity["create_time"] == actual_socket_created, (
+            f"ownership verifier did not return the measured descendant listener identity; observed={accepted_identity!r}, "
+            f"socket={(actual_socket_pid, actual_socket_created)!r}"
+        )
+        assert response == {"path": "/owned-positive-probe", "pid": listener_pid}, (
+            f"owned request did not reach and receive the real descendant listener response; observed={response!r}"
+        )
+        last_identity = backend._last_listener_identity
+        assert (last_identity is not None and last_identity["pid"] == accepted_identity["pid"]
+                and last_identity["create_time"] == accepted_identity["create_time"]
+                and last_identity["action"] == "GET /owned-positive-probe"
+                and _identity_alive(listener_pid, float(listener["create_time"]))), (
+            f"accepted listener identity was not retained while its process remained live; identity="
+            f"{last_identity!r}, alive={_identity_alive(listener_pid, float(listener['create_time']))}"
+        )
+
+        foreign_env = dict(env)
+        foreign = subprocess.Popen(
+            [sys.executable, "-B", "-c", foreign_code, str(project.path), str(project.path), str(repository.path)],
+            cwd=project.path, env=foreign_env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        foreign_created = psutil.Process(foreign.pid).create_time()
+        identities.append((foreign.pid, foreign_created))
+        _wait_for(lambda: project.resolve("foreign-listener-ready.json").is_file())
+        foreign_identity = json.loads(project.read_text("foreign-listener-ready.json"))
+        foreign_pid = int(foreign_identity["pid"])
+        foreign_created = float(foreign_identity["create_time"])
+        identities.append((foreign_pid, foreign_created))
+        foreign_rows = [row for row in original_net_connections(kind="tcp")
+                        if row.status == psutil.CONN_LISTEN
+                        and getattr(row.laddr, "port", None) == int(foreign_identity["port"])
+                        and row.pid == foreign_pid]
+        tree_rows_with_foreign = {int(row["pid"]): row for row in tree.refresh()
+                                  if isinstance(row, dict) and "pid" in row}
+        assert foreign_rows and _identity_alive(foreign_pid, foreign_created), (
+            f"second loopback listener was not live and visible to the OS; observed rows={foreign_rows!r}, "
+            f"identity={foreign_identity!r}"
+        )
+        assert foreign_pid not in tree_rows_with_foreign, (
+            f"second process unexpectedly appeared in the adapter-owned tree; foreign PID={foreign_pid}, "
+            f"tree PIDs={sorted(tree_rows_with_foreign)}"
+        )
+
+        # Keep both real listeners alive. Windows cannot bind a second exclusive
+        # listener to 8298, so report the foreign listener's real PID/create-time
+        # as an additional OS row for 8298 and exercise the verifier's all-rows rule.
+        def report_foreign_on_target_port(kind: str = "inet") -> list[Any]:
+            rows = original_net_connections(kind=kind)
+            actual_foreign = next((row for row in rows if row.pid == foreign_pid
+                                   and row.status == psutil.CONN_LISTEN
+                                   and getattr(row.laddr, "port", None) == int(foreign_identity["port"])), None)
+            if actual_foreign is None:
+                return rows
+            foreign_target_identity = SimpleNamespace(
+                family=actual_foreign.family, type=actual_foreign.type,
+                laddr=SimpleNamespace(ip="127.0.0.1", port=8298), raddr=(),
+                status=actual_foreign.status, pid=foreign_pid,
+            )
+            return [*rows, foreign_target_identity]
+
+        with monkeypatch.context() as os_probe:
+            os_probe.setattr(psutil, "net_connections", report_foreign_on_target_port)
+            with pytest.raises(H3SetupError) as refused:
+                backend._request("GET", "/must-not-reach-unowned-listener", timeout=3)
+        refusal = str(refused.value)
+        request_log = [json.loads(line) for line in project.read_text("owned-listener-requests.jsonl").splitlines()]
+        assert "listener ownership failure" in refusal.lower() and str(foreign_pid) in refusal, (
+            f"unowned listener identity was not the reason for refusal; observed error={refusal!r}, foreign PID={foreign_pid}"
+        )
+        assert all(row["path"] != "/must-not-reach-unowned-listener" for row in request_log), (
+            f"request reached the owned listener despite an unowned OS-reported listener identity; observed requests={request_log!r}"
+        )
+        assert _identity_alive(listener_pid, float(listener["create_time"])) and _identity_alive(foreign_pid, foreign_created), (
+            f"ownership refusal altered a listener process; owned alive={_identity_alive(listener_pid, float(listener['create_time']))}, "
+            f"foreign alive={_identity_alive(foreign_pid, foreign_created)}"
+        )
+    finally:
+        try:
+            backend.close()
+        except BaseException as exc:  # cleanup fallback below remains mandatory
+            cleanup_errors.append(f"backend.close: {type(exc).__name__}: {exc}")
+        if tree is not None:
+            try:
+                identities.extend((int(row["pid"]), float(row.get("create_time", row.get("created"))))
+                                  for row in tree.refresh() if isinstance(row, dict) and row.get("pid") is not None
+                                  and row.get("create_time", row.get("created")) is not None)
+            except BaseException as exc:
+                cleanup_errors.append(f"owned tree final refresh: {type(exc).__name__}: {exc}")
+        for pid, created in dict.fromkeys(identities):
+            try:
+                _kill_identity(pid, created)
+            except BaseException as exc:
+                cleanup_errors.append(f"identity {pid}/{created}: {type(exc).__name__}: {exc}")
+        for child in (foreign, process):
+            if child is not None:
+                try:
+                    child.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    try:
+                        child.kill()
+                        child.wait(timeout=3)
+                    except BaseException as exc:
+                        cleanup_errors.append(f"Popen PID {child.pid}: {type(exc).__name__}: {exc}")
+                except BaseException as exc:
+                    cleanup_errors.append(f"Popen PID {child.pid}: {type(exc).__name__}: {exc}")
+        survivors = [(pid, created) for pid, created in dict.fromkeys(identities)
+                     if _identity_alive(pid, created)]
+        remaining_listeners = [row for row in original_net_connections(kind="tcp")
+                               if row.status == psutil.CONN_LISTEN and getattr(row.laddr, "port", None) == 8298]
+        port_free = _port_is_free(8298)
+        assert not cleanup_errors and not survivors, (
+            f"test process cleanup was not verified; cleanup errors={cleanup_errors!r}, surviving identities={survivors!r}"
+        )
+        assert not remaining_listeners and port_free, (
+            f"port 8298 was not free after cleanup; OS listener rows={remaining_listeners!r}, bind check free={port_free}"
+        )
 
 
 def _foreign_listener_state(case: SimpleNamespace) -> dict[str, Any]:
