@@ -359,6 +359,27 @@ be **recursive** (a dynamic combo nested inside a dynamic combo), not one level 
 callers must use it. Reimplementing it a third time inside `native.py` would guarantee the
 next drift. This needs a contract decision before code.
 
+> **CORRECTION, same day — read `SCHEMA_VALIDATION_CONTRACT.md` instead of the paragraphs
+> above.** Reading the pinned ComfyUI source (`comfy_extras/nodes_video.py` lines 76-166)
+> settled three things this section got wrong:
+>
+> 1. **The adapter's graph is correct.** `format`, `format.codec`,
+>    `format.codec.encoding` and the bare `codec` are *all* legitimate inputs in 0.44.0 —
+>    `format` nests `codec` nests `encoding` nests `crf`, and `codec` really is a
+>    top-level optional hidden input, which is why the error named the dotted pair but not
+>    `codec`. Do not "fix" this by trimming the graph.
+> 2. **`local_h3.py` is not the reference and must not be shared from.** Its expansion is
+>    one level only, so it could not validate `format.codec.encoding` either. It is a
+>    subset, not the solution, and its SHA-256 is recorded in every provenance receipt —
+>    editing it changes that receipt. "Both callers must use it" was wrong.
+> 3. The real requirement is **value-directed recursion**: a dotted input exists only
+>    because of the selection made at the level above it. A flatten-all-options fix would
+>    accept `format.codec.encoding` under a codec that does not offer it, which is a
+>    weakening disguised as a fix.
+>
+> The characterisation of this as a drifted duplicate was half right: the duplication is
+> real, but recursion is genuinely new work, not a copy job.
+
 ## A3.3 — the real process tree is THREE deep, not five
 
 A1.2 flagged as unverified that the synthetic chain might not match ComfyUI's real
