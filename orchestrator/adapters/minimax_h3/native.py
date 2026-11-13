@@ -28,6 +28,7 @@ from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.platform.settings import Settings
 
 from .core import H3Request, H3Result, H3SetupError, build_api_graph
+from .schema import DYNAMIC_COMBO, dynamic_combo_option_keys, resolve_node_inputs
 
 _CATALOG_SHA256 = "d44bbcebfdf2635f9a9ca9c1e37e7788fac57bb9fde021a9d1132ab08649b6e5"
 _DOC_CATALOG_SHA256 = "9712c30a721268abc77ad1eac92e266a23737f5555c3ebdc04e0775282ebb5a1"
@@ -1583,25 +1584,42 @@ def _validate_live_schema(graph: dict[str, Any], schema: dict[str, Any]) -> int:
     for node in graph.values():
         details = schema[node["class_type"]]
         inputs = details.get("input", {})
-        required = inputs.get("required", {})
-        optional = inputs.get("optional", {})
-        known = set(required) | set(optional)
-        absent = set(node["inputs"]) - known
-        if absent:
-            raise H3SetupError(f"Installed schema for {node['class_type']} lacks inputs: {sorted(absent)}")
+        # A dynamic-combo input carries further inputs inside the option the graph
+        # selected, and those nest again, so a dotted name such as
+        # `format.codec.encoding` is never a key of the flat required/optional mapping.
+        # Comparing against that flat set rejected this adapter's own correct graph; see
+        # SCHEMA_VALIDATION_CONTRACT.md. Resolution follows the graph's own selections, so
+        # a sub-input the chosen option does not offer stays absent and is still refused.
+        resolved = resolve_node_inputs(inputs, node["inputs"])
+        # Values that resolved are checked first, deliberately. An invalid dynamic-combo
+        # selection makes its own sub-inputs unresolvable, so reporting absence first would
+        # name the symptom (`format.codec` is missing) instead of the cause (`format` was
+        # set to something the server does not offer).
         for name, value in node["inputs"].items():
-            descriptor = required.get(name, optional.get(name))
+            if name not in resolved:
+                continue
+            descriptor = resolved[name]
             if not isinstance(descriptor, list) or not descriptor:
                 raise H3SetupError(f"Installed schema descriptor for {node['class_type']}.{name} is malformed")
             choices = descriptor[0]
             options = descriptor[1] if len(descriptor) > 1 and isinstance(descriptor[1], dict) else {}
             if isinstance(choices, list) and value not in choices and not isinstance(value, list):
                 raise H3SetupError(f"Installed schema rejects {node['class_type']}.{name}={value!r}")
+            if choices == DYNAMIC_COMBO:
+                # Previously unchecked: descriptor[0] is a type name here, not a list of
+                # choices, so the membership test above never applied to a dynamic combo.
+                # Resolving options makes the selection checkable, so check it.
+                keys = dynamic_combo_option_keys(descriptor)
+                if keys is not None and value not in keys and not isinstance(value, list):
+                    raise H3SetupError(f"Installed schema rejects {node['class_type']}.{name}={value!r}")
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 if isinstance(options.get("min"), (int, float)) and value < options["min"]:
                     raise H3SetupError(f"Installed schema minimum for {node['class_type']}.{name} is {options['min']}")
                 if isinstance(options.get("max"), (int, float)) and value > options["max"]:
                     raise H3SetupError(f"Installed schema maximum for {node['class_type']}.{name} is {options['max']}")
+        absent = set(node["inputs"]) - set(resolved)
+        if absent:
+            raise H3SetupError(f"Installed schema for {node['class_type']} lacks inputs: {sorted(absent)}")
     noise = schema.get("RandomNoise", {}).get("input", {}).get("required", {}).get("noise_seed")
     try:
         maximum = int(noise[1]["max"])

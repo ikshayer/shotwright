@@ -174,3 +174,94 @@ are the most valuable part of the report.**
 In particular, answer: does any node in the adapter's graph other than `SaveVideo` and
 `MiniMaxH3ReferenceToVideo` carry a nested or autogrow input that this contract failed to
 anticipate?
+
+---
+
+# Amendment 1 — implemented, and four things this contract got wrong
+
+Implemented on `h3-blockers-verify`. `orchestrator/adapters/minimax_h3/schema.py` is new;
+`native.py::_validate_live_schema` now resolves instead of comparing against the flat key
+set. Ruff clean. H3 + API suites **133 passed, 0 failed**.
+
+## A1.1 — the evidence ordering
+
+1. Tests written against this contract, before any implementation: **collection error**
+   (no module).
+2. Resolver added, validator deliberately **untouched**: **16 passed, 2 failed** — and the
+   regression test failed with the *verbatim* production message from the GPU run,
+   `Installed schema for SaveVideo lacks inputs: ['format.codec', 'format.codec.encoding']`.
+3. Validator switched to the resolver: **18 passed**.
+4. Full H3 + API suites: 20 pre-existing tests broke; cause found and fixed (A1.2);
+   **133 passed**.
+
+Two of my own tests passed pre-fix for the wrong reason and were tightened: the nested
+bounds test now demands the actual `maximum ... 51.0` refusal rather than any error
+mentioning `crf`, and the combo-value test now demands the rejected value be named, so a
+cascading `format.codec` error cannot satisfy it by accident.
+
+## A1.2 — THE OMISSION THAT MATTERED: flat-declared dotted names
+
+**This contract never considered that a schema may declare a dotted name at top level.**
+The first implementation therefore always walked the option tree, and **broke 20 existing
+tests**: `tests/adapters/minimax_h3/test_native_process.py::schema_for` builds its protocol
+fixtures by declaring *every* graph input — dotted ones included — as a flat key.
+
+The fixtures were right and the implementation was wrong. A schema that publishes
+`format.codec` as a top-level key **has declared it**, and resolution must not second-guess
+that. Resolution now takes an exact flat declaration first and walks the option tree only
+when there is none, which makes the resolver a **strict superset** of the flat membership
+test it replaced — the safest available shape for this change, and what the contract should
+have demanded outright. Two tests now lock the precedence in, including one proving a flat
+declaration does **not** rescue a genuinely undeclared dotted name.
+
+## A1.3 — three factual errors in this contract, found by checking the real schema
+
+- **"The adapter's own graph uses `MiniMaxH3ReferenceToVideo`, so this path is
+  reachable" is wrong.** The adapter's graph (`core.py::build_api_graph`) uses the Easy
+  plugin nodes — `MiniMaxH3EasyLoader`, `MiniMaxH3Easy`, `MiniMaxH3EasyOutput`,
+  `MiniMaxH3EasyMediaLoader`. `MiniMaxH3ReferenceToVideo` belongs to the **spike helper's**
+  graph, not the adapter's. **`COMFY_AUTOGROW_V3` is not on the critical path**; it is
+  implemented and tested defensively. The only dotted inputs in the entire adapter graph are
+  `format.codec` and `format.codec.encoding` on node `12`.
+- **Test 4 is unsatisfiable against the real schema.** It asks for a `format` value whose
+  option does not offer `codec`; all five real options (`auto`, `mp4`, `mkv`, `webm`, `mov`)
+  offer it. A clearly-labelled synthetic descriptor covers the rule instead, alongside a
+  real-schema negative.
+- **The obvious choice for the value-direction negative would have been wrong.** `av1`
+  *also* offers `encoding`. Only `auto` is bare, so `format.codec = "auto"` is the real
+  negative case. Anyone writing that test from intuition would have picked `av1` and
+  produced a test that passes under a flatten-all implementation.
+
+## A1.4 — two improvements beyond the contract's minimum
+
+- **Dynamic-combo values were never validated at all.** For a dynamic combo
+  `descriptor[0]` is the type name `"COMFY_DYNAMICCOMBO_V3"`, not a list of choices, so the
+  existing membership test skipped it silently. `format` could have been set to anything.
+  Resolving options makes the selection checkable, so it is now checked against the option
+  keys. This is a pre-existing hole this contract did not name.
+- **Value checks now run before the absence check.** An invalid selection makes its own
+  sub-inputs unresolvable, so the old order reported `lacks inputs: ['format.codec']` — the
+  symptom — when the cause was `format` being set to an unavailable value.
+
+## A1.5 — the fixture, and a timing discrepancy
+
+`tests/adapters/minimax_h3/data/object_info_pinned_0_44_0.json`: **39,597 bytes**, sha256
+`2cf0abaf2b98048a2f44e795ae962458b1a5db1466435d250f653c5ea0f0d701`, **14 of the live
+response's 710 classes**, each copied verbatim. Full response was 1,199,617 bytes, sha256
+`a63c24e3bee96a382a898d4117a08476d0ae31fc435315c87a5ac902000c4aca`. Provenance and the
+dropped-class list are in the `.README.md` beside it.
+
+**The capture reached HTTP 200 on `/object_info` in 30.4 s**, against the **166.3 s** the
+adapter took to reach *its own* ready signal in the GPU run. The adapter waits on more than
+a responding HTTP server. Worth understanding before anyone trims
+`startup_allowance_seconds` on the strength of the 30 s figure — **do not**.
+
+Cleanup on the capture was clean: 3-process tree, zero survivors, port 8298 released.
+
+## A1.6 — what this does NOT close
+
+Unchanged by this work: listener ownership is still unverified
+(`listener_before_prompt` was null, and no run has reached `POST /prompt`); the four
+mandatory reservation numbers are still unmeasured; `compose_h3_request`'s service binding
+still has no project to bind to. **The next GPU run is the first that can reach submission,
+and it is not authorised by this contract.**
