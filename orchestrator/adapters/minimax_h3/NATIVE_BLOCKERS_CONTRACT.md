@@ -297,3 +297,166 @@ comment now states where the guarantee actually lives.
   `line-length` and `target-version`, with no `select`, yet `BLE001`, `I001`, `TRY` and
   `PL` all fire). `E501` is **not** enforced, which is why long `noqa` justifications are
   acceptable and why existing lines already exceed 100 columns.
+
+---
+
+# Amendment 3 — the first authorised GPU run: Stage A passed, Stage B found a real defect
+
+Creator authorised Stages A and B on 2026-11-13. **The adapter has now run against the
+real pinned runtime for the first time.** Stage A passed. Stage B failed, on a blocking
+adapter defect that no fixture could have found. The failure is the most valuable result
+of this round, and it is **not** a resource or ownership failure.
+
+## A3.1 — Stage A passed: real `verify_runtime()`, 79.9 s
+
+Real hash verification, no model load, no GPU. All four pinned models verified:
+
+| role | file | bytes |
+|---|---|---|
+| diffusion | `MiniMax-H3_Ref2VA-NVFP4.safetensors` | 11,663,443,448 |
+| text_encoder | `qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors` | 15,687,142,551 |
+| video_vae | `minimax_h3_video_vae_int8_convrot.safetensors` | 2,811,065,184 |
+| audio_vae | `minimax_h3_audio_vae_fp32.safetensors` | 605,254,808 |
+
+**28.65 GB of weights against 11.94 GB of VRAM**, so whole-model residency is impossible
+on this card by arithmetic. Seven provenance receipts resolved (catalog, controller,
+helper, plugin, source, easy-stage, model). Pinned ComfyUI is **0.44.0** at source commit
+`2c75dc1b379a59e0880619d029607af5169a62ef`, living under
+`spikes/22_minimax_h3_workflows/_work/local_runtime/source/ComfyUI` — **`D:\ComfyUI_3` was
+never touched**, as required.
+
+## A3.2 — BLOCKING DEFECT: `_validate_live_schema` cannot see dynamic-combo sub-inputs
+
+```
+H3SetupError: Installed schema for SaveVideo lacks inputs:
+  ['format.codec', 'format.codec.encoding']
+```
+
+`native.py::_validate_live_schema` computes `known = set(required) | set(optional)` from
+`/object_info` and rejects any graph input not in that **flat** set. But the adapter's graph
+carries dotted sub-input names, and ComfyUI 0.44.0 exposes `SaveVideo.format` as a
+`COMFY_DYNAMICCOMBO_V3` whose sub-inputs live nested under
+`format[1]["options"][k]["inputs"]["required"]`. Those dotted names therefore **can never
+appear** in the flat set, so this check cannot pass — the run dies before `POST /prompt`.
+
+**The spike helper already solves this and the adapter reimplemented it without the
+expansion.** `spikes/22_minimax_h3_workflows/local_h3.py` (lines ~801-816) expands both
+shapes before comparing:
+
+```python
+mp4 = next(option for option in formats[1]["options"] if option["key"] == "mp4")
+available["format.codec"] = mp4["inputs"]["required"]["codec"]
+# and for COMFY_AUTOGROW_V3:
+available["ref_videos.ref_video_0"] = template["input"]["required"]["ref_video"]
+```
+
+This is duplicated logic that drifted — the same defect shape as the eight seam breaks
+already recorded, in a new costume. Two layers of drift, not one: the adapter also expects
+`format.codec.encoding`, which `local_h3.py` does **not** synthesise, so the expansion must
+be **recursive** (a dynamic combo nested inside a dynamic combo), not one level deep.
+
+**Fix direction, not yet decided:** the expansion must exist in exactly one place and both
+callers must use it. Reimplementing it a third time inside `native.py` would guarantee the
+next drift. This needs a contract decision before code.
+
+## A3.3 — the real process tree is THREE deep, not five
+
+A1.2 flagged as unverified that the synthetic chain might not match ComfyUI's real
+ancestry. **It does not.** Measured from `cleanup.outer_tree_before_stop`:
+
+```
+150984 (root) -> 39960 -> 25388 (ComfyUI main.py) -> {37596, 150752}
+                        \-> 44548
+```
+
+Six processes, with ComfyUI's main process **two levels below the outer root** — against the
+**five** levels Amendment 1 measured synthetically. A check that handles five handles three,
+so the depth is not a problem; but the synthetic chain was **not representative**, and
+anyone reasoning from A1.2's figure would be wrong.
+
+**Still unverified, and it is now the top open risk:** `listener_before_prompt` is **null**.
+The ownership check fires immediately before `POST /prompt` and the schema defect kills the
+run earlier, so **the socket-owner PID was never matched against the owned tree**. The
+binary question — can the adapter recognise its own server — remains unanswered. The tree
+resolves and is fully identified (`identity_state: "verified_live"` for all six), so the
+remaining risk is lower than before, but it is not zero and not closed.
+
+## A3.4 — cleanup and the stop path are validated against reality
+
+This is what fixtures could never prove, and it worked:
+
+- `outer_tree_before_stop`: all six processes `verified_live`.
+- `outer_tree_after_exit`: all six `not_live_or_identity_mismatch` — **every process dead**.
+- `outer_tree_had_live_descendants: false`; `watchdog_joined: true`;
+  `outer_tree_cleanup.events: []` (nothing left to kill).
+- Independently confirmed after the run: **port 8298 free, no surviving pinned-runtime
+  python, VRAM back to its 1,086 MiB baseline.**
+
+**Blocker 4 is validated in the real path.** `physical_cleanup_verified: true` with
+`supervisor_returncode: 0` and `stopped_error: null`, yet the outcome is still recorded as
+`NativeCleanupError("shutdown outcome failed")` — cleanup verification did **not** get
+collapsed into success, and both the primary and the cleanup error are retained separately.
+
+## A3.5 — blocker 1's ordering is correct in the real path
+
+The report lists resource phases as `runtime_initial, runtime, runtime, admission,
+runtime`, which looks like admission running fourth. It is not. By timestamp, every sample
+including `admission` (17:33:34) precedes the server launch (`baseline` 17:33:35.678), and
+`runtime_initial` at 17:32:34 belongs to the FFmpeg proxy stage ~60 s earlier. **Admission
+ran once, before launch, and passed.** Do not "fix" this ordering.
+
+## A3.6 — measured, and what is still unmeasured
+
+Measured:
+
+- **ComfyUI startup to ready: 166.3 s** (`started_utc` 17:33:35.69 → `ready_utc`
+  17:36:21.98), against `startup_allowance_seconds = 600`. Adequate, but only ~3.6x
+  headroom, and this was with `--cache-none` and **no model load**. A real load will eat
+  into that; do not treat 600 as proven.
+- Whole run to failure: 233.2 s.
+- RAM available stayed **13.85-15.00 GB throughout** and did not fall; server startup is
+  cheap in RAM.
+- Launch flags confirm good containment: `--offline --disable-all-custom-nodes
+  --whitelist-custom-nodes ComfyUI-MiniMaxH3-Easy --cache-none`, with every directory
+  redirected into the managed session.
+
+**Still unmeasured, because the model never loaded** (VRAM peaked at 1,310 MiB, barely over
+the 1,028 MiB idle baseline):
+
+- `required_vram_gb`, `required_ram_gb`, `required_disk_gb`, `throughput_floor_per_second`
+  — **the primary objective of the run, and it was not achieved.** The provisional
+  `8.0 / 8.0 / 10.0 / 0.01` used here are admission-passing placeholders, nothing more.
+- The runtime 2-GiB floor was never stressed.
+- Blocker 2's timestamp handling was exercised only as far as the proxy stage.
+
+## A3.7 — A1.5's report-schema gap is now closed by observation
+
+The test author **assumed** `primary_error` / `cleanup_error`. The implementation uses
+exactly those names, plus `cleanup`, `listener_before_prompt`, `submission_ambiguous`,
+`resource_samples`, `seed`, `runtime` and `log_path`. `stopped_error` exists nested inside
+`cleanup_error`, not at top level as A1.5 guessed. The assumption was right; it is now
+evidence rather than a guess.
+
+## A3.8 — a deliberate stop is recorded as a cleanup failure
+
+The only reason the shutdown outcome failed is
+`watchdog_failure: InterruptedError("Creator requested session stop")` — our own requested
+stop after the primary error. Resources released correctly, so this fails in the safe
+direction, but **every aborted run will now carry a cleanup failure that did not happen.**
+That is noise which can mask a genuine one. Worth distinguishing a requested stop from an
+unexpected watchdog interruption.
+
+## A3.9 — what Stage B did NOT exercise, and why
+
+`compose_h3_request` binds to a hash-verified `MASTER`/`DEGRADED` `ShotOutput`. **There is
+no `projects` directory and no `settings.toml` anywhere on this machine**, so that path
+would have required building the entire Phase 1 render chain first — itself unaccepted
+(§4.3 criterion 5, FR-04). Stage B therefore drove `NativeBackend.execute()` directly with
+the spike's real 8 s source (1024x768 h264, 24 fps, 192 frames, `start_time` 0).
+
+**The service-layer binding was not exercised and is not claimed.** That is a coverage gap,
+not a pass. It needs no GPU, so it can be closed separately.
+
+Harness and artifacts: `_work/h3_stage/` (gitignored) — `settings.toml` with provisional
+reservations, `stage_a_verify.py`, `stage_b_run.py`, and the run receipt under
+`_work/h3_stage/projects/generated/h3/stageb/v0001/stagebrun1/`.
