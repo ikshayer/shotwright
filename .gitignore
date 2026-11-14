@@ -40,3 +40,6 @@ references
 .pytest_cache
 .ruff_cache
 3d-model-guides
+
+# pytest scratch trees; these paths exceed Windows MAX_PATH and break clones
+.test-tmp/
