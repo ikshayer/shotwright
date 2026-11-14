@@ -36,14 +36,20 @@ measured continuously across the whole clip instead of on the two designated fix
 (first anomaly beat, longest neutral interval). Continuous measurement is broader in coverage
 but does not follow the letter of the rule, and no per-sequence score was produced.
 
-## Open conflict, unresolved at time of scoring
+## The conflict found at scoring time, and how it was resolved
 
 The H3 first-person candidate accepted on the same day (`H3_PROMPT_FINDINGS.md`, Stage J)
-**cannot pass this rubric as written**. Criterion 3 forbids unmotivated movement and that
-candidate measures 47.3 on the divergence metric; criterion 4 forbids flicker and it contains
-eight deliberate blackouts. Both were requested by the creator.
+could not pass this rubric as written. Criterion 3 forbade unmotivated movement and that
+candidate measures 47.3 on the divergence metric; criterion 4 forbade flicker and it
+contains eight blackouts. Both were requested by the creator.
 
-Criterion 3's wording allows movement "that the profile does not explain", so a camera profile
-describing a body-worn or handheld source would motivate both. No such profile exists. Until
-one does, or 4.3 is amended, the rubric and the intended FLUX -> TRELLIS + Blender -> H3 flow
-disagree about what a conformant shot looks like.
+Resolved the same day by amending 4.3 rather than by waiving the shot: criteria 3 and 4 now
+test for **unauthored** defects. Movement and lighting change are admissible where the
+shot's recorded generation intent declares them -- for an H3 shot that intent is the prompt,
+pinned by `H3Candidate.prompt_sha256`, so authorship is checked against an artifact rather
+than a recollection. Geometry instability, and any movement or lighting change the intent
+does not declare, still fail.
+
+This does not change the score above. The Phase 1 shot has no recorded generation intent,
+so criteria 3 and 4 applied to it in their original fixed-camera form, which is how they
+were scored.
