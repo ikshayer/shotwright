@@ -35,3 +35,8 @@ HANDOFF.md
 CLAUDE.md
 AGENTS.md
 PRD.md
+references
+.projectroot-atomic-write
+.pytest_cache
+.ruff_cache
+3d-model-guides
