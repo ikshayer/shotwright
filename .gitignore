@@ -30,3 +30,8 @@ _work/
 
 # Orchestrator pytest scratch root used by agents when the default temp is unwritable
 _vtmp/
+
+HANDOFF.md
+CLAUDE.md
+AGENTS.md
+PRD.md
