@@ -193,3 +193,60 @@ def test_graph_model_mapping_and_unsafe_media_names_rejected():
             build_api_graph(request(), models=MODELS, seed=1, input_filename=bad)
     with pytest.raises(ValueError):
         build_api_graph(request(), models={"diffusion": "only.safetensors"}, seed=1)
+
+
+# The exact option list the pinned MiniMaxH3Easy node publishes for `aspect_ratio`,
+# copied from this machine's /object_info. The adapter must only ever emit one of these.
+OFFERED_ASPECT_RATIOS = ["1:1", "2:3", "3:2", "3:4", "4:3", "9:16", "16:9", "21:9"]
+
+
+def _aspect_of(**changes):
+    g = build_api_graph(request(**changes), models=MODELS, seed=1)
+    return node(g, "MiniMaxH3Easy")[1]["inputs"]["aspect_ratio"]
+
+
+def test_aspect_ratio_is_always_one_the_node_offers():
+    """Stage C died here: `352:288` is not a selectable option, so the run was refused.
+
+    The old derivation emitted a literal `WIDTH:HEIGHT` string whenever the dimensions
+    were not exactly 4:3, and such a string can never be in a fixed option list -- not
+    even for a square frame, where it would emit `512:512` rather than `1:1`. Only
+    exactly-4:3 input worked, which is why the 384x288 baseline passed and nothing caught
+    it until a 352x288 CCTV shot was actually requested.
+    """
+    cases = [
+        {},                                                        # 384x288 baseline, 4:3
+        {"width": 352, "height": 288, "experimental": True},       # CIF: 11:9, displays 4:3
+        {"width": 512, "height": 512, "experimental": True},       # square
+        {"width": 1920, "height": 1088, "experimental": True},     # wide
+        {"width": 1088, "height": 1920, "experimental": True},     # tall
+        {"width": 640, "height": 480, "experimental": True},       # 4:3 in square pixels
+    ]
+    for changes in cases:
+        value = _aspect_of(**changes)
+        assert value in OFFERED_ASPECT_RATIOS, (
+            f"{changes or 'baseline'} produced aspect_ratio={value!r}, "
+            f"which the installed node does not offer"
+        )
+
+
+def test_cif_maps_to_its_display_aspect_not_its_storage_ratio():
+    """352x288 must select 4:3.
+
+    The PRD's aspect-ratio rule is explicit that CIF is 11:9 in square pixels and that the
+    *display* aspect ratio is what must read 4:3 -- which is how the Phase 1 clip is
+    already encoded (SAR 12:11, DAR 4:3). Selecting 3:2 or 1:1 here would be a legal
+    option and still the wrong picture.
+    """
+    assert _aspect_of(width=352, height=288, experimental=True) == "4:3"
+
+
+def test_portrait_and_landscape_are_not_confused():
+    """Nearest-ratio selection must not collapse orientation: 9:16 is not 16:9."""
+    assert _aspect_of(width=1920, height=1088, experimental=True) == "16:9"
+    assert _aspect_of(width=1088, height=1920, experimental=True) == "9:16"
+
+
+def test_the_baseline_aspect_ratio_is_unchanged():
+    """384x288 emitted 4:3 before this change; this pins that nothing shifted."""
+    assert _aspect_of() == "4:3"

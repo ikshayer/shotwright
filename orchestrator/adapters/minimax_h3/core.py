@@ -186,6 +186,36 @@ class H3Result(_StrictModel):
         return value
 
 
+#: The `aspect_ratio` options the pinned MiniMaxH3Easy node publishes. The graph builder is
+#: pure -- it has no live schema -- so this mirrors the installed list. If the two ever
+#: drift, `_validate_live_schema` refuses the run early and names the rejected value, which
+#: is exactly how the 352x288 case surfaced rather than failing after a 28 GB model load.
+_ASPECT_RATIOS = ("1:1", "2:3", "3:2", "3:4", "4:3", "9:16", "16:9", "21:9")
+
+
+def _nearest_aspect_ratio(width: int, height: int) -> str:
+    """Select the offered aspect ratio closest to the frame's shape.
+
+    Storage dimensions are not the picture's shape. CIF 352x288 is 11:9 in square pixels
+    but must *display* 4:3 (the PRD's aspect-ratio rule), which is how the production
+    clips are already encoded: SAR 12:11, DAR 4:3. The previous derivation emitted a
+    literal `WIDTH:HEIGHT` for anything that was not exactly 4:3, and such a string can
+    never appear in a fixed option list -- not even for a square frame, where it produced
+    `512:512` instead of `1:1`. Only exactly-4:3 input ever worked.
+
+    Distance is measured on the log of the ratio so a given proportional error counts the
+    same either side of square. Comparing raw ratios would make landscape errors look
+    larger than the identical portrait error and could pick `16:9` for a 9:16 frame.
+    """
+    target = math.log(width / height)
+
+    def distance(option: str) -> float:
+        offered_w, offered_h = option.split(":")
+        return abs(math.log(int(offered_w) / int(offered_h)) - target)
+
+    return min(_ASPECT_RATIOS, key=distance)
+
+
 def build_api_graph(
     request: H3Request,
     *,
@@ -212,7 +242,7 @@ def build_api_graph(
     prompt_resources = json.dumps([resource], ensure_ascii=False, separators=(",", ":"))
     media_state = json.dumps({"images": [], "audios": [], "videos": [{"filename": input_filename}]},
                              ensure_ascii=False, separators=(",", ":"))
-    aspect_ratio = "4:3" if request.width * 3 == request.height * 4 else f"{request.width}:{request.height}"
+    aspect_ratio = _nearest_aspect_ratio(request.width, request.height)
     return {
         "1": {"class_type": "MiniMaxH3EasyLoader", "inputs": {"fl2va_model": "None", "ref2va_model": checked_models["diffusion"], "text_encoder": checked_models["text_encoder"], "video_vae": checked_models["video_vae"], "audio_vae": checked_models["audio_vae"]}},
         "2": {"class_type": "MiniMaxH3Easy", "inputs": {"mode": "reference", "prompt": request.prompt, "resolution": "custom", "aspect_ratio": aspect_ratio, "width": request.width, "height": request.height, "seconds": request.duration_seconds, "advanced": True, "fps": request.fps, "keyframe_role": "first", "ref_image_size": "match", "reference_mention_mode": "index", "prompt_optimizer_settings": False, "prompt_optimizer_scene_guide": "none", "h3_bundle": ["1", 0], "media": ["42", 0], "prompt_optimizer_resources": prompt_resources, "prompt_optimizer_marker": "{}", "prompt_optimizer_prompt_connected": False}},

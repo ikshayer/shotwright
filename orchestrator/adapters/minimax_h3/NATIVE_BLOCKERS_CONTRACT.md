@@ -628,3 +628,130 @@ run's record reproduced byte-for-byte.
 The pytest summary line did not survive the background redirect; the count above is derived
 from the progress output (100% reached, 58 skip markers, zero failure or error markers) and
 reconciles exactly with the baseline plus the new tests.
+
+# Amendment 5 — the first successful orchestrated H3 run, and the next defect
+
+Recorded 2026-11-13, covering GPU run 2 (`stagebrun2`), the A3.9 closure, and Stage C.
+
+## A5.1 — GPU run 2 SUCCEEDED: three blockers closed at once
+
+The first H3 generation ever completed **through the orchestrator**. Real artifacts,
+independently probed with ffprobe: `candidate.mp4` (347,667 B) is 384x288, 24 fps, 192
+frames, 8.000 s, H.264 with AAC stereo 32 kHz; `audio.wav` is 2,048,092 B. Elapsed 506.9 s.
+
+- **Listener ownership is VERIFIED.** This was the top open risk, null on every prior run
+  because none reached submission:
+  `{"pid": 16548, "port": 8298, "ownership": "verified_member_of_owned_tree",
+  "action": "POST /prompt"}`. Blocker closed on evidence, not argument.
+- **`cleanup_error: null`.** A4.2's fix, confirmed on real hardware. Every prior run
+  carried a cleanup failure that had not happened. Corroborated independently: the GPU
+  returned to its 945 MiB idle baseline and port 8298 held only draining TIME_WAIT
+  sockets, no listener.
+- **The schema resolution fix (a379968) is confirmed against the real installed schema.**
+  It passed live validation, reached `POST /prompt` and generated.
+  `submission_ambiguous: null`.
+
+## A5.2 — the throughput placeholder would have killed this run
+
+A4.3 flagged `throughput_floor_per_second = 0.01` as dangerous. Run 2 proves it. Its
+progress trace contains a **176-second gap with no progress update**:
+
+    (81.5, 0.10)  ->  (257.5, 0.12)
+
+`throughput_floor_per_second` arms a runtime stall watchdog that fails the job when no
+progress arrives for `1.0 / floor` seconds. At `0.01` that is a **100-second** allowance,
+so run 2 would have been killed at roughly 181 s elapsed and reported *"VRAM thrash
+suspected"* -- the same misleading failure that ended the Phase 1 render at frame 91.
+The correction to 0.0002 (5,000 s allowance) is what let it finish.
+
+This is worth generalising: a watchdog threshold left at a placeholder is not a neutral
+default, it is an undiscovered kill switch.
+
+## A5.3 — two corrections to A4.3's own numbers
+
+- **`required_vram_gb` raised 9.8 -> 10.3.** Run 2 measured the attributable peak at
+  **10.21 GiB** (11,686.3 MiB whole-device less the 1,227.2 MiB idle baseline). The 9.8
+  derived from the ComfyUI run under-estimated by ~0.4 GiB. Corrected in both settings
+  files rather than left to surface as an OOM. It remains below the whole-device peak for
+  the reason A4.3 gives: admission compares against *free* VRAM.
+- **A4.3's sampling-interval caveat was wrong.** It warned that the orchestrator's ~15 s
+  interval could miss a transient peak and should be tightened. Run 2 took **88 samples**
+  and recorded a *higher* peak (11,686 MiB) than the harness's own 2-second `nvidia-smi`
+  poller (11,404 MiB) -- direct NVML reads beat subprocess polling. No tightening is
+  needed; the concern was a non-problem.
+
+RAM behaved well: minimum available 6.74 GB against the 2.0 GiB hard-stop floor, versus
+the 2.41 GiB that nearly ended the ComfyUI run. Consumption delta 8.97 GB, so
+`required_ram_gb = 10.0` is correctly conservative and is left unchanged.
+
+## A5.4 — A3.9 CLOSED
+
+`compose_h3_request` was bound to the **real Phase 1 acceptance project** (copied, so the
+evidence was never written to): 19 checks, 0 failures. Both the real MASTER and DEGRADED
+receipts bind with digests equal to their immutable records, all five refusals hold
+(non-MASTER/DEGRADED kind, stale `expected_version`, nonexistent `shot_version`,
+tampered source, missing file), and composing wrote nothing -- 0 path diffs, 0 content
+diffs.
+
+Two findings:
+
+- **The hash guard is stronger than A3.9 assumed.** `ProjectStore` re-verifies every
+  ShotOutput artifact on *read* (`json_store.py` `_verify_shot_output_artifact`), so a
+  tampered source raises `JobError` there and never reaches `compose_h3_request`'s own
+  digest comparison. Both layers are real; the store's fires first.
+- **A3.9's stated obstacle was false.** It claimed the service binding "would have
+  required building the entire Phase 1 render chain first". The chain already existed on
+  disk. A4.4 recorded this; the closure confirms it. `stage_b_run.py`'s docstring carried
+  the same false claim and has been corrected in place.
+
+## A5.5 — Stage C: the tenth instance of the pattern
+
+Stage C (15 s at 10 fps, 352x288, sourced from the real Phase 1 degraded clip through the
+service path) was **refused at 94 s**, before any model load, VRAM peak 1,082 MiB,
+`cleanup_error: null`:
+
+    H3SetupError: Installed schema rejects MiniMaxH3Easy.aspect_ratio='352:288'
+
+**This is the schema validation working as designed** -- an early, precise refusal naming
+the rejected value instead of a failure after a 28 GB load. The defect it caught:
+
+```python
+aspect_ratio = "4:3" if request.width * 3 == request.height * 4 else f"{request.width}:{request.height}"
+```
+
+The node publishes a **fixed** option list -- `1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9, 21:9`
+-- so the fallback branch emitted a raw `WIDTH:HEIGHT` string that can never appear in it.
+Not even a square frame survived: 512x512 produced `"512:512"`, not `"1:1"`. Only
+exactly-4:3 input ever worked, which is why the 384x288 baseline passed and the branch sat
+undetected. **Fully specified, unable to succeed, exposed only when something finally
+drove it** -- the same shape this repository has now produced ten times.
+
+**Fix (creator-directed): select the nearest offered value.** Distance is measured on the
+log of the ratio so a given proportional error counts the same either side of square;
+comparing raw ratios could hand a 9:16 frame `16:9`. This lands on the answer the PRD
+already specifies -- CIF 352x288 is 11:9 in storage but must *display* 4:3, which is how
+the production clips are encoded (SAR 12:11, DAR 4:3). Storage dimensions were never the
+picture's shape.
+
+Verified across 8 shapes (384x288, 352x288, 512x512, 1920x1088, 1088x1920, 640x480,
+320x240, 1920x816): all map to an offered value, 0 mismatches, both orientations correct.
+Evidence ordering: 3 new tests failed pre-fix; `test_the_baseline_aspect_ratio_is_unchanged`
+**passed** pre-fix, which is what shows the set is not vacuous.
+
+**Accepted design limit.** `_ASPECT_RATIOS` is a constant in `core.py` mirroring the
+installed node, because `build_api_graph` is pure and has no live schema. It can drift.
+The creator accepted this on 2026-11-13 ("just select the nearest offered value") rather
+than threading the offered set through the builder's signature. The mitigation is real and
+already demonstrated: `_validate_live_schema` checks the emitted value against the live
+schema, which is exactly how this surfaced. The constant is a convenience; the validation
+is the guarantee.
+
+## A5.6 — what is still unanswered
+
+**The integrated-anomaly experiment itself has not run.** Stage C got 94 s in and never
+reached generation, so nothing is yet known about whether H3 improves 4.3 criterion 5. The
+reservations for a 150-frame run are also still unconfirmed by measurement; A5.3's figures
+are from a 192-frame run at 384x288.
+
+Unchanged and still the creator's: **D1-D4** in `H3_PROMOTION_CONTRACT.md`, and whether to
+ratify the Phase 1 scoresheet or restage first.
