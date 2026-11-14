@@ -6,7 +6,7 @@ from .test_parity import _cli, _command_names, _manifest, _runner_and_command
 
 BASE = '/projects/p1/episodes/ep1/shots/s1/h3-candidates'
 EXPECTED = {'generate_h3_candidate', 'list_h3_candidates',
-            'cancel_h3_candidate', 'inspect_h3'}
+            'cancel_h3_candidate', 'inspect_h3', 'promote_h3_candidate'}
 
 
 def test_h3_has_http_cli_and_manifest_parity(app):
@@ -384,3 +384,96 @@ def test_cancel_token_check_serializes_with_concurrent_shot_revision(bound_h3, a
     assert not cancellation.is_alive() and not editor.is_alive()
     assert not errors
     assert results and results[0].status_code == 200, results[0].text if results else 'no cancellation response'
+
+
+def test_runtime_hands_the_h3_adapter_and_its_queue_the_same_project_root(settings, tmp_path):
+    """`generate_managed` compares `queue.root is self.root`, so one instance must win.
+
+    This is a regression test for a defect that made every H3 job fail through the real
+    route while every direct-backend spike succeeded. `generate_h3_candidate` first calls
+    `adapter_for` with a ProjectRoot built by `OperationContext._project_root` to check
+    runtime presence; `adapter_for` cached by path string but stored THAT instance, and
+    `for_kind` later built the queue around a ProjectRoot of its own. Paths were equal,
+    settings and worker matched, and only the root identity differed -- so the adapter
+    raised "managed H3 queue must share this exact root, settings and worker" and the job
+    failed in about five seconds, before generating anything.
+
+    The assertion is deliberately on identity, not equality: equality is what the broken
+    code already satisfied.
+    """
+    from orchestrator.api.app import _DefaultRuntime
+    from orchestrator.platform.containment import ProjectRoot
+    from orchestrator.service.runner import AdapterKind
+
+    # `effective_h3_settings` refuses a disabled or unreserved policy before any of this
+    # is reachable, so the policy must be enabled for the identity check to be exercised.
+    settings.minimax_h3.enabled = True
+    settings.minimax_h3.required_vram_gb = 1.25
+    settings.minimax_h3.required_ram_gb = 2.5
+    settings.minimax_h3.required_disk_gb = 3.75
+    settings.minimax_h3.throughput_floor_per_second = 0.01
+
+    (settings.project_root / 'p1').mkdir(parents=True, exist_ok=True)
+    runtime = _DefaultRuntime(settings, ProjectRoot(settings.project_root))
+
+    # A caller that constructs its own ProjectRoot for the same path, as the handler does.
+    foreign = ProjectRoot(settings.project_root.resolve() / 'p1')
+    adapter = runtime.adapter_for(foreign, AdapterKind.H3_CANDIDATE)
+
+    assert adapter.root is runtime.project_root('p1'), (
+        'adapter_for must canonicalise the ProjectRoot it stores, or the queue built '
+        'later cannot satisfy the identity guard in generate_managed'
+    )
+
+    queue = runtime.for_kind('p1', AdapterKind.H3_CANDIDATE)
+    assert queue.root is adapter.root
+    assert queue.settings is adapter.settings
+    assert queue.lease.worker is adapter.worker
+
+
+def test_promotion_route_refuses_a_candidate_belonging_to_another_shot(settings):
+    """The candidate is addressed by id, so the path's Shot must be enforced, not assumed.
+
+    Without the binding check in the handler, `/shots/<any>/h3-candidates/<id>/promote`
+    would promote the candidate whichever Shot the URL named, because
+    `promote_h3_candidate` looks the candidate up by id alone. Reuses the service suite's
+    `_setup` so there is one definition of what a promotable candidate looks like.
+    """
+    from orchestrator.api.app import OperationContext
+    from orchestrator.platform.containment import ProjectRoot
+    from orchestrator.service.minimax_h3 import H3RequestError
+    from tests.service.test_h3_promotion import RUN, _setup
+
+    project = settings.project_root / 'p1'
+    project.mkdir(parents=True, exist_ok=True)
+    _setup(project)  # candidate RUN belongs to episode 'ep1', shot 's1'
+
+    context = OperationContext(settings, ProjectRoot(settings.project_root))
+    payload = {'project_id': 'p1', 'episode_id': 'ep1', 'shot_id': 's2',
+               'candidate_id': RUN, 'review_id': 'rev1', 'expected_version': 0}
+
+    with pytest.raises(H3RequestError, match='not bound to this Shot and Episode'):
+        context.invoke('promote_h3_candidate', payload)
+
+    # The same call against the candidate's real Shot succeeds, so the guard is
+    # discriminating rather than simply refusing everything.
+    output = context.invoke('promote_h3_candidate', {**payload, 'shot_id': 's1'})
+    assert output['kind'] == 'generated'
+    assert output['engine_id'] == 'MINIMAX_H3'
+
+
+def test_promotion_route_refuses_an_absent_candidate(settings):
+    from orchestrator.api.app import OperationContext
+    from orchestrator.platform.containment import ProjectRoot
+    from orchestrator.service.minimax_h3 import H3RequestError
+    from tests.service.test_h3_promotion import _setup
+
+    project = settings.project_root / 'p1'
+    project.mkdir(parents=True, exist_ok=True)
+    _setup(project)
+
+    context = OperationContext(settings, ProjectRoot(settings.project_root))
+    with pytest.raises(H3RequestError, match='does not exist'):
+        context.invoke('promote_h3_candidate', {
+            'project_id': 'p1', 'episode_id': 'ep1', 'shot_id': 's1',
+            'candidate_id': 'absent', 'review_id': 'rev1', 'expected_version': 0})

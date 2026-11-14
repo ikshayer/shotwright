@@ -54,6 +54,21 @@ class H3CancelBody(BaseModel):
     expected_version: StrictInt = Field(ge=1)
 
 
+class H3PromoteBody(BaseModel):
+    """The approval and the output-list version a promotion is bound to.
+
+    `expected_version` is the number of ShotOutputs already recorded for the shot, not a
+    Shot version: `promote_h3_candidate` appends through `append_shot_output`, so this is
+    what makes a concurrent second promotion conflict instead of silently appending a
+    duplicate. It is therefore `ge=0` -- a shot whose first output is the promotion is a
+    legitimate case -- where the cancel body's Shot version is `ge=1`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    review_id: str = Field(min_length=1)
+    expected_version: StrictInt = Field(ge=0)
+
+
 def effective_h3_settings(settings: Settings) -> Settings:
     """Copy general settings and apply only the H3-specific operational policy."""
     policy = settings.minimax_h3

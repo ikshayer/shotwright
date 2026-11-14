@@ -26,7 +26,7 @@ from orchestrator.domain.entities import (
     Script,
     Shot,
 )
-from orchestrator.service.minimax_h3 import H3CancelBody, H3GenerateBody
+from orchestrator.service.minimax_h3 import H3CancelBody, H3GenerateBody, H3PromoteBody
 
 
 class OpenRequest(BaseModel):
@@ -217,6 +217,7 @@ OPERATIONS = (
     Operation("sample_references", "POST", "/projects/{project_id}/references/sample", "Sample references", True, "reference sampling adapter", OpenRequest, _call("sample_references")),
     Operation("generate_h3_candidate", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/h3-candidates", "Generate an opt-in MiniMax H3 audiovisual candidate", True, "service.minimax_h3", H3GenerateBody, _call("generate_h3_candidate")),
     Operation("list_h3_candidates", "GET", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/h3-candidates", "List immutable H3 candidate receipts", False, "store", None, _call("list_h3_candidates")),
+    Operation("promote_h3_candidate", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/h3-candidates/{candidate_id}/promote", "Promote an approved H3 candidate to a production output", True, "service.minimax_h3", H3PromoteBody, _call("promote_h3_candidate")),
     Operation("cancel_h3_candidate", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/h3-candidates/{job_id}/cancel", "Cancel an H3 candidate job", True, "jobs.queue", H3CancelBody, _call("cancel_h3_candidate")),
     Operation("inspect_h3", "GET", "/models/minimax-h3", "Inspect configured MiniMax H3 runtime", False, "service.minimax_h3", None, _call("inspect_h3")),
     Operation("report_jobs", "GET", "/projects/{project_id}/jobs", "Report jobs", False, "jobs.queue", None, _call("report_jobs")),

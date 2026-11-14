@@ -366,6 +366,29 @@ class OperationContext:
             return [item.model_dump(mode="json") | {
                 "stale": item.shot_version != shot.version or shot.status is ShotStatus.STALE,
             } for item in store.list_h3_candidates(data["shot_id"], episode_id=data["episode_id"])]
+        if operation == "promote_h3_candidate":
+            from orchestrator.domain.entities import H3Candidate
+            from orchestrator.service.minimax_h3 import H3PromoteBody, promote_h3_candidate
+            store = self._store(data["project_id"])
+            body = H3PromoteBody.model_validate({key: value for key, value in data.items()
+                                                 if key in H3PromoteBody.model_fields})
+            # The candidate is addressed by id, so the Episode and Shot in the path would
+            # otherwise be decorative: without this, any shot's URL could promote any
+            # candidate. `cancel_h3_candidate` binds its job the same way.
+            try:
+                candidate = store.load(H3Candidate, data["candidate_id"])
+            except RecordNotFound as exc:
+                raise H3RequestError(
+                    f"H3 candidate {data['candidate_id']!r} does not exist"
+                ) from exc
+            if (candidate.shot_id != data["shot_id"]
+                    or candidate.episode_id != data["episode_id"]):
+                raise H3RequestError("H3 candidate is not bound to this Shot and Episode")
+            output = promote_h3_candidate(
+                store, candidate_id=data["candidate_id"], review_id=body.review_id,
+                expected_version=body.expected_version,
+            )
+            return output.model_dump(mode="json")
         if operation == "cancel_h3_candidate":
             if self.job_runner is None:
                 raise RuntimeError("default JobRunner was not configured")
@@ -883,19 +906,42 @@ class _DefaultRuntime:
         self._lock = __import__("threading").RLock()
         self._queues: dict[tuple[str, AdapterKind], JobQueue] = {}
         self._adapters: dict[tuple[str, AdapterKind], Any] = {}
+        #: One canonical ProjectRoot per path. `MinimaxH3Adapter.generate_managed`
+        #: compares `queue.root is self.root`, so an adapter and the queue that drives it
+        #: must hold the SAME instance, not merely equal paths. Both this class and
+        #: `OperationContext` previously minted a fresh ProjectRoot on every call while
+        #: `adapter_for` cached by path string and stored whichever instance reached it
+        #: first -- so the runtime-presence pre-check in `generate_h3_candidate` cached an
+        #: adapter against the context's instance, `for_kind` then built the queue around
+        #: a different one, and every H3 job failed its identity guard before generating.
+        self._roots: dict[str, ProjectRoot] = {}
         self._nvml: Any = None
         self.registry = AdapterRegistry({kind: _RuntimeAdapter(self, kind) for kind in AdapterKind})
+
+    def _canonical_root(self, path: Any) -> ProjectRoot:
+        """The single ProjectRoot instance this runtime uses for `path`."""
+        key = str(path)
+        with self._lock:
+            root = self._roots.get(key)
+            if root is None:
+                root = ProjectRoot(
+                    path,
+                    use_windows_share_delete_reads=self.settings.use_windows_share_delete_reads,
+                )
+                self._roots[key] = root
+            return root
 
     def project_root(self, project_id: str) -> ProjectRoot:
         path = self.root.resolve(project_id)
         if not path.is_dir():
             raise RecordNotFound(f"project {project_id!r} does not exist")
-        return ProjectRoot(
-            path,
-            use_windows_share_delete_reads=self.settings.use_windows_share_delete_reads,
-        )
+        return self._canonical_root(path)
 
     def adapter_for(self, project_root: ProjectRoot, kind: AdapterKind) -> Any:
+        # Canonicalised so a caller that built its own ProjectRoot for the same path --
+        # `OperationContext._project_root` does -- still yields an adapter whose `root`
+        # is the instance `for_kind` will put in the queue.
+        project_root = self._canonical_root(project_root.path)
         key = (str(project_root.path), kind)
         with self._lock:
             if key not in self._adapters:
