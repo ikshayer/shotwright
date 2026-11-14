@@ -251,6 +251,8 @@ class ShotOutputKind(StrEnum):
     PREVIEW = "preview"
     STILL = "still"
     DEGRADED = "degraded"
+    #: Produced by a generative model rather than a render or a filter chain.
+    GENERATED = "generated"
 
 
 class ShotOutput(Entity):
@@ -336,6 +338,12 @@ class ShotOutput(Entity):
                 raise ValueError("degraded output may not carry render provenance")
             if any(not key or not value for key, value in self.pinned_binaries.items()):
                 raise ValueError("pinned_binaries keys and values must be non-empty")
+        elif self.kind is ShotOutputKind.GENERATED:
+            if not self.engine_id or not self.engine_build:
+                raise ValueError(f"{self.kind.value} output requires engine_id and engine_build")
+            if any(value is not None for value in
+                   (self.profile_semver, self.filter_graph_hash, self.pinned_binaries)):
+                raise ValueError("generated outputs may not carry degradation provenance")
         elif any(value is not None for value in (
             self.engine_id, self.engine_build, self.profile_semver, self.filter_graph_hash,
             self.pinned_binaries,
@@ -859,7 +867,11 @@ class GenerationRun(Entity):
 
 
 class H3Candidate(Entity):
-    """Immutable generated audiovisual candidate; never a production ShotOutput."""
+    """Immutable generated audiovisual candidate; never a production ShotOutput.
+
+    Promotion does not convert this record. It appends a separate GENERATED
+    ShotOutput that references the candidate, leaving the candidate untouched.
+    """
     candidate_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_-]+$")
     episode_id: str = Field(min_length=1)
     shot_id: str = Field(min_length=1)

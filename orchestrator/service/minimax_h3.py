@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
@@ -15,9 +16,12 @@ from orchestrator.domain.entities import (
     GenerationRun,
     H3Candidate,
     Job,
+    Review,
     Shot,
+    ShotOutput,
     ShotOutputKind,
 )
+from orchestrator.domain.state import ReviewApprovalError, check_review_approval
 from orchestrator.platform.settings import Settings
 from orchestrator.store.json_store import ProjectStore, RecordNotFound, VersionConflict
 
@@ -230,3 +234,91 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+#: `ShotOutput.engine_id` for a promoted H3 output. H3's identity is not one binary but a
+#: set, so the id names the generator and `engine_build` carries the ComfyUI version and
+#: source commit. The four component digests (diffusion, text encoder, video VAE, audio
+#: VAE) stay reachable through the candidate's report rather than stuffed into a string.
+H3_ENGINE_ID = "MINIMAX_H3"
+
+
+def _h3_engine_build(report: dict) -> str:
+    """Derive `engine_build` from the run's own verified report, never from a constant.
+
+    A hardcoded version would keep claiming 0.44.0 after the runtime moved. Both values are
+    required: a promoted output with unknown provenance is worse than a refused promotion.
+    """
+    try:
+        version = report["server_ready"]["system_stats"]["system"]["comfyui_version"]
+        commit = report["runtime"]["source_receipt"]["commit"]
+    except (KeyError, TypeError) as exc:
+        raise H3RequestError(
+            "H3 report does not record the ComfyUI version and source commit needed for "
+            "engine provenance"
+        ) from exc
+    if not isinstance(version, str) or not isinstance(commit, str) or not version or not commit:
+        raise H3RequestError("H3 report engine provenance must be non-empty strings")
+    return f"comfyui {version}+{commit}"
+
+
+def promote_h3_candidate(store: ProjectStore, *, candidate_id: str, review_id: str,
+                         expected_version: int) -> ShotOutput:
+    """Append a GENERATED ShotOutput for an approved, hash-verified H3 candidate.
+
+    The candidate is never mutated: promotion creates a new record that references it.
+    Each step refuses rather than guesses, because a promoted record whose bytes drifted
+    would poison every later read through `_verify_shot_output_artifact`.
+    """
+    root = store._root
+    with store.command():
+        try:
+            candidate = store.load(H3Candidate, candidate_id)
+        except RecordNotFound as exc:
+            raise H3RequestError(f"H3 candidate {candidate_id!r} does not exist") from exc
+
+        try:
+            review = store.load(Review, review_id)
+        except RecordNotFound as exc:
+            raise H3RequestError(f"promotion Review {review_id!r} does not exist") from exc
+        try:
+            check_review_approval(review, target_id=candidate_id,
+                                  target_version=candidate.shot_version)
+        except ReviewApprovalError as exc:
+            raise H3RequestError(str(exc)) from exc
+
+        # D2 widened `_BASELINE_SHAPES` so a production shape needs no flag. A candidate
+        # still carrying one is therefore an off-spec probe, and `experimental` keeps
+        # working as a gate only if promotion refuses it.
+        if candidate.experimental:
+            raise H3RequestError(
+                "an experimental H3 candidate cannot be promoted; regenerate the shot with "
+                "experimental=False, which a baseline production shape no longer requires"
+            )
+
+        for relative, expected in ((candidate.av_path, candidate.av_sha256),
+                                   (candidate.report_path, candidate.report_sha256)):
+            artifact = root.resolve(relative)
+            if not artifact.is_file() or _sha256(artifact) != expected:
+                raise H3RequestError(
+                    f"H3 candidate artifact is missing or its SHA256 differs: {relative}"
+                )
+
+        existing = store.list_shot_outputs(candidate.shot_id, episode_id=candidate.episode_id)
+        if any(output.kind is ShotOutputKind.GENERATED
+               and output.relative_path == candidate.av_path for output in existing):
+            raise H3RequestError(
+                f"H3 candidate {candidate_id!r} is already promoted; promotion is idempotent "
+                "by refusal, never by replacement"
+            )
+
+        report = json.loads(root.read_text(candidate.report_path, encoding="utf-8"))
+        output = ShotOutput(
+            output_id=uuid.uuid4().hex, episode_id=candidate.episode_id,
+            shot_id=candidate.shot_id, record_version=candidate.shot_version,
+            kind=ShotOutputKind.GENERATED, relative_path=candidate.av_path,
+            content_sha256=candidate.av_sha256, engine_id=H3_ENGINE_ID,
+            engine_build=_h3_engine_build(report),
+        )
+        store.append_shot_output(output, expected_version=expected_version)
+        return output

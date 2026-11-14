@@ -23,7 +23,30 @@ _SEED_MAX = min(2**53 - 1, 2**64 - 1)
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _ID = re.compile(r"[A-Za-z0-9_-]+\Z")
 _RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
-_BASELINE = (8.0, 384, 288, 24, 20)
+#: Shapes that do not require `experimental=True`: `(duration_seconds, width, height, fps,
+#: steps)`. Each one here has actually completed a generation on this machine. A shape that
+#: has not is not a baseline, however reasonable it looks.
+#:
+#: Two grids constrain what is even legal, and they are not obvious from the request:
+#:
+#:   * the Easy node quantises to **17n + 5** frames (`_frame_length`, nodes.py:3628); and
+#:   * H3 generates audio on a **fixed native 24 fps grid**, so `audio_duration` is always
+#:     `frame_count / 24` whatever fps was asked for.
+#:
+#: Together with the 0.1 s increment rule, the only legal durations in 8-30 s at 24 fps are
+#: 8.0 s (192 frames), 16.5 s (396) and 25.0 s (600).
+#:
+#: This supersedes H3_PROMOTION_CONTRACT.md D2(a), which proposed 15.0 s at 10 fps and
+#: 352x288 as the production baseline on the grounds that it composes to 150 frames. It
+#: does, and that is precisely the problem: 150 is not of the form 17n + 5, so the node
+#: would silently requantise it, and 10 fps against a 24 fps audio grid yields 2.4x
+#: slow-motion video with audio 2.4x too short. The contract was written before either
+#: grid was measured.
+_BASELINE_SHAPES = frozenset({
+    (8.0, 384, 288, 24, 20),   # creator-accepted 2026-11-12, and Stage H/J 2026-11-13
+    (8.0, 352, 288, 24, 20),   # Stage E, Stage F
+    (16.5, 352, 288, 24, 20),  # Stage D, 396 frames
+})
 
 
 class H3RequestError(ValueError):
@@ -141,8 +164,8 @@ class H3Request(_StrictModel):
         frames = duration * self.fps
         if frames != frames.to_integral_value() or frames < 5:
             raise ValueError("duration_seconds * fps must be an exact integer of at least 5 frames")
-        is_baseline = (self.duration_seconds, self.width, self.height, self.fps, self.steps) == _BASELINE
-        if not self.experimental and not is_baseline:
+        shape = (self.duration_seconds, self.width, self.height, self.fps, self.steps)
+        if not self.experimental and shape not in _BASELINE_SHAPES:
             raise ValueError("nonbaseline H3 settings require experimental=True")
         return self
 
