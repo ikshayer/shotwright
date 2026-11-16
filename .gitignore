@@ -43,3 +43,7 @@ references
 
 # pytest scratch trees; these paths exceed Windows MAX_PATH and break clones
 .test-tmp/
+
+# Internal planning docs: kept locally, deliberately not published.
+CCTV_Analog_Horror_Production_Pipeline_PRD_v*.md
+CODEX_HANDOFF*.md
