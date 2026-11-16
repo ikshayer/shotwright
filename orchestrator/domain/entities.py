@@ -713,6 +713,9 @@ class EpisodeOutput(Entity):
 # --------------------------------------------------------------------------
 
 
+VoiceConsent = Literal["synthetic", "creator_own_voice", "licensed_for_cloning"]
+
+
 class Asset(Entity):
     asset_id: str
     type: str
@@ -728,6 +731,21 @@ class Asset(Entity):
     #: Poly Haven's API requires visible credit even though assets are CC0
     attribution_surface_required: bool = False
     reuse_scope: str = "project"
+    #: FR-16: voice identity needs consent, recorded separately from the licence above.
+    #: `None` on every non-voice asset and on records written before this field existed.
+    voice_consent: VoiceConsent | None = None
+    #: Who consented, how and when, or which licence permits cloning. Required for every
+    #: consent value except `synthetic`, where no person's voice is involved.
+    voice_consent_basis: str | None = None
+
+    @model_validator(mode="after")
+    def _human_voice_consent_needs_a_basis(self) -> Asset:
+        if self.voice_consent not in (None, "synthetic") and not (self.voice_consent_basis or "").strip():
+            raise ValueError(
+                f"voice_consent {self.voice_consent!r} requires a non-blank voice_consent_basis "
+                "naming who consented and how, or the licence that permits cloning"
+            )
+        return self
 
 
 class Attestation(Entity):

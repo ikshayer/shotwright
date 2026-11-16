@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import BinaryIO
 
-from orchestrator.domain.entities import Asset
+from orchestrator.domain.entities import Asset, VoiceConsent
 from orchestrator.platform.containment import (
     MediaKind,
     ProjectRoot,
@@ -35,7 +35,12 @@ _ASSET_TYPES_BY_MEDIA_KIND: dict[MediaKind, frozenset[str]] = {
     "model": frozenset({"model"}),
     "image": frozenset({"texture", "hdri", "reference", "image"}),
     "video": frozenset({"reference", "video"}),
+    "audio": frozenset({"voice", "audio"}),
 }
+#: Where each media kind is stored. Only audio has its own directory; the rest predate
+#: this table and keep their original location.
+_STORAGE_DIRECTORY: dict[MediaKind, str] = {"audio": "assets/audio"}
+_DEFAULT_STORAGE_DIRECTORY = "assets/models"
 
 
 def register_asset(
@@ -54,6 +59,8 @@ def register_asset(
     attribution_surface_required: bool = False,
     reuse_scope: str = "project",
     expected_version: int = 0,
+    voice_consent: VoiceConsent | None = None,
+    voice_consent_basis: str | None = None,
 ) -> Asset:
     """Copy one permitted upload into the project and append its provenance record.
 
@@ -74,6 +81,7 @@ def register_asset(
         license=license,
         source_url=source_url,
         generated=generated,
+        voice_consent=voice_consent,
     )
     # An omitted type is derived from the bytes rather than guessed: every media
     # kind's own name is a member of its permitted set, so derivation never
@@ -84,13 +92,17 @@ def register_asset(
             f"declared asset type {declared_type!r} is incompatible with detected media kind "
             f"{media_kind!r}"
         )
+    clean_basis = _validate_voice_consent(
+        declared_type, voice_consent, voice_consent_basis
+    )
     clean_license = license.strip() if isinstance(license, str) else ""
     clean_source_url = source_url.strip() if isinstance(source_url, str) else ""
     selected_id = asset_id or uuid.uuid4().hex
     if not _ASSET_ID.fullmatch(selected_id):
         raise AssetRegistrationInvalid("asset_id must match [A-Za-z0-9_-]{1,64}")
     clean_filename = sanitize_filename(filename)
-    relative_path = f"assets/models/{selected_id}/{clean_filename}"
+    storage = _STORAGE_DIRECTORY.get(media_kind, _DEFAULT_STORAGE_DIRECTORY)
+    relative_path = f"{storage}/{selected_id}/{clean_filename}"
     root = store._root
 
     with _open_source(source) as stream, store.command():
@@ -126,9 +138,39 @@ def register_asset(
             attribution=attribution.strip() if isinstance(attribution, str) and attribution.strip() else None,
             attribution_surface_required=attribution_surface_required,
             reuse_scope=reuse_scope.strip(),
+            voice_consent=voice_consent,
+            voice_consent_basis=clean_basis,
         )
         store.save(record, expected_version=expected_version)
         return record
+
+
+def _validate_voice_consent(
+    declared_type: str, voice_consent: VoiceConsent | None, basis: str | None
+) -> str | None:
+    """FR-16: a voice needs recorded consent, kept apart from its licence.
+
+    Returns the stripped basis. Checked before any byte is written so a refusal leaves
+    the project untouched.
+    """
+    clean_basis = basis.strip() if isinstance(basis, str) and basis.strip() else None
+    if declared_type == "voice" and voice_consent is None:
+        raise AssetRegistrationInvalid(
+            "a voice asset requires voice_consent ('synthetic', 'creator_own_voice' or "
+            "'licensed_for_cloning'); a licence alone does not record consent (FR-16)"
+        )
+    if voice_consent is None:
+        if clean_basis is not None:
+            raise AssetRegistrationInvalid("voice_consent_basis requires voice_consent")
+        return None
+    if declared_type not in {"voice", "audio"}:
+        raise AssetRegistrationInvalid("voice_consent applies only to voice or audio assets")
+    if voice_consent != "synthetic" and clean_basis is None:
+        raise AssetRegistrationInvalid(
+            f"voice_consent {voice_consent!r} requires voice_consent_basis: who consented and "
+            "how, or the licence that permits cloning"
+        )
+    return clean_basis
 
 
 def validate_asset_source(
@@ -138,8 +180,13 @@ def validate_asset_source(
     license: str | None,
     source_url: str | None,
     generated: bool,
+    voice_consent: VoiceConsent | None = None,
 ) -> MediaKind:
-    """Validate format and provenance before looking up or writing project records."""
+    """Validate format and provenance before looking up or writing project records.
+
+    A creator's own voice recording has no source URL; its ``voice_consent_basis``
+    carries the provenance instead, so the URL is not required for it.
+    """
     clean_filename = sanitize_filename(filename)
     with _open_source(source) as stream:
         media_kind = _validate_format(stream, filename=clean_filename, size=_stream_size(stream))
@@ -147,7 +194,7 @@ def validate_asset_source(
     clean_source_url = source_url.strip() if isinstance(source_url, str) else ""
     if not clean_license:
         raise AssetRegistrationInvalid("license is required to record the asset's reuse right")
-    if not generated and not clean_source_url:
+    if not generated and not clean_source_url and voice_consent != "creator_own_voice":
         raise AssetRegistrationInvalid(
             "source_url is required for externally sourced assets; set generated=true "
             "for a locally generated asset"
@@ -168,6 +215,7 @@ def _validate_format(
         max_image_bytes=size,
         max_video_bytes=size,
         max_model_bytes=size,
+        max_audio_bytes=size,
     )
     upload = validate_upload(filename, head, size, limits)
     if upload.kind != "model":

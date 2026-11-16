@@ -452,15 +452,17 @@ class UploadLimits(BaseModel):
     max_video_bytes: int = Field(500 * 1024 * 1024, gt=0, description="Maximum video upload size in bytes.")
     max_video_seconds: float = Field(120.0, gt=0, description="Maximum video duration in seconds.")
     max_model_bytes: int = Field(500 * 1024 * 1024, gt=0, description="Maximum GLB model upload size in bytes.")
+    max_audio_bytes: int = Field(50 * 1024 * 1024, gt=0, description="Maximum WAV audio upload size in bytes.")
 
 
-MediaKind = Literal["image", "video", "model"]
+MediaKind = Literal["image", "video", "model", "audio"]
 
 _EXTENSION_KIND: dict[str, MediaKind] = {
     ".jpg": "image", ".jpeg": "image", ".png": "image", ".webp": "image",
     ".hdr": "image", ".exr": "image",
     ".mp4": "video", ".mov": "video", ".webm": "video",
     ".glb": "model",
+    ".wav": "audio",
 }
 
 
@@ -496,6 +498,8 @@ def _extensions_matching_magic(head: bytes) -> frozenset[str] | None:
         return frozenset({".exr"})
     if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
         return frozenset({".webp"})
+    if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
+        return frozenset({".wav"})
     if head[4:8] == b"ftyp":
         # QuickTime brand is .mov only; every other ISO-BMFF brand may be mp4 or mov.
         return frozenset({".mov"}) if head[8:12] == b"qt  " else frozenset({".mp4", ".mov"})
@@ -553,6 +557,8 @@ def validate_upload(
         _enforce("max_video_bytes", limits.max_video_bytes, size_bytes)
         if duration_seconds is not None:
             _enforce("max_video_seconds", limits.max_video_seconds, duration_seconds)
+    elif kind == "audio":
+        _enforce("max_audio_bytes", limits.max_audio_bytes, size_bytes)
     else:
         _enforce("max_model_bytes", limits.max_model_bytes, size_bytes)
     return ValidatedUpload(kind=kind, extension=extension, safe_filename=safe_name)
