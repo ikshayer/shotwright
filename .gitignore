@@ -46,4 +46,5 @@ references
 
 # Internal planning docs: kept locally, deliberately not published.
 CCTV_Analog_Horror_Production_Pipeline_PRD_v*.md
-CODEX_HANDOFF*.md
+# Session handoffs are local-only: they name restricted assets and credential paths.
+*HANDOFF*.md
