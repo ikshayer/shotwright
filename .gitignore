@@ -48,3 +48,5 @@ references
 CCTV_Analog_Horror_Production_Pipeline_PRD_v*.md
 # Session handoffs are local-only: they name restricted assets and credential paths.
 *HANDOFF*.md
+# Build metadata from `pip install -e .`
+*.egg-info/

@@ -58,9 +58,14 @@ def _runner_and_command(cli: Any):
 
 
 def _command_names(cli: Any) -> set[str]:
-    import typer
+    if hasattr(cli, "list_commands"):
+        command = cli
+    else:
+        # Only a Typer application needs converting; the CLI is Click, and importing
+        # typer unconditionally made it a hard test dependency nothing declared.
+        import typer
 
-    command = typer.main.get_command(cli) if not hasattr(cli, "list_commands") else cli
+        command = typer.main.get_command(cli)
     names: set[str] = set()
 
     def walk(cmd: Any, prefix: str = "") -> None:
