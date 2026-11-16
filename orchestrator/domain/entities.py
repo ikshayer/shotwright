@@ -881,6 +881,20 @@ class H3Candidate(Entity):
     source_output_id: str = Field(min_length=1)
     source_path: str = Field(min_length=1)
     source_sha256: str
+    #: Where in the source recording this clip was taken from, in seconds, relative to the
+    #: video stream (`native.py` normalises the first decoded frame to zero before
+    #: trimming, so a container or audio stream starting earlier does not shift it).
+    #:
+    #: H3 resamples time -- a 26.0 s / 10 fps source becomes an 8.0 s / 24 fps candidate --
+    #: so the delivery render cannot reconstruct the recording's wall clock without this.
+    #: Applying `clock_epoch` directly to the candidate's own timeline yields a timestamp
+    #: that is monotonic and WRONG, which is worse than an absent one because it does not
+    #: announce itself. See adapters/export/CONTRACT.md D4b.
+    #:
+    #: Defaulted only so candidates recorded before this field existed remain readable,
+    #: the same allowance `PostProfileOverlay.font_relative` makes. 0.0 is correct for
+    #: every candidate generated so far, all of which used the default start.
+    start_seconds: float = Field(0.0, ge=0)
     prompt_sha256: str
     seed: StrictInt = Field(ge=0)
     av_path: str = Field(min_length=1)

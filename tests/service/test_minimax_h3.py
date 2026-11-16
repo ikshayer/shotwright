@@ -288,3 +288,39 @@ def test_real_queue_h3_never_changes_shot_episode_or_normal_outputs(env, monkeyp
         assert len(calls) <= 1  # queue may observe the cancelled job without invoking the adapter
     else:
         assert len(calls) == 1
+
+
+def test_candidate_records_where_in_the_source_the_clip_was_taken_from(source):
+    """adapters/export/CONTRACT.md D4b.
+
+    H3 resamples time -- a 26.0 s / 10 fps source becomes an 8.0 s / 24 fps candidate --
+    so the delivery render cannot reconstruct the recording's wall clock from the
+    candidate's own timeline. Without `start_seconds` the exported timestamp is monotonic
+    and wrong, which is worse than an absent one because it does not announce itself.
+    """
+    from orchestrator.domain.entities import H3Candidate
+    root, store, _, _ = source
+    candidate = candidate_record(root).model_copy(update={'start_seconds': 12.5})
+    store.save(candidate, expected_version=0)
+    reloaded = store.load(H3Candidate, 'candidate1')
+    assert reloaded.start_seconds == 12.5
+
+
+def test_candidates_recorded_before_start_seconds_existed_still_load():
+    """The field is defaulted only so existing records remain readable. 0.0 is correct
+    for every candidate generated so far, all of which used the default start."""
+    from orchestrator.domain.entities import H3Candidate
+    legacy = {
+        'candidate_id': 'legacy1', 'episode_id': 'ep1', 'shot_id': 's1', 'shot_version': 1,
+        'job_id': 'job1', 'run_id': 'h3-run', 'source_output_id': 'master1',
+        'source_path': 'renders/s1/v0001/master.mp4',
+        'source_sha256': hashlib.sha256(b'x').hexdigest(),
+        'prompt_sha256': hashlib.sha256(b'y').hexdigest(), 'seed': 42,
+        'av_path': 'a.mp4', 'av_sha256': hashlib.sha256(b'a').hexdigest(),
+        'wav_path': 'a.wav', 'wav_sha256': hashlib.sha256(b'b').hexdigest(),
+        'report_path': 'r.json', 'report_sha256': hashlib.sha256(b'c').hexdigest(),
+        'frame_count': 192, 'fps': 24, 'audio_sample_rate': 48000, 'audio_channels': 2,
+        'audio_samples_per_channel': 384000, 'experimental': False,
+    }
+    assert 'start_seconds' not in legacy
+    assert H3Candidate.model_validate(legacy).start_seconds == 0.0

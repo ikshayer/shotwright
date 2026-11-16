@@ -433,10 +433,12 @@ def compose_post_profile_spec(
             f"PostProfile {identity.name!r} uses unsupported artifact schedule type(s): "
             + ", ".join(unsupported_events)
         )
-    if identity.overlay is not None and identity.overlay.placement != "in_recording":
+    if identity.overlay is not None and identity.overlay.placement not in (
+        "in_recording", "on_playback"
+    ):
         raise ValueError(
             f"PostProfile {identity.name!r} uses unsupported overlay placement "
-            f"{identity.overlay.placement!r}; only 'in_recording' is supported"
+            f"{identity.overlay.placement!r}"
         )
 
     return PostProfileSpec(
