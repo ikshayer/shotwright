@@ -62,14 +62,39 @@ cctv-pipeline --project-root <dir> create-project --help
 cctv-pipeline --settings settings.toml list-projects
 ```
 
-Or serve the API and drive it over HTTP:
+Or serve the API and drive it over HTTP or from an MCP client. Make a token once and
+keep it in the environment, never on a command line. In PowerShell this stores one in
+your user environment without displaying it (open a new terminal afterwards):
 
-```python
-from orchestrator.api.app import serve
-from orchestrator.platform.settings import Settings
-
-serve(Settings(), token="<token>")
+```powershell
+$token = python -c "import secrets; print(secrets.token_hex(32))"
+[Environment]::SetEnvironmentVariable("CCTV_PIPELINE_TOKEN", $token, "User")
+Remove-Variable token
 ```
+
+Then start the server, which reads it from there (with `.venv` activated, or call
+`.venv\Scripts\cctv-pipeline-serve`):
+
+```
+cctv-pipeline-serve --project-root <dir>
+```
+
+Register the MCP adapter with a project `.mcp.json`. It references the token by
+environment-variable expansion and does not contain it. An MCP client does not activate
+the virtualenv, so give the command's full path:
+
+```json
+{
+  "mcpServers": {
+    "pipeline": {
+      "command": "<repo>/.venv/Scripts/cctv-pipeline-mcp",
+      "env": { "CCTV_PIPELINE_TOKEN": "${CCTV_PIPELINE_TOKEN}" }
+    }
+  }
+}
+```
+
+Never commit the token. Tools are prefixed `pipeline_`. Uploads are CLI-only.
 
 Run the tests with `pytest`.
 

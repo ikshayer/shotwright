@@ -19,6 +19,7 @@ dependencies = [
 [project.scripts]
 cctv-pipeline = "orchestrator.api.cli:main"
 cctv-pipeline-mcp = "orchestrator.api.mcp:main"
+cctv-pipeline-serve = "orchestrator.api.launch:main"
 
 [tool.setuptools.packages.find]
 # Without this, setuptools' flat-layout discovery also finds spikes/ and references/

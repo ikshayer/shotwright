@@ -13,7 +13,6 @@ import base64
 import http.client
 import importlib.metadata
 import json
-import os
 import sys
 import urllib.error
 import urllib.request
@@ -24,8 +23,11 @@ from urllib.parse import quote, urlencode
 
 from orchestrator.platform.settings import Settings, SettingsError, load_settings
 
+from .loopback_token import (
+    INVALID_TOKEN_MESSAGE, TOKEN_ENV, TokenError, is_valid_token, read_token, redact,
+)
+
 TOOL_PREFIX = "pipeline_"
-TOKEN_ENV = "CCTV_PIPELINE_TOKEN"
 #: Newest first; the first entry is what a client asking for an unknown version gets.
 SUPPORTED_PROTOCOL_VERSIONS: tuple[str, ...] = (
     "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05",
@@ -70,20 +72,6 @@ class Transport(Protocol):
         """
 
 
-#: Deliberately free of the token's value, so it is safe to emit anywhere.
-_INVALID_TOKEN_MESSAGE = (
-    f"${TOKEN_ENV} must contain only visible ASCII (0x21-0x7E): no spaces, line breaks or "
-    "non-ASCII characters"
-)
-
-
-def _is_valid_token(token: str) -> bool:
-    # http.client rejects a header value holding CR/LF with a ValueError that quotes the
-    # whole value, so an unchecked token with a trailing newline would leak into the error
-    # sent back to the client. Refusing it up front means that error cannot arise.
-    return bool(token) and all("\x21" <= char <= "\x7e" for char in token)
-
-
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Refuse to follow a redirect: urllib would forward the token header to its target.
 
@@ -99,8 +87,8 @@ class LoopbackTransport:
     """HTTP to the orchestrator; the token only ever reaches ``base_url``."""
 
     def __init__(self, base_url: str, token: str, *, timeout: float) -> None:
-        if not _is_valid_token(token):
-            raise ValueError(_INVALID_TOKEN_MESSAGE)
+        if not is_valid_token(token):
+            raise ValueError(INVALID_TOKEN_MESSAGE)
         self._base_url = base_url.rstrip("/")
         self._token = token
         self._timeout = timeout
@@ -544,18 +532,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--timeout", type=float, default=_DEFAULT_TIMEOUT_SECONDS,
         help="seconds to wait for the orchestrator per request (default: %(default)s)",
     )
-    token = os.environ.get(TOKEN_ENV, "")
-    if not token:
-        print(f"{TOKEN_ENV} is not set; export the orchestrator's loopback token.", file=sys.stderr)
-        return 2
-    if not _is_valid_token(token):
-        print(_INVALID_TOKEN_MESSAGE, file=sys.stderr)
-        return 2
     arguments = list(sys.argv[1:] if argv is None else argv)
-    # Checked before parsing, because a parse or settings error would quote the argument.
-    if any(token in argument for argument in arguments):
-        print(f"the token must not be passed on the command line; set ${TOKEN_ENV} instead.",
-              file=sys.stderr)
+    try:
+        token = read_token(arguments)
+    except TokenError as error:
+        print(error, file=sys.stderr)
         return 2
     try:
         args = parser.parse_args(arguments)
@@ -572,7 +553,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # starting the server itself are skipped.
         settings = load_settings(args.settings, verify_paths=False) if args.settings else Settings()
     except SettingsError as error:
-        print(error, file=sys.stderr)
+        print(redact(str(error), token), file=sys.stderr)
         return 2
     transport = LoopbackTransport(_base_url(settings), token, timeout=args.timeout)
     try:

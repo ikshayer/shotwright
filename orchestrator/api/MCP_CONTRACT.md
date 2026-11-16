@@ -255,6 +255,72 @@ with `isError` true exactly when the status is not 2xx:
   delays the next message. (Accepted for this version; async operations return 202
   promptly, so only synchronous operations block.)
 
+## Part C — launching the server, and the one token source
+
+The adapter is useless unless the server can be started with the same token, and until
+now the only way was a Python snippet passing `token=` in source. Both entry points read
+the token from the same place, through one module, so they cannot disagree about it.
+
+### C1. `orchestrator/api/loopback_token.py` — binding interface
+
+```python
+TOKEN_ENV = "CCTV_PIPELINE_TOKEN"
+INVALID_TOKEN_MESSAGE: str          # names TOKEN_ENV and the rule; never contains a token
+
+class TokenError(Exception):
+    """The token is missing, malformed, or exposed on the command line.
+    Its message never contains the token."""
+
+def is_valid_token(token: str) -> bool        # non-empty, every char in 0x21-0x7E
+def read_token(argv: Sequence[str]) -> str
+```
+
+`read_token` reads `os.environ[TOKEN_ENV]` and raises `TokenError`, in this order: absent
+or empty (message names `TOKEN_ENV`); not valid (`INVALID_TOKEN_MESSAGE`); contained in
+any element of `argv` (says it must not be passed on the command line, and names
+`TOKEN_ENV`). Standard library only.
+
+`orchestrator/api/mcp.py` uses it and keeps no copy of these rules: `mcp.TOKEN_ENV`
+remains importable (it is the same object), `LoopbackTransport` validates with
+`is_valid_token`, and `mcp.main` behaviour in B2 is unchanged.
+
+### C2. `orchestrator/api/launch.py` — `cctv-pipeline-serve`
+
+```python
+def main(argv: Sequence[str] | None = None) -> int
+```
+
+`python -m orchestrator.api.launch [--settings settings.toml] [--project-root DIR]`, and a
+console script `cctv-pipeline-serve = "orchestrator.api.launch:main"`. (Not `serve.py`:
+`orchestrator/api/__init__.py` exports the function `serve`, and a submodule of that name
+would replace the attribute.)
+
+- The token comes from `read_token(argv)`; a `TokenError` prints its message to stderr and
+  returns `2`. **No token is ever generated or printed**: a printed token lands in
+  terminal scrollback and logs. The error tells the user how to make one:
+  `python -c "import secrets; print(secrets.token_hex(32))"`.
+- Settings: `load_settings(path, verify_paths=False)` when `--settings` is given, else
+  `Settings()`; then `--project-root` overrides `project_root`; **then**, when `--settings`
+  was given, `check_paths_exist` runs on the final settings and any issue is a
+  `SettingsError` — this process does start adapters, unlike the MCP client. Verifying
+  before the override (as first written here, and as the CLI still does) made
+  `--settings` with `--project-root` fail whenever the file's own `project_root` did not
+  exist, although it was about to be replaced. (Found end to end.) Finally the project
+  root is checked through `ProjectRoot(...)`, so a missing one is reported before
+  uvicorn starts.
+- Every diagnostic either entry point prints that quotes user input (settings and path
+  errors) passes through `loopback_token.redact(text, token)`: a token pasted into the
+  wrong place in `settings.toml` would otherwise be quoted back. (Found in review.)
+- **Known limit, not addressed:** uvicorn's access log records request URLs. The adapter
+  sends the token only as a header, but a client that puts it in a query string would
+  have it logged. Tracebacks propagating from `serve` are not redacted either.
+- Then it calls `serve(settings, token)` from `orchestrator.api.app`, imported at module
+  level as `serve` so a test can replace `launch.serve`.
+- `SettingsError` and `ContainmentError` (a missing project root) raised before serving
+  starts print to stderr and return `2`. Nothing else is caught: a failure while serving
+  is a real failure and propagates.
+- Returns `0` when `serve` returns.
+
 ## Test rules
 
 - No GPU, Blender, ComfyUI or network beyond loopback.
