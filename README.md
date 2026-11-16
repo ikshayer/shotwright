@@ -7,6 +7,10 @@ tape, and keeps a provenance receipt for everything it made.
 ```
 FLUX  ──►  TRELLIS + Blender  ──►  MiniMax H3  ──►  post profile  ──►  cut
 stills      3D assets, scenes      video + audio     tape degrade      episode
+                                        │
+                                        ▼
+                              Qwen2.5-Omni (local)
+                           joint audio + video review
 ```
 
 Everything runs on one machine. The orchestrator binds to loopback only and requires a token, so
@@ -23,6 +27,12 @@ nothing is exposed to the network.
   clear redistribution.
 - **Long work is queued, not blocked.** Scene builds, renders, generation and degradation are
   submitted to a job queue and answered with a job record; the rest of the API stays responsive.
+- **Review is advisory, never automatic.** A local Qwen2.5-Omni helper watches a take and writes
+  notes on it — `joint` audio-and-video together, or `audio` alone — judged against a creator's
+  stated intent rather than against clean studio fidelity, so deliberate hiss and distortion read
+  as intended rather than as faults. Its output is text for a person to weigh: it cannot approve a
+  shot or change any project entity, and it runs outside the API, the job queue and the production
+  GPU lease so a review can never contend with a render.
 - **Determinism where it matters.** Post profiles and timeline assembly are reproducible so a shot
   can be re-derived rather than remembered.
 
@@ -70,7 +80,8 @@ Run the tests with `pytest`.
 | `orchestrator/api` | FastAPI app, route table, CLI, generated tool manifest |
 | `orchestrator/domain` | Entities and invariants: projects, episodes, shots, scenes, assets |
 | `orchestrator/service` | Business logic: scripts, dependencies, sourcing, credits, H3, compose |
-| `orchestrator/adapters` | External tools: `blender`, `comfyui`, `minimax_h3`, `qwen`, `assets`, `postprofile`, `timeline` |
+| `orchestrator/adapters` | External tools: `blender`, `comfyui`, `minimax_h3`, `assets`, `postprofile`, `timeline` |
+| `orchestrator/adapters/qwen` | Local Qwen2.5-Omni review helper, standalone and advisory-only |
 | `orchestrator/jobs` | Job queue and journal |
 | `orchestrator/store` | On-disk project store |
 | `spikes/` | 23 research spikes, each with a contract and findings |
