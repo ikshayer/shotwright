@@ -749,7 +749,13 @@ def create_app(
         _register_operation(app, operation, context)
     # The manifest is deliberately NOT built or cached here. It is derived from the
     # route table on demand by build_manifest(), and storing a copy on app.state would
-    # be the duplicated source of truth this contract forbids.
+    # be the duplicated source of truth this contract forbids. This meta-route builds it
+    # per request for the same reason; like /openapi.json it is transport, not an
+    # operation, so it is outside OPERATIONS and the schema.
+    @app.get("/tool-manifest", include_in_schema=False)
+    async def tool_manifest() -> dict[str, Any]:
+        return build_manifest(app)
+
     return app
 
 

@@ -33,45 +33,68 @@ def build_manifest(app: FastAPI) -> dict[str, Any]:
             operation = path_item.get(method.lower())
             if operation is None:
                 continue
-            parameters = {
-                "type": "object",
-                "properties": {
-                    item["name"]: item.get("schema", {"type": "string"})
-                    for item in operation.get("parameters", [])
-                    if item.get("in") == "path"
-                },
-                "required": [
-                    item["name"]
-                    for item in operation.get("parameters", [])
-                    if item.get("in") == "path" and item.get("required")
-                ],
-                "additionalProperties": True,
-            }
+            # Header parameters (the loopback token) are transport, not inputs an agent
+            # supplies, so only path and query parameters are published.
+            declared = [
+                item for item in operation.get("parameters", [])
+                if item.get("in") in {"path", "query"}
+            ]
+            properties: dict[str, Any] = {}
+            required: list[str] = []
+            for item in declared:
+                name = item["name"]
+                if name in properties:
+                    raise ValueError(
+                        f"route {route.name!r}: parameter name {name!r} is declared "
+                        "more than once among path and query parameters"
+                    )
+                properties[name] = item.get("schema", {"type": "string"})
+                if item.get("required"):
+                    required.append(name)
             request_body = operation.get("requestBody", {})
             content = request_body.get("content", {})
             # Multipart matters as much as JSON: without it an upload operation would be
             # published with no input at all, so an agent could not call it.
+            body_kind = (
+                "json" if "application/json" in content
+                else "multipart" if "multipart/form-data" in content
+                else None
+            )
             body_schema = (
                 content.get("application/json")
                 or content.get("multipart/form-data")
                 or {}
             ).get("schema")
-            required = list(parameters["required"])
-            if body_schema is not None and request_body.get("required"):
-                required.append("payload")
+            if body_schema is not None:
+                if "payload" in properties:
+                    raise ValueError(
+                        f"route {route.name!r}: parameter name 'payload' collides "
+                        "with the request body property"
+                    )
+                properties["payload"] = body_schema
+                if request_body.get("required"):
+                    required.append("payload")
             tools.append({
                 "name": route.name,
                 "description": operation.get("summary", ""),
                 "input_schema": {
                     "type": "object",
-                    "properties": {
-                        **parameters["properties"],
-                        **({"payload": body_schema} if body_schema else {}),
-                    },
+                    "properties": properties,
                     "required": required,
                     "additionalProperties": False,
                 },
-                "http": {"method": method.upper(), "path": route.path},
+                "http": {
+                    "method": method.upper(),
+                    "path": route.path,
+                    "path_params": [
+                        item["name"] for item in declared if item["in"] == "path"
+                    ],
+                    "query_params": [
+                        item["name"] for item in declared if item["in"] == "query"
+                    ],
+                    "body": body_kind if body_schema is not None else None,
+                },
+                "asynchronous": route.status_code == 202,
             })
     # A body schema is a "$ref" into the generated components, so the components travel
     # with the manifest. Without them the references dangle and a tool definition cannot
