@@ -1,0 +1,5 @@
+# Pinned provenance: these files are identified by SHA-256 in receipts and checked
+# before inference, so their bytes must not depend on the platform that checked them
+# out. Without this, core.autocrlf=true writes CRLF and every pin fails.
+spikes/22_minimax_h3_workflows/** -text
+spikes/23_joint_av_analyzer/** -text
