@@ -25,8 +25,10 @@ from orchestrator.domain.entities import (
     RubricScores,
     Script,
     Shot,
+    VoiceConsent,
 )
 from orchestrator.service.minimax_h3 import H3CancelBody, H3GenerateBody, H3PromoteBody
+from orchestrator.service.tts import IndexTts2SpeechBody, PiperSpeechBody
 
 
 class OpenRequest(BaseModel):
@@ -133,6 +135,8 @@ class AssetRegistration(BaseModel):
     attribution_surface_required: bool = False
     reuse_scope: str = "project"
     expected_version: int = Field(default=0, ge=0)
+    voice_consent: VoiceConsent | None = None
+    voice_consent_basis: str | None = None
 
 
 #: Leading bytes carried for magic-byte detection; enough for every signature
@@ -220,6 +224,9 @@ OPERATIONS = (
     Operation("promote_h3_candidate", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/h3-candidates/{candidate_id}/promote", "Promote an approved H3 candidate to a production output", True, "service.minimax_h3", H3PromoteBody, _call("promote_h3_candidate")),
     Operation("cancel_h3_candidate", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/h3-candidates/{job_id}/cancel", "Cancel an H3 candidate job", True, "jobs.queue", H3CancelBody, _call("cancel_h3_candidate")),
     Operation("inspect_h3", "GET", "/models/minimax-h3", "Inspect configured MiniMax H3 runtime", False, "service.minimax_h3", None, _call("inspect_h3")),
+    Operation("inspect_tts", "GET", "/models/tts", "Inspect configured text-to-speech runtimes (Piper, IndexTTS-2) and the Piper voice catalog", False, "service.tts", None, _call("inspect_tts")),
+    Operation("generate_piper_speech", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/speech/piper", "Synthesise a processed-source voice take (PA, answering machine, broadcast) with Piper on the CPU", True, "service.tts", PiperSpeechBody, _call("generate_piper_speech")),
+    Operation("generate_indextts2_speech", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/speech/indextts2", "Synthesise a diegetic voice take with IndexTTS-2 on the GPU, cloning a consented speaker reference and steering emotion", True, "service.tts", IndexTts2SpeechBody, _call("generate_indextts2_speech")),
     Operation("report_jobs", "GET", "/projects/{project_id}/jobs", "Report jobs", False, "jobs.queue", None, _call("report_jobs")),
     Operation("apply_typed_feedback", "POST", "/projects/{project_id}/feedback", "Apply typed feedback", True, "service.apply_typed_feedback", OpenRequest, _call("apply_typed_feedback")),
     Operation("score_rubric", "POST", "/projects/{project_id}/rubric/score", "Score rubric criteria", True, "domain.entities.RubricScores", RubricRequest, _call("score_rubric")),
@@ -238,4 +245,6 @@ ASYNC_ADAPTER_OPERATIONS = frozenset({
     "generate_media",
     "degrade_media",
     "generate_h3_candidate",
+    "generate_piper_speech",
+    "generate_indextts2_speech",
 })

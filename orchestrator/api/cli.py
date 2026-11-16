@@ -62,6 +62,16 @@ def _error_payload(exc: Exception) -> dict[str, Any]:
     return error_body(type(exc).__name__, str(exc))
 
 
+#: Jobs whose GPU/CPU process is owned by this CLI process: they cannot outlive it, so
+#: `--no-wait` is refused and Ctrl+C requests cancellation and waits for cleanup.
+_SPEECH_OPERATIONS = frozenset({"generate_piper_speech", "generate_indextts2_speech"})
+_LOCALLY_OWNED_JOBS = {
+    "generate_h3_candidate": "H3",
+    "generate_piper_speech": "Piper",
+    "generate_indextts2_speech": "IndexTTS-2",
+}
+
+
 def _command_callback(operation_name: str):
     def run(data: str, json_output: bool, **values: Any) -> None:
         context = click.get_current_context()
@@ -85,8 +95,11 @@ def _command_callback(operation_name: str):
             if model is not None:
                 payload = model.model_validate(payload).model_dump(mode="python")
             wait_for_job = values.pop("wait", True)
-            if operation_name == "generate_h3_candidate" and not wait_for_job:
-                raise ValueError("H3 CLI jobs cannot use --no-wait because the local process owns cleanup")
+            if operation_name in _LOCALLY_OWNED_JOBS and not wait_for_job:
+                raise ValueError(
+                    f"{_LOCALLY_OWNED_JOBS[operation_name]} CLI jobs cannot use --no-wait because "
+                    "the local process owns cleanup"
+                )
             payload.update({key: value for key, value in values.items() if value is not None})
             if files:
                 payload["uploads"] = [_describe_file(path) for path in files]
@@ -109,6 +122,8 @@ def _command_callback(operation_name: str):
                     raise JobError(kind, f"job {job.job_id} ended in state {job.state}",
                                    job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
                 result = {"job_id": job.job_id, "state": job.state}
+                if operation_name in _SPEECH_OPERATIONS:
+                    result.update({"run_id": submitted["run_id"], "asset_id": submitted["asset_id"]})
                 if operation_name == "generate_h3_candidate":
                     if root is None:
                         raise RuntimeError("project root is required to read the H3 candidate receipt")
@@ -121,7 +136,7 @@ def _command_callback(operation_name: str):
                                    "wav_path": candidate.wav_path, "report_path": candidate.report_path})
         except KeyboardInterrupt:
             cleanup_error = None
-            if operation_name == "generate_h3_candidate" and submitted and operation_context is not None and operation_context.job_runner is not None:
+            if operation_name in _LOCALLY_OWNED_JOBS and submitted and operation_context is not None and operation_context.job_runner is not None:
                 try:
                     operation_context.job_runner.cancel(payload["project_id"], submitted["job_id"])
                     operation_context.job_runner.wait(payload["project_id"], submitted["job_id"])
@@ -129,7 +144,8 @@ def _command_callback(operation_name: str):
                 except Exception as exc:  # noqa: BLE001 - report a cleanup failure alongside the interrupt, never instead of it.
                     cleanup_error = f"{type(exc).__name__}: {exc}"
             click.echo(json.dumps(error_body(
-                "cancelled", "H3 candidate generation interrupted",
+                "cancelled", ("H3 candidate generation interrupted" if operation_name == "generate_h3_candidate"
+                 else f"{_LOCALLY_OWNED_JOBS.get(operation_name, 'job')} speech generation interrupted"),
                 cleanup_error=cleanup_error,
             )), err=True)
             raise click.exceptions.Exit(130)

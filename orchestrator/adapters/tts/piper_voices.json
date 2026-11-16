@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "voices": [
+    {
+      "voice_id": "en_US-ryan-high",
+      "gender": "male",
+      "license": "MIT",
+      "license_source": "PRD v1.2 §8.4, measured 2026-11-04 (spike 05)",
+      "onnx_sha256": "b3990d7606e183ec8dbfba70a4607074f162de1a0c412e0180d1ff60bb154eca",
+      "onnx_bytes": 120786792,
+      "config_sha256": "c6d3b98f08315cb4bebf0d49d50fc4ff491b503c64b940cd3d5ca28543b48011",
+      "sample_rate": 22050
+    }
+  ]
+}

@@ -177,6 +177,65 @@ class MinimaxH3Settings(_Section):
         return self
 
 
+def _strict_finite_number(value: object, label: str) -> object:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{label} must be a number, not a boolean or string")
+    if not math.isfinite(value):
+        raise ValueError(f"{label} must be finite")
+    return value
+
+
+class PiperSettings(_Section):
+    """Piper (CPU) text-to-speech for processed-source voices. Disabled by default."""
+
+    enabled: bool = False
+    timeout_seconds: float = Field(120.0, gt=0, description="Wall clock for one synthesis subprocess.")
+
+    @field_validator("timeout_seconds", mode="before")
+    @classmethod
+    def _strict_timeout(cls, value: object) -> object:
+        return _strict_finite_number(value, "piper.timeout_seconds")
+
+
+class Indextts2Settings(_Section):
+    """IndexTTS-2 (GPU) diegetic voice synthesis. Disabled by default.
+
+    The reservations are operator admission policy, not measured model minima: no VRAM
+    figure for IndexTTS-2 has been measured (spike 05, Finding 5 measured host RAM only).
+    """
+
+    enabled: bool = False
+    required_vram_gb: float | None = None
+    required_ram_gb: float | None = None
+    required_disk_gb: float | None = None
+    startup_allowance_seconds: float = Field(300.0, gt=0)
+    execution_timeout_seconds: float = Field(900.0, gt=0)
+    use_fp16: bool = True
+
+    @field_validator("required_vram_gb", "required_ram_gb", "required_disk_gb", mode="before")
+    @classmethod
+    def _strict_numeric_when_set(cls, value: object) -> object:
+        if value is None:
+            return value
+        _strict_finite_number(value, "IndexTTS-2 reservations")
+        if value <= 0:  # type: ignore[operator]
+            raise ValueError("IndexTTS-2 reservations must be finite positive values")
+        return value
+
+    @field_validator("startup_allowance_seconds", "execution_timeout_seconds", mode="before")
+    @classmethod
+    def _strict_timeouts(cls, value: object) -> object:
+        return _strict_finite_number(value, "IndexTTS-2 timeouts")
+
+    @model_validator(mode="after")
+    def _enabled_is_explicit(self) -> Indextts2Settings:
+        if self.enabled and any(value is None for value in (
+            self.required_vram_gb, self.required_ram_gb, self.required_disk_gb,
+        )):
+            raise ValueError("enabled IndexTTS-2 requires explicit VRAM/RAM/disk reservations")
+        return self
+
+
 class Settings(_Section):
     _runtime_secrets: set[str] = PrivateAttr(default_factory=set)
     project_root: Path = Field(Path("projects"), description="Active project root; all writes are contained here.")
@@ -198,6 +257,8 @@ class Settings(_Section):
     resources: ResourceSettings = ResourceSettings()
     asset_providers: AssetProviderSettings = AssetProviderSettings()
     minimax_h3: MinimaxH3Settings = MinimaxH3Settings()
+    piper: PiperSettings = PiperSettings()
+    indextts2: Indextts2Settings = Indextts2Settings()
     credentials: dict[str, str] = Field(
         default_factory=dict,
         description="provider name -> NAME of the environment variable holding its secret. Never the secret.",

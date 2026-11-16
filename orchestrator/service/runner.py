@@ -43,6 +43,19 @@ class AdapterKind(StrEnum):
     GENERATE = "generate"
     DEGRADE = "degrade"
     H3_CANDIDATE = "h3_candidate"
+    TTS_PIPER = "tts_piper"
+    TTS_INDEXTTS2 = "tts_indextts2"
+
+
+#: Kinds that never take the GPU lease: they pass CPU admission and run outside the GPU lock.
+_CPU_KINDS = frozenset({AdapterKind.SCENE, AdapterKind.DEGRADE, AdapterKind.TTS_PIPER})
+#: Kinds that run under the GPU lease, the budget ledger and the watchdog.
+_GPU_KINDS = frozenset({
+    AdapterKind.RENDER, AdapterKind.GENERATE, AdapterKind.H3_CANDIDATE, AdapterKind.TTS_INDEXTTS2,
+})
+#: Kinds whose output is a candidate/take beside the Shot: payload `{"request": ..., "expected_version": ...}`,
+#: a `run_id` of their own, and no change to the Shot, its status or its ShotOutputs.
+_SIDECAR_KINDS = frozenset({AdapterKind.H3_CANDIDATE, AdapterKind.TTS_PIPER, AdapterKind.TTS_INDEXTTS2})
 
 
 @dataclass(frozen=True)
@@ -109,6 +122,8 @@ class _AdapterShim:
                 cancel=self.cancel_check or _cancel_callback(request.payload),
             )
             return AdapterResult(artifact_path=result.av_path, value=result)
+        if self.kind in {AdapterKind.TTS_PIPER, AdapterKind.TTS_INDEXTTS2}:
+            return self.adapter.invoke(request, job, queue=queue, cancel=self.cancel_check)
         if isinstance(payload, dict):
             payload = payload.get("request", payload)
         if self.kind is AdapterKind.SCENE:
@@ -167,6 +182,8 @@ class JobRunner:
         self._condition = threading.Condition()
         self._pending: deque[tuple[str, AdapterRequest, Job]] = deque()
         self._cancelled: set[tuple[str, str]] = set()
+        #: Speech jobs whose result is being registered; a cancel no longer applies to them.
+        self._finalizing: set[tuple[str, str]] = set()
         self._active: set[tuple[str, str]] = set()
         self._project_locks: dict[str, threading.Lock] = {}
         self._closed = False
@@ -224,7 +241,7 @@ class JobRunner:
             except RecordNotFound as exc:
                 raise RecordNotFound(f"bound Shot {request.record_id!r} does not exist") from exc
             episode_id = shot.episode_id
-            if request.kind is AdapterKind.H3_CANDIDATE:
+            if request.kind in _SIDECAR_KINDS:
                 expected = request.payload.get("expected_version") if isinstance(request.payload, dict) else None
                 _, current_token = store.load_with_version(Shot, request.record_id, episode_id=episode_id)
                 if type(expected) is not int or expected != current_token:
@@ -255,15 +272,13 @@ class JobRunner:
                 run_id=(request.payload.run_id
                         if isinstance(request.payload, (RenderRequest, DegradeRequest))
                         else request.payload["request"].run_id
-                        if request.kind is AdapterKind.H3_CANDIDATE and isinstance(request.payload, dict)
+                        if request.kind in _SIDECAR_KINDS and isinstance(request.payload, dict)
                         else uuid.uuid4().hex),
             )
             # Admission refusal is part of submit's synchronous contract. The id is
             # not persisted or returned until preflight succeeds.
             queue = _kind_queue(self.queue_for, project_id, request.kind)
-            preflight = queue.preflight_cpu if request.kind in {
-                AdapterKind.SCENE, AdapterKind.DEGRADE,
-            } else queue.preflight
+            preflight = queue.preflight_cpu if request.kind in _CPU_KINDS else queue.preflight
             preflight(job)
             root = store._root
             root.make_dir("state/jobs")
@@ -276,12 +291,18 @@ class JobRunner:
     def cancel(self, project_id: str, job_id: str) -> Job:
         store = self.store_for(project_id)
         root = store._root
-        record = read_job(root, job_id)
-        if record is None:
-            raise RecordNotFound(f"job {job_id!r} does not exist")
-        job = Job.model_validate(record)
-        if job.state not in {"completed", "failed", "cancelled"}:
-            with self._condition:
+        # The record is read under the same lock a speech job holds while it decides between
+        # "completed with an Asset" and "cancelled", so a cancel either lands first (and the
+        # job is cancelled) or finds the job already completed (and changes nothing).
+        with self._condition:
+            record = read_job(root, job_id)
+            if record is None:
+                raise RecordNotFound(f"job {job_id!r} does not exist")
+            job = Job.model_validate(record)
+            if (project_id, job_id) in self._finalizing:
+                # Its result is being registered; the cancel arrived too late to stop it.
+                return job
+            if job.state not in {"completed", "failed", "cancelled"}:
                 self._cancelled.add((project_id, job_id))
                 job.state = "cancelled"
                 job.error_kind = JobErrorKind.CANCELLED.value
@@ -349,8 +370,6 @@ class JobRunner:
             queue = _kind_queue(self.queue_for, project_id, request.kind)
             adapter = self.adapters.get(request.kind)
             set_cancel_check = getattr(adapter, "set_cancel_check", None)
-            if callable(set_cancel_check):
-                set_cancel_check(lambda: self._is_cancelled(key))
 
             def invoke_if_not_cancelled(active: Job) -> AdapterResult:
                 if self._is_cancelled(key):
@@ -358,8 +377,13 @@ class JobRunner:
                         JobErrorKind.CANCELLED, "job cancelled before adapter start", active
                     )
                 try:
-                    if request.kind is not AdapterKind.H3_CANDIDATE:
+                    if request.kind not in _SIDECAR_KINDS:
                         _begin_shot_work(store, request, active)
+                    if callable(set_cancel_check):
+                        # Installed here, on the thread that is about to call the adapter
+                        # (not earlier, while this job may still wait for the GPU lock), so a
+                        # concurrent job on the same adapter cannot replace or clear it.
+                        set_cancel_check(lambda: self._is_cancelled(key))
                     return adapter.invoke(request, active, queue=queue)
                 except Exception as exc:
                     raise JobError.from_exception(
@@ -369,17 +393,15 @@ class JobRunner:
 
             if self._is_cancelled(key):
                 raise _job_error(JobErrorKind.CANCELLED, "job cancelled before adapter start", job)
-            if request.kind in {AdapterKind.RENDER, AdapterKind.GENERATE, AdapterKind.H3_CANDIDATE}:
+            if request.kind in _GPU_KINDS:
                 with self._gpu_lock:
                     value = queue.run(
                         job, invoke_if_not_cancelled,
-                        startup_allowance_seconds=self.settings.resources.startup_allowance_seconds,
+                        startup_allowance_seconds=self._startup_allowance(request.kind),
                     )
             else:
                 queue._transition(job, "queued")
-                preflight = queue.preflight_cpu if request.kind in {
-                    AdapterKind.SCENE, AdapterKind.DEGRADE,
-                } else queue.preflight
+                preflight = queue.preflight_cpu if request.kind in _CPU_KINDS else queue.preflight
                 preflight(job)
                 if self._is_cancelled(key):
                     raise _job_error(JobErrorKind.CANCELLED, "job cancelled before adapter start", job)
@@ -396,6 +418,23 @@ class JobRunner:
             if request.kind is AdapterKind.H3_CANDIDATE:
                 from orchestrator.service.minimax_h3 import persist_h3_candidate
                 persist_h3_candidate(store, job, result.value, request.payload["request"])
+            elif request.kind in {AdapterKind.TTS_PIPER, AdapterKind.TTS_INDEXTTS2}:
+                from orchestrator.service.tts import persist_tts_success
+                with self._condition:
+                    # The decision is one locked step; the persistence I/O is not, so a slow
+                    # disk cannot stall other jobs' cancels and notifications. A cancel that
+                    # took the lock first is seen here; one that arrives after finds the job
+                    # finalizing and leaves it to complete (`cancel`). Exactly one of
+                    # {completed with Asset, cancelled without} results.
+                    if key in self._cancelled:
+                        raise _job_error(JobErrorKind.CANCELLED,
+                                         "job cancelled before its take was registered", job)
+                    self._finalizing.add(key)
+                try:
+                    persist_tts_success(store, job, result.value, request.payload["request"])
+                finally:
+                    with self._condition:
+                        self._finalizing.discard(key)
             else:
                 self._record_result(store, root, request, job, result)
         except JobError as exc:
@@ -406,7 +445,11 @@ class JobRunner:
                                         status="cancelled" if exc.kind is JobErrorKind.CANCELLED else "failed")
                 except Exception as receipt_error:  # noqa: BLE001 - a receipt failure annotates the primary job error.
                     exc.add_note(f"H3 terminal GenerationRun persistence failed: {type(receipt_error).__name__}: {receipt_error}")
-            if exc.kind is not JobErrorKind.CANCELLED and request.kind is not AdapterKind.H3_CANDIDATE:
+            self._persist_tts_terminal(
+                store, job, request,
+                status="cancelled" if exc.kind is JobErrorKind.CANCELLED else "failed", error=exc,
+            )
+            if exc.kind is not JobErrorKind.CANCELLED and request.kind not in _SIDECAR_KINDS:
                 lifecycle_error = _fail_shot_after_job_error(store, request)
                 if lifecycle_error is not None:
                     exc.message = (
@@ -431,10 +474,11 @@ class JobRunner:
                     persist_h3_terminal(store, job, request.payload["request"], status="failed")
                 except Exception as receipt_error:  # noqa: BLE001 - a receipt failure annotates the primary job error.
                     exc.add_note(f"H3 terminal GenerationRun persistence failed: {type(receipt_error).__name__}: {receipt_error}")
+            self._persist_tts_terminal(store, job, request, status="failed", error=exc)
             error = JobError.from_exception(
                 exc, job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id, origin="runner"
             )
-            lifecycle_error = (None if request.kind is AdapterKind.H3_CANDIDATE
+            lifecycle_error = (None if request.kind in _SIDECAR_KINDS
                                else _fail_shot_after_job_error(store, request))
             if lifecycle_error is not None:
                 error.message = (
@@ -450,6 +494,23 @@ class JobRunner:
                 self._active.discard(key)
                 self._cancelled.discard(key)
                 self._condition.notify_all()
+
+    def _startup_allowance(self, kind: AdapterKind) -> float:
+        if kind is AdapterKind.TTS_INDEXTTS2:
+            return self.settings.indextts2.startup_allowance_seconds
+        return self.settings.resources.startup_allowance_seconds
+
+    @staticmethod
+    def _persist_tts_terminal(store: ProjectStore, job: Job, request: AdapterRequest, *,
+                              status: str, error: BaseException) -> None:
+        if request.kind not in {AdapterKind.TTS_PIPER, AdapterKind.TTS_INDEXTTS2}:
+            return
+        try:
+            from orchestrator.service.tts import persist_tts_terminal
+            persist_tts_terminal(store, job, request.payload["request"], status=status)
+        except Exception as receipt_error:  # noqa: BLE001 - a receipt failure annotates the primary job error.
+            error.add_note(f"speech terminal GenerationRun persistence failed: "
+                           f"{type(receipt_error).__name__}: {receipt_error}")
 
     def _record_result(self, store: ProjectStore, root: ProjectRoot, request: AdapterRequest,
                        job: Job, result: AdapterResult) -> None:

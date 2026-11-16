@@ -7,6 +7,7 @@ import binascii
 import hmac
 import html
 import math
+import threading
 import uuid
 from typing import Annotated, Any
 from urllib.parse import quote, urlsplit
@@ -75,6 +76,15 @@ from orchestrator.service.sourcing import acquire_asset as source_acquire_asset
 from orchestrator.service.sourcing import list_asset_categories as source_list_asset_categories
 from orchestrator.service.sourcing import preview_asset as source_preview_asset
 from orchestrator.service.sourcing import search_assets as source_search_assets
+from orchestrator.service.tts import (
+    IndexTts2SpeechBody,
+    PiperSpeechBody,
+    compose_indextts2_request,
+    compose_piper_request,
+    effective_indextts2_settings,
+    inspect_tts,
+    require_piper_enabled,
+)
 from orchestrator.store.json_store import ProjectStore, RecordNotFound
 
 from .errors import (
@@ -274,6 +284,7 @@ class OperationContext:
                 license=registration.license,
                 source_url=registration.source_url,
                 generated=registration.generated,
+                voice_consent=registration.voice_consent,
             )
             asset = register_asset(
                 self._store(data["project_id"]), source, filename=upload.filename,
@@ -285,6 +296,8 @@ class OperationContext:
                 attribution_surface_required=registration.attribution_surface_required,
                 reuse_scope=registration.reuse_scope,
                 expected_version=registration.expected_version,
+                voice_consent=registration.voice_consent,
+                voice_consent_basis=registration.voice_consent_basis,
             )
             return asset.model_dump(mode="json")
         if operation == "list_asset_categories":
@@ -434,6 +447,10 @@ class OperationContext:
                 required_ram_gb=policy.required_ram_gb, required_disk_gb=policy.required_disk_gb)
             job = self.job_runner.submit(data["project_id"], request)
             return {"job_id": job.job_id, "state": job.state, "run_id": request_model.run_id}
+        if operation == "inspect_tts":
+            return inspect_tts(self.settings)
+        if operation in {"generate_piper_speech", "generate_indextts2_speech"}:
+            return self._submit_speech(operation, data)
         if operation == "report_jobs":
             queue = self.job_queues.get(data["project_id"])
             return self._read_job_reports(data["project_id"], root=queue.root if queue else None)
@@ -498,6 +515,46 @@ class OperationContext:
         if item is None:
             raise MissingAdapter(operation)
         raise MissingAdapter(item.adapter)
+
+    def _submit_speech(self, operation: str, data: dict[str, Any]) -> dict[str, Any]:
+        """Validate a speech request, then submit it as a job bound to its Shot."""
+        if self.job_runner is None:
+            raise RuntimeError("default JobRunner was not configured")
+        piper = operation == "generate_piper_speech"
+        kind = AdapterKind.TTS_PIPER if piper else AdapterKind.TTS_INDEXTTS2
+        # Settings first, as for H3: a disabled engine names its section before anything
+        # about the body is judged.
+        if piper:
+            require_piper_enabled(self.settings)
+        else:
+            effective_indextts2_settings(self.settings)
+        if self._runtime is not None:
+            adapter = self._runtime.adapter_for(self._project_root(data["project_id"]), kind)
+            if piper:
+                adapter.require_ready(data.get("voice_id", ""))
+            else:
+                adapter.require_ready()
+        body_model = PiperSpeechBody if piper else IndexTts2SpeechBody
+        body = body_model.model_validate({key: value for key, value in data.items()
+                                          if key in body_model.model_fields})
+        store = self._store(data["project_id"])
+        run_id = uuid.uuid4().hex
+        compose = compose_piper_request if piper else compose_indextts2_request
+        speech = compose(store, shot_id=data["shot_id"], episode_id=data["episode_id"],
+                         body=body, run_id=run_id)
+        policy = self.settings.indextts2
+        reservations = {} if piper else {
+            "required_vram_gb": policy.required_vram_gb, "required_ram_gb": policy.required_ram_gb,
+            "required_disk_gb": policy.required_disk_gb,
+        }
+        request = AdapterRequest(
+            kind=kind, payload={"request": speech, "expected_version": body.expected_version},
+            record_id=data["shot_id"], record_version=speech.shot_version,
+            episode_id=data["episode_id"], **reservations,
+        )
+        job = self.job_runner.submit(data["project_id"], request)
+        return {"job_id": job.job_id, "state": job.state, "run_id": run_id,
+                "asset_id": f"tts-{run_id}"}
 
     def _read_job_reports(
         self, project_id: str, *, root: ProjectRoot | None = None
@@ -884,21 +941,23 @@ class _CpuWorker:
 class _RuntimeAdapter:
     def __init__(self, runtime: _DefaultRuntime, kind: AdapterKind) -> None:
         self.runtime, self.kind = runtime, kind
-        self._cancel_check: Any = None
+        # Per calling thread: the runner installs the check on the thread that then calls
+        # `invoke`, so jobs running concurrently on this adapter keep their own.
+        self._local = threading.local()
 
     def set_cancel_check(self, check: Any) -> None:
-        self._cancel_check = check
+        self._local.cancel_check = check
 
     def invoke(self, request: Any, job: Any, *, queue: JobQueue) -> Any:
         adapter = self.runtime.adapter_for(queue.root, self.kind)
         from orchestrator.service.runner import _AdapterShim
 
         shim = _AdapterShim(self.kind, adapter, self.runtime.settings)
-        shim.cancel_check = self._cancel_check
+        shim.cancel_check = getattr(self._local, "cancel_check", None)
         try:
             return shim.invoke(request, job, queue=queue)
         finally:
-            self._cancel_check = None
+            self._local.cancel_check = None
 
     def close(self) -> None:
         self.runtime.close()
@@ -960,9 +1019,17 @@ class _DefaultRuntime:
                 elif kind is AdapterKind.H3_CANDIDATE:
                     from orchestrator.adapters.minimax_h3 import MinimaxH3Adapter
                     adapter = MinimaxH3Adapter(project_root, effective_h3_settings(self.settings))
-                else:
+                elif kind is AdapterKind.TTS_PIPER:
+                    from orchestrator.adapters.tts import PiperAdapter
+                    adapter = PiperAdapter(project_root, self.settings)
+                elif kind is AdapterKind.TTS_INDEXTTS2:
+                    from orchestrator.adapters.tts import IndexTTS2Adapter
+                    adapter = IndexTTS2Adapter(project_root, effective_indextts2_settings(self.settings))
+                elif kind is AdapterKind.DEGRADE:
                     from orchestrator.adapters.postprofile.runner import PostProfileAdapter
                     adapter = PostProfileAdapter(project_root, self.settings)
+                else:
+                    raise ValueError(f"no adapter is defined for {kind.value}")
                 self._adapters[key] = adapter
             return self._adapters[key]
 
@@ -979,7 +1046,8 @@ class _DefaultRuntime:
             if key in self._queues:
                 return self._queues[key]
             adapter = self.adapter_for(root, kind)
-            queue_settings = adapter.settings if kind is AdapterKind.H3_CANDIDATE else self.settings
+            queue_settings = (adapter.settings if kind in {AdapterKind.H3_CANDIDATE, AdapterKind.TTS_INDEXTTS2}
+                              else self.settings)
             if self._nvml is None:
                 self._nvml = PynvmlProbe()
             worker = getattr(adapter, "worker", _CpuWorker())
