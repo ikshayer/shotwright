@@ -71,6 +71,44 @@ def _first_value(pairs: list[tuple[str, Any]], key: str) -> Any:
     return next(value for candidate, value in pairs if candidate == key)
 
 
+def _path_values(node: Any, path: tuple[str, ...] = ()):
+    if isinstance(node, dict):
+        for key, value in node.items():
+            child_path = (*path, str(key))
+            yield child_path, value
+            yield from _path_values(value, child_path)
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            child_path = (*path, str(index))
+            yield child_path, value
+            yield from _path_values(value, child_path)
+
+
+def _register_emotion_reference(env: Environment, *, reuse_scope: str = "internal evaluation only") -> Asset:
+    data = _wav_bytes()
+    path = "assets/audio/emotion/performance.wav"
+    env.root.write_bytes(path, data)
+    emotion = Asset.model_validate({
+        "asset_id": "emotion", "type": "audio", "generated": False,
+        "license": "ODbL and DbCL", "source_url": "https://example.invalid/crema-d/sample.wav",
+        "file_path": path,
+        "checksum": hashlib.sha256(data).hexdigest(),
+        "voice_consent": "licensed_recording",
+        "voice_consent_basis": "CREMA-D is licensed under ODbL and DbCL for reuse, not cloning.",
+        "reuse_scope": reuse_scope,
+    })
+    env.store.save(emotion, expected_version=0)
+    return emotion
+
+
+def _has_report_value(report: Any, required_path_fragments: tuple[str, ...], expected: Any) -> bool:
+    return any(
+        all(fragment in "/".join(path).lower() for fragment in required_path_fragments)
+        and value == expected
+        for path, value in _path_values(report)
+    )
+
+
 def _output_path_from_request(request: Any, project_path: Path) -> Path:
     matches: list[Path] = []
     for key, value in _all_key_values(request):
@@ -530,9 +568,11 @@ def test_success_retains_exact_take_report_run_asset_and_unchanged_shot(tts_exec
     assert asset.file_path == take_path
     assert asset.checksum == hashlib.sha256(wav_bytes).hexdigest()
     assert asset.license == PENDING_LICENSE
-    assert asset.reuse_scope == "project"
     if engine == "piper":
-        assert asset.model_or_voice_license == "MIT"
+        # Contract 1.1 amendment: both catalogued voices are non-commercial, so their takes
+        # are internal evaluation only (a publication blocker in credits).
+        assert asset.reuse_scope == "internal evaluation only"
+        assert asset.model_or_voice_license.startswith("CC BY-NC-SA 4.0")
         assert asset.voice_consent == "synthetic"
         assert asset.voice_consent_basis is None
         assert lease_states == [False]
@@ -541,6 +581,8 @@ def test_success_retains_exact_take_report_run_asset_and_unchanged_shot(tts_exec
         assert "c6d3b98f08315cb4bebf0d49d50fc4ff491b503c64b940cd3d5ca28543b48011" in report_values
     else:
         assert asset.model_or_voice_license == INDEX_LICENSE
+        # A clone inherits its speaker reference's reuse scope.
+        assert asset.reuse_scope == env.store.load(Asset, "speaker").reuse_scope
         assert asset.voice_consent == "licensed_for_cloning"
         assert asset.voice_consent_basis == "The licence permits cloning for this project."
         assert lease_states == [True]
@@ -559,6 +601,92 @@ def test_success_retains_exact_take_report_run_asset_and_unchanged_shot(tts_exec
         assert _first_value(report_pairs, reserved_key) == 234567
 
 
+@pytest.mark.parametrize("tts_execution", [("indextts2", None)], indirect=True)
+def test_reference_emotion_report_run_inputs_and_take_restrictions(tts_execution) -> None:
+    client, env, calls, _lease_states, engine = tts_execution
+    assert engine == "indextts2"
+
+    speaker, speaker_version = env.store.load_with_version(Asset, "speaker")
+    speaker_fields = speaker.model_dump(mode="json")
+    speaker_fields["reuse_scope"] = "project"
+    env.store.save(Asset.model_validate(speaker_fields), expected_version=speaker_version)
+    speaker = env.store.load(Asset, "speaker")
+    emotion = _register_emotion_reference(env, reuse_scope="internal evaluation only")
+
+    body = _body("indextts2")
+    body["emotion"] = {
+        "mode": "reference", "emotion_asset_id": emotion.asset_id, "strength": 0.63,
+    }
+    response = _post(client, engine, body)
+    assert response.status_code == 202, response.text
+    job = env.runner.wait("p1", response.json()["job_id"])
+    assert job.state == "completed"
+    assert len(calls) == 1
+    run_id = _run_id_from_job(job)
+
+    report = json.loads(env.root.read_text(
+        f"generated/tts/s1/v0001/{run_id}/report.json", encoding="utf-8",
+    ))
+    emotion_sha256 = hashlib.sha256(env.root.read_bytes(emotion.file_path)).hexdigest()
+    assert _has_report_value(report, ("emotion", "asset_id"), emotion.asset_id)
+    assert _has_report_value(report, ("emotion", "sha256"), emotion_sha256)
+    assert emotion.voice_consent == "licensed_recording"
+    assert _has_report_value(report, ("emotion", "consent"), "licensed_recording")
+    assert _has_report_value(report, ("emotion", "reuse_scope"), emotion.reuse_scope)
+    assert _has_report_value(report, ("strength",), 0.63)
+
+    run = env.store.load(GenerationRun, run_id)
+    assert speaker.file_path in run.input_paths
+    assert emotion.file_path in run.input_paths
+
+    take = env.store.load(Asset, f"tts-{run_id}")
+    assert take.voice_consent == speaker.voice_consent
+    assert take.voice_consent != "licensed_recording"
+    assert take.voice_consent_basis == speaker.voice_consent_basis
+    assert take.reuse_scope == "internal evaluation only"
+
+
+@pytest.mark.parametrize("tts_execution", [("indextts2", None)], indirect=True)
+def test_cli_submits_reference_emotion_through_the_indextts2_command(
+    tts_execution, monkeypatch,
+) -> None:
+    _client, env, calls, _lease_states, engine = tts_execution
+    assert engine == "indextts2"
+    emotion = _register_emotion_reference(env)
+
+    from orchestrator.api import cli
+    from tests.api.test_parity import _cli, _runner_and_command
+
+    original_context = cli.OperationContext
+
+    def operation_context(*args, **kwargs):
+        kwargs["job_runner"] = env.runner
+        return original_context(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "OperationContext", operation_context)
+    settings = Settings.model_validate({
+        "project_root": env.root.path.parent,
+        "indextts2": {"enabled": True, **INDEX_RESERVATIONS},
+    })
+    body = {
+        "expected_version": 1,
+        "text": "The CLI should preserve the recorded emotion reference.",
+        "speaker_asset_id": "speaker",
+        "emotion": {
+            "mode": "reference", "emotion_asset_id": emotion.asset_id, "strength": 0.42,
+        },
+    }
+    runner, command = _runner_and_command(_cli())
+    result = runner.invoke(command, [
+        "generate-indextts2-speech", "--project-id", "p1", "--episode-id", "ep1",
+        "--shot-id", "s1", "--data", json.dumps(body), "--json",
+    ], obj={"settings": settings})
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert calls[0].returncode == 0
+
+
 def test_existing_asset_records_without_consent_fields_still_load(tmp_path: Path) -> None:
     legacy = {
         "asset_id": "legacy-voice",
@@ -574,7 +702,7 @@ def test_existing_asset_records_without_consent_fields_still_load(tmp_path: Path
     assert asset.voice_consent_basis is None
 
 
-@pytest.mark.parametrize("consent", ["creator_own_voice", "licensed_for_cloning"])
+@pytest.mark.parametrize("consent", ["creator_own_voice", "licensed_for_cloning", "licensed_recording"])
 @pytest.mark.parametrize("basis", [None, "", "  "])
 def test_non_synthetic_voice_consent_requires_nonblank_basis(consent: str, basis: str | None) -> None:
     fields: dict[str, Any] = {
@@ -836,3 +964,36 @@ def test_cancel_during_tts_persistence_is_nonblocking_and_too_late_to_cancel(
     assert registered_asset.file_path.endswith("/take.wav")
     assert cancelled_b.state == "cancelled"
 
+
+
+# --- reuse scope of IndexTTS-2 takes (contract 1.1 amendment; review 3) ----------------
+
+def _scope_store(tmp_path: Path, reference_scope: str) -> ProjectStore:
+    (tmp_path / "scope_project").mkdir(parents=True, exist_ok=True)
+    store = ProjectStore(ProjectRoot(tmp_path / "scope_project"))
+    store.save(Asset.model_validate({
+        "asset_id": "speaker", "type": "voice", "generated": True, "license": "test",
+        "file_path": "assets/audio/speaker/source.wav", "checksum": "0" * 64,
+        "voice_consent": "synthetic", "reuse_scope": reference_scope,
+    }), expected_version=0)
+    return store
+
+
+@pytest.mark.parametrize("recorded,current,expected", [
+    # A restriction added to the reference while synthesising still reaches the take.
+    ("project", "internal evaluation only", "internal evaluation only"),
+    # A reference loosened after submission does not loosen the take.
+    ("internal evaluation only", "project", "internal evaluation only"),
+    # A request built before speaker_reuse_scope existed reads the current scope.
+    (None, "internal evaluation only", "internal evaluation only"),
+    (None, "project", "project"),
+    ("project", "project", "project"),
+])
+def test_indextts2_take_scope_is_never_less_restrictive_than_its_reference(
+    tmp_path: Path, recorded: str | None, current: str, expected: str,
+) -> None:
+    from orchestrator.service.tts import _restricted_scope
+
+    store = _scope_store(tmp_path, current)
+    request = SimpleNamespace(speaker_asset_id="speaker", speaker_reuse_scope=recorded)
+    assert _restricted_scope(store, request) == expected

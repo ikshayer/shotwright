@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import ast
+import hashlib
 import importlib.util
 import sys
 import threading
@@ -68,9 +69,22 @@ def _keyed_strings(node: Any):
             yield from _keyed_strings(value)
 
 
-def _change_registered_speaker(env: Environment, change: str) -> None:
-    """Mutate the speaker after submission, from the fake adapter invocation seam."""
-    asset, expected_version = env.store.load_with_version(Asset, "speaker")
+def _keyed_paths(node: Any, path: tuple[str, ...] = ()):
+    if isinstance(node, dict):
+        for key, value in node.items():
+            child_path = (*path, str(key))
+            yield child_path, value
+            yield from _keyed_paths(value, child_path)
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            child_path = (*path, str(index))
+            yield child_path, value
+            yield from _keyed_paths(value, child_path)
+
+
+def _change_registered_asset(env: Environment, asset_id: str, change: str) -> None:
+    """Mutate a consented reference after submission, from the fake adapter seam."""
+    asset, expected_version = env.store.load_with_version(Asset, asset_id)
     if change == "bytes":
         env.root.write_bytes(asset.file_path, _wav_bytes() + b"changed after submission")
         return
@@ -81,10 +95,17 @@ def _change_registered_speaker(env: Environment, change: str) -> None:
     elif change == "type":
         fields["type"] = "image"
     elif change == "consent":
-        fields["voice_consent"] = "creator_own_voice"
-        fields["voice_consent_basis"] = "Changed after the speech request was submitted."
+        if asset_id == "emotion":
+            fields["voice_consent"] = "creator_own_voice"
+            fields["voice_consent_basis"] = "The emotion reference consent changed after submission."
+        else:
+            fields["voice_consent"] = "licensed_recording"
+            fields["voice_consent_basis"] = "CREMA-D is licensed under ODbL and DbCL for reuse, not cloning."
+            fields["source_url"] = "https://example.invalid/crema-d"
+    elif change == "reuse_scope":
+        fields["reuse_scope"] = "project"
     else:  # pragma: no cover - only the parameterized cases above are supported
-        raise AssertionError(f"unknown speaker mutation {change!r}")
+        raise AssertionError(f"unknown reference mutation {change!r}")
     env.store.save(Asset.model_validate(fields), expected_version=expected_version)
 
 
@@ -104,11 +125,14 @@ class FakeIndexProcess:
         if not self.request_path.is_absolute():
             self.request_path = Path(kwargs["cwd"]) / self.request_path
         self.request = json.loads(self.request_path.read_text(encoding="utf-8"))
-        values = list(_keyed_strings(self.request))
+        values = list(_keyed_paths(self.request))
         self.reference_snapshots: dict[str, tuple[Path, bytes | None]] = {}
-        for key, value in values:
+        for path, value in values:
+            key = "/".join(path)
             if (isinstance(value, str) and value.lower().endswith(".wav")
-                    and any(word in key.lower() for word in ("speaker", "prompt", "reference"))):
+                    and any(word in key.lower() for word in (
+                        "speaker", "spk", "prompt", "reference", "emotion", "emo",
+                    ))):
                 candidate = Path(value)
                 if not candidate.is_absolute():
                     candidate = self.project_path / candidate
@@ -209,6 +233,18 @@ def indextts2_harness(tmp_path: Path, request):
         "voice_consent": "creator_own_voice",
         "voice_consent_basis": "Creator recorded and approved this reference.",
     }), expected_version=0)
+    emotion_path = "assets/audio/emotion/performance.wav"
+    emotion_data = _wav_bytes()
+    env.root.write_bytes(emotion_path, emotion_data)
+    env.store.save(Asset.model_validate({
+        "asset_id": "emotion", "type": "audio", "generated": False,
+        "license": "ODbL and DbCL", "source_url": "https://example.invalid/crema-d",
+        "file_path": emotion_path,
+        "checksum": hashlib.sha256(emotion_data).hexdigest(),
+        "voice_consent": "licensed_recording",
+        "voice_consent_basis": "CREMA-D is licensed under ODbL and DbCL for reuse, not cloning.",
+        "reuse_scope": "internal evaluation only",
+    }), expected_version=0)
 
     calls: list[FakeIndexProcess] = []
     lease_states: list[bool] = []
@@ -231,7 +267,11 @@ def indextts2_harness(tmp_path: Path, request):
 
     def invoke(request, job, *, queue):
         if mutation is not None:
-            _change_registered_speaker(env, mutation)
+            if ":" in mutation:
+                asset_id, change = mutation.split(":", maxsplit=1)
+            else:
+                asset_id, change = "speaker", mutation
+            _change_registered_asset(env, asset_id, change)
         lease_states.append(bool(getattr(getattr(queue, "lease", None), "_owned", False)))
         return backend.invoke(request, job, queue=queue, cancel=cancel_check[0])
 
@@ -414,6 +454,71 @@ def test_indextts2_worker_gets_private_speaker_copy_and_reports_its_hash(indextt
     assert __import__("hashlib").sha256(copy_bytes).hexdigest() in reported_strings
 
 
+@pytest.mark.parametrize("strength,expected_alpha", [(None, 1.0), (0.42, 0.42)])
+def test_reference_emotion_uses_private_copy_and_preserves_speaker_prompt(
+    indextts2_harness, strength: float | None, expected_alpha: float,
+) -> None:
+    client, env, calls, _lease_states, _project_path, _index_repo = indextts2_harness
+    speaker = env.store.load(Asset, "speaker")
+    emotion = env.store.load(Asset, "emotion")
+    speaker_bytes = env.root.read_bytes(speaker.file_path)
+    emotion_bytes = env.root.read_bytes(emotion.file_path)
+    emotion_request: dict[str, Any] = {"mode": "reference", "emotion_asset_id": "emotion"}
+    if strength is not None:
+        emotion_request["strength"] = strength
+
+    _response, job = _submit_and_wait(client, env, {
+        "expected_version": 1,
+        "text": "Keep the speaker's voice and borrow the recorded delivery.",
+        "speaker_asset_id": "speaker",
+        "emotion": emotion_request,
+    })
+
+    assert job.state == "completed"
+    assert len(calls) == 1
+    process = calls[0]
+    mode_values = [
+        value for path, value in _keyed_paths(process.request)
+        if path[-1].lower() in {"mode", "emotion_mode"}
+    ]
+    assert "reference" in mode_values, process.request
+    alpha_values = [
+        value for path, value in _keyed_paths(process.request)
+        if "alpha" in "/".join(path).lower()
+    ]
+    assert alpha_values == [expected_alpha], list(_keyed_strings(process.request))
+
+    reference_values = [
+        ("/".join(path).lower(), value)
+        for path, value in _keyed_paths(process.request)
+        if isinstance(value, str) and value.lower().endswith(".wav")
+        and any(part in "/".join(path).lower() for part in (
+            "prompt", "speaker", "spk", "reference", "emotion", "emo",
+        ))
+    ]
+    emotion_values = [value for key, value in reference_values if "emo" in key and "spk" not in key]
+    speaker_values = [
+        value for key, value in reference_values
+        if "emo" not in key and any(part in key for part in ("speaker", "spk", "reference", "prompt"))
+    ]
+    assert len(emotion_values) == 1, process.request
+    assert len(speaker_values) == 1, process.request
+
+    emotion_copy, copied_emotion_bytes = process.reference_snapshots[emotion_values[0]]
+    speaker_copy, copied_speaker_bytes = process.reference_snapshots[speaker_values[0]]
+    run_dir = env.root.resolve(f"generated/tts/s1/v0001/{job.run_id}")
+    assert emotion_copy.resolve().is_relative_to(run_dir.resolve())
+    assert emotion_copy.resolve() != env.root.resolve(emotion.file_path).resolve()
+    assert emotion_copy.relative_to(run_dir).as_posix() == "input/emotion.wav"
+    assert copied_emotion_bytes == emotion_bytes
+    assert not emotion_copy.exists(), "the private emotion copy must be removed after the run"
+
+    assert speaker_copy.resolve().is_relative_to(run_dir.resolve())
+    assert speaker_copy.resolve() != env.root.resolve(speaker.file_path).resolve()
+    assert speaker_copy.resolve() != emotion_copy.resolve()
+    assert copied_speaker_bytes == speaker_bytes
+
+
 @pytest.mark.parametrize("indextts2_harness", ["bytes", "checksum", "type", "consent"], indirect=True)
 def test_changed_speaker_binding_is_refused_before_worker_launch(indextts2_harness) -> None:
     client, env, calls, _lease_states, _project, _index_repo = indextts2_harness
@@ -422,6 +527,30 @@ def test_changed_speaker_binding_is_refused_before_worker_launch(indextts2_harne
         "text": "Use the bound speaker reference.",
         "speaker_asset_id": "speaker",
         "emotion": {"mode": "none"},
+    }, headers={TOKEN_HEADER: TOKEN})
+    assert response.status_code == 202, response.text
+    job = env.runner.wait("p1", response.json()["job_id"])
+
+    assert job.state == "failed"
+    assert calls == []
+    assert job.run_id
+    with pytest.raises(RecordNotFound):
+        env.store.load(Asset, f"tts-{job.run_id}")
+    assert not env.root.resolve(f"generated/tts/s1/v0001/{job.run_id}/take.wav").exists()
+
+
+@pytest.mark.parametrize(
+    "indextts2_harness",
+    ["emotion:bytes", "emotion:checksum", "emotion:consent", "emotion:reuse_scope"],
+    indirect=True,
+)
+def test_changed_emotion_binding_is_refused_before_worker_launch(indextts2_harness) -> None:
+    client, env, calls, _lease_states, _project, _index_repo = indextts2_harness
+    response = client.post(INDEX_PATH, json={
+        "expected_version": 1,
+        "text": "The emotion binding must stay unchanged through dispatch.",
+        "speaker_asset_id": "speaker",
+        "emotion": {"mode": "reference", "emotion_asset_id": "emotion", "strength": 0.6},
     }, headers={TOKEN_HEADER: TOKEN})
     assert response.status_code == 202, response.text
     job = env.runner.wait("p1", response.json()["job_id"])

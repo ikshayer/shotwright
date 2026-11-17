@@ -92,6 +92,7 @@ def _register_speaker(
     checksum: str | None = None,
     voice_consent: str | None = "synthetic",
     voice_consent_basis: str | None = None,
+    source_url: str | None = None,
 ) -> None:
     data = _wav_bytes() if file_bytes is None else file_bytes
     relative = f"assets/audio/{asset_id}/{filename}"
@@ -108,6 +109,8 @@ def _register_speaker(
         fields["voice_consent"] = voice_consent
     if voice_consent_basis is not None:
         fields["voice_consent_basis"] = voice_consent_basis
+    if source_url is not None:
+        fields["source_url"] = source_url
     store.save(Asset.model_validate(fields), expected_version=0)
 
 
@@ -169,6 +172,36 @@ def test_tts_operations_have_exact_registry_methods_paths_and_manifest(tts_api) 
     assert manifest_response.status_code == 200, manifest_response.text
 
 
+def test_indextts2_manifest_offers_reference_emotion_and_explains_vector_weights(tts_api) -> None:
+    client, *_ = tts_api
+    from orchestrator.api import mcp
+
+    response = client.get("/tool-manifest")
+    assert response.status_code == 200, response.text
+    tools = mcp.tools_from_manifest(response.json())
+    tool = next(item for item in tools if item.get("name") == "pipeline_generate_indextts2_speech")
+    input_schema = tool["inputSchema"]
+
+    schema_nodes = list(_walk_mappings_with_path(input_schema))
+    assert any(
+        "emotion" in "/".join(path).lower()
+        and (node.get("const") == "reference" or "reference" in node.get("enum", []))
+        for path, node in schema_nodes
+    ), input_schema
+
+    emotion_descriptions = [
+        node.get("description", "")
+        for path, node in schema_nodes
+        if "emotion" in "/".join(path).lower() and isinstance(node.get("description"), str)
+    ]
+    assert any(
+        "weight" in description.lower()
+        and "speaker" in description.lower()
+        and ("0.9" in description or "1.0" in description)
+        for description in emotion_descriptions
+    ), emotion_descriptions
+
+
 def test_generation_operations_are_http_202_and_inspection_is_get(tts_api) -> None:
     client, _app, _settings, store, root, runner = tts_api
     _register_speaker(store, root)
@@ -189,6 +222,16 @@ def _walk_mappings(value: Any):
     elif isinstance(value, list):
         for child in value:
             yield from _walk_mappings(child)
+
+
+def _walk_mappings_with_path(value: Any, path: tuple[str, ...] = ()):
+    if isinstance(value, dict):
+        yield path, value
+        for key, child in value.items():
+            yield from _walk_mappings_with_path(child, (*path, str(key)))
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_mappings_with_path(child, path)
 
 
 def _engine_info(payload: dict[str, Any], name: str) -> dict[str, Any]:
@@ -347,7 +390,7 @@ def test_invalid_speech_request_uses_tts_validation_error_envelope(tts_api) -> N
     assert runner.submissions == []
 
 
-@pytest.mark.parametrize("voice_id", ["unlisted-voice", "en_US-lessac-medium"])
+@pytest.mark.parametrize("voice_id", ["unlisted-voice", "en_US-amy-medium"])
 def test_piper_refuses_unlisted_voices_before_job_creation(tts_api, voice_id: str) -> None:
     client, _app, _settings, _store, root, runner = tts_api
     before = _snapshot(root)
@@ -399,13 +442,49 @@ def test_piper_rejects_values_outside_numeric_bounds_without_side_effects(
          "surprised": 0.0, "calm": 0.0},
         {"mode": "text", "description": "  \n"},
         {"mode": "text", "description": "x" * 501},
+        {"mode": "reference", "emotion_asset_id": "emotion", "strength": 0.0},
+        {"mode": "reference", "emotion_asset_id": "emotion", "strength": 1.01},
+        {"mode": "reference", "emotion_asset_id": "emotion", "strength": True},
+        {"mode": "reference", "emotion_asset_id": "emotion", "strength": 0.5,
+         "unexpected": "forbidden"},
+        {"mode": "reference", "strength": 0.5},
     ],
 )
 def test_indextts2_rejects_invalid_emotions_without_job_or_files(tts_api, emotion) -> None:
     client, _app, _settings, store, root, runner = tts_api
     _register_speaker(store, root)
+    if emotion.get("mode") == "reference" and emotion.get("emotion_asset_id"):
+        _register_speaker(
+            store, root, asset_id="emotion", asset_type="audio",
+            voice_consent="creator_own_voice",
+            voice_consent_basis="Recorded by the creator for this project.",
+        )
     before = _snapshot(root)
     response = _post(client, INDEX_PATH, _index_body(emotion=emotion))
+
+    assert response.status_code == 422, response.text
+    assert _snapshot(root) == before
+    assert runner.submissions == []
+
+
+@pytest.mark.parametrize("strength", [float("nan"), float("inf"), float("-inf")])
+def test_indextts2_rejects_nonfinite_reference_strength_without_job_or_files(tts_api, strength) -> None:
+    client, _app, _settings, store, root, runner = tts_api
+    _register_speaker(store, root)
+    _register_speaker(
+        store, root, asset_id="emotion", asset_type="audio",
+        voice_consent="creator_own_voice",
+        voice_consent_basis="Recorded by the creator for this project.",
+    )
+    before = _snapshot(root)
+    body = _index_body(emotion={
+        "mode": "reference", "emotion_asset_id": "emotion", "strength": strength,
+    })
+    response = client.post(
+        INDEX_PATH,
+        content=json.dumps(body, allow_nan=True),
+        headers={TOKEN_HEADER: TOKEN, "content-type": "application/json"},
+    )
 
     assert response.status_code == 422, response.text
     assert _snapshot(root) == before
@@ -455,11 +534,20 @@ def test_indextts2_rejects_nonfinite_emotion_values(tts_api) -> None:
          "surprised": 0.0, "calm": 0.0},
         {"mode": "text", "description": " restrained, deliberate delivery "},
         {"mode": "text", "description": "x" * 500},
+        {"mode": "reference", "emotion_asset_id": "emotion"},
+        {"mode": "reference", "emotion_asset_id": "emotion", "strength": 0.42},
     ],
 )
 def test_indextts2_accepts_valid_emotion_discriminators(tts_api, emotion) -> None:
     client, _app, _settings, store, root, runner = tts_api
     _register_speaker(store, root)
+    if emotion.get("mode") == "reference":
+        _register_speaker(
+            store, root, asset_id="emotion", asset_type="audio",
+            voice_consent="licensed_recording",
+            voice_consent_basis="CREMA-D is licensed under ODbL and DbCL for reuse, not cloning.",
+            source_url="https://example.invalid/crema-d",
+        )
     response = _post(client, INDEX_PATH, _index_body(emotion=emotion))
 
     assert response.status_code == 202, response.text
@@ -469,6 +557,35 @@ def test_indextts2_accepts_valid_emotion_discriminators(tts_api, emotion) -> Non
 @pytest.mark.parametrize(
     "asset_case",
     ["missing", "wrong_type", "not_wav", "checksum_mismatch", "missing_consent"],
+)
+def test_index_reference_emotion_requires_registered_wav_and_consent(tts_api, asset_case: str) -> None:
+    client, _app, _settings, store, root, runner = tts_api
+    _register_speaker(store, root)
+    if asset_case == "wrong_type":
+        _register_speaker(store, root, asset_id="emotion", asset_type="image")
+    elif asset_case == "not_wav":
+        _register_speaker(store, root, asset_id="emotion", filename="performance.mp3")
+    elif asset_case == "checksum_mismatch":
+        _register_speaker(store, root, asset_id="emotion", checksum="0" * 64)
+    elif asset_case == "missing_consent":
+        _register_speaker(store, root, asset_id="emotion", voice_consent=None)
+
+    before = _snapshot(root)
+    response = _post(client, INDEX_PATH, _index_body(emotion={
+        "mode": "reference", "emotion_asset_id": "emotion",
+    }))
+
+    assert response.status_code in {400, 404, 422}, response.text
+    if asset_case == "missing_consent":
+        assert "consent" in response.text.lower(), response.text
+    assert _snapshot(root) == before
+    assert runner.submissions == []
+
+
+@pytest.mark.parametrize(
+    "asset_case",
+    ["missing", "wrong_type", "not_wav", "checksum_mismatch", "missing_consent",
+     "licensed_recording"],
 )
 def test_index_speaker_reference_requires_registered_wav_and_consent(tts_api, asset_case: str) -> None:
     client, _app, _settings, store, root, runner = tts_api
@@ -481,11 +598,20 @@ def test_index_speaker_reference_requires_registered_wav_and_consent(tts_api, as
         _register_speaker(store, root, checksum="0" * 64)
     elif asset_case == "missing_consent":
         _register_speaker(store, root, voice_consent=None)
+    elif asset_case == "licensed_recording":
+        _register_speaker(
+            store, root, voice_consent="licensed_recording",
+            voice_consent_basis="CREMA-D is licensed under ODbL and DbCL for reuse, not cloning.",
+            source_url="https://example.invalid/crema-d",
+        )
     before = _snapshot(root)
     response = _post(client, INDEX_PATH, _index_body(speaker_asset_id=asset_id))
 
-    assert response.status_code in {400, 404, 422}, response.text
-    if asset_case == "missing_consent":
+    if asset_case == "licensed_recording":
+        assert response.status_code == 422, response.text
+    else:
+        assert response.status_code in {400, 404, 422}, response.text
+    if asset_case in {"missing_consent", "licensed_recording"}:
         assert "consent" in response.text.lower(), response.text
     assert _snapshot(root) == before
     assert runner.submissions == []
@@ -531,6 +657,61 @@ def test_tts_upload_accepts_riff_wave_voice_with_consent(tts_api) -> None:
     assert response.json()["voice_consent"] == "synthetic"
 
 
+def test_tts_upload_accepts_licensed_recording_with_basis_and_source_url(tts_api) -> None:
+    client, _app, _settings, store, root, _runner = tts_api
+    data = {
+        "asset_id": "licensed-recording",
+        "type": "voice",
+        "generated": "false",
+        "source_url": "https://example.invalid/crema-d/sample.wav",
+        "license": "ODbL and DbCL",
+        "voice_consent": "licensed_recording",
+        "voice_consent_basis": "CREMA-D is licensed under ODbL and DbCL for reuse, not cloning.",
+    }
+    response = client.post(
+        "/projects/p1/assets",
+        headers={TOKEN_HEADER: TOKEN},
+        files={"files": ("recording.wav", _wav_bytes(), "audio/wav")},
+        data=data,
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["voice_consent"] == "licensed_recording"
+    assert payload["voice_consent_basis"] == data["voice_consent_basis"]
+    assert payload["source_url"] == data["source_url"]
+    registered = store.load(Asset, "licensed-recording")
+    assert registered.voice_consent == "licensed_recording"
+    assert registered.voice_consent_basis == data["voice_consent_basis"]
+    assert registered.source_url == data["source_url"]
+    assert root.resolve(registered.file_path).is_file()
+
+
+@pytest.mark.parametrize("basis", [None, "", "  "])
+def test_tts_upload_refuses_licensed_recording_without_nonblank_basis(tts_api, basis: str | None) -> None:
+    client, _app, _settings, _store, root, _runner = tts_api
+    before = _snapshot(root)
+    data = {
+        "asset_id": "licensed-recording-no-basis",
+        "type": "voice",
+        "generated": "false",
+        "source_url": "https://example.invalid/crema-d/sample.wav",
+        "license": "ODbL and DbCL",
+        "voice_consent": "licensed_recording",
+    }
+    if basis is not None:
+        data["voice_consent_basis"] = basis
+    response = client.post(
+        "/projects/p1/assets",
+        headers={TOKEN_HEADER: TOKEN},
+        files={"files": ("recording.wav", _wav_bytes(), "audio/wav")},
+        data=data,
+    )
+
+    assert response.status_code in {400, 422}, response.text
+    assert _snapshot(root) == before
+
+
 def test_tts_upload_accepts_creator_own_voice_without_source_url(tts_api) -> None:
     client, _app, _settings, store, root, _runner = tts_api
     data = {
@@ -561,7 +742,8 @@ def test_tts_upload_accepts_creator_own_voice_without_source_url(tts_api) -> Non
     assert root.resolve(registered.file_path).is_file()
 
 
-def test_tts_upload_requires_source_url_for_licensed_cloning_consent(tts_api) -> None:
+@pytest.mark.parametrize("consent", ["licensed_for_cloning", "licensed_recording"])
+def test_tts_upload_requires_source_url_for_non_creator_consent(tts_api, consent: str) -> None:
     client, _app, _settings, _store, root, _runner = tts_api
     before = _snapshot(root)
     response = client.post(
@@ -569,12 +751,12 @@ def test_tts_upload_requires_source_url_for_licensed_cloning_consent(tts_api) ->
         headers={TOKEN_HEADER: TOKEN},
         files={"files": ("licensed-voice.wav", _wav_bytes(), "audio/wav")},
         data={
-            "asset_id": "licensed-voice-no-url",
+            "asset_id": f"{consent}-no-url",
             "type": "voice",
             "generated": "false",
-            "license": "voice cloning permission",
-            "voice_consent": "licensed_for_cloning",
-            "voice_consent_basis": "The licence permits cloning for this project.",
+            "license": "ODbL and DbCL",
+            "voice_consent": consent,
+            "voice_consent_basis": "This licence permits reuse, not voice cloning.",
         },
     )
 
