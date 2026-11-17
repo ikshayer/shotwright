@@ -50,3 +50,5 @@ CCTV_Analog_Horror_Production_Pipeline_PRD_v*.md
 *HANDOFF*.md
 # Build metadata from `pip install -e .`
 *.egg-info/
+# The creator's own voice recordings (emotion references): personal biometric data, never published.
+/recordings/
