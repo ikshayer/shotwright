@@ -23,7 +23,7 @@ up as loud as a panic.
    built with spike 05's own `run_spike.build_chain`). The creator asked for more.
 2. **Heavier** (`cctv-heavy`, `cctv-wrecked`, `tape-heavy` in `degrade.py`): a narrower band,
    20:1 automatic gain that drags breaths and pauses up, 8- or 6-bit crush, more hiss and
-   hum, a bigger room; `cctv-wrecked` adds 6 kHz aliasing, random 40 ms dropouts and hard
+   hum, a bigger room; `cctv-wrecked` adds 6 kHz aliasing, random ~14.5 ms dropouts (320 samples at 22.05 kHz) and hard
    clipping. The creator asked for the *voice* to be more distorted.
 3. **Distortion in the voice itself** (`overdriven`, `crushed`, `broken-radio`):
    - `overdriven`: +24 dB into hard clipping at 0.25, then a 450–2800 Hz band, a small room
@@ -63,3 +63,22 @@ For loud fear (panic), CREMA-D fear as the emotion reference works (spike 28).
 - Promotion to a versioned, seeded `AudioPostProfile` in the pipeline (FR-32).
 - Spike 05's version of this chain is mu-law at 8 kHz; whether the final mix should keep
   that or stay wideband is a decision for the mix stage.
+
+## Dropout rate (2026-11-17)
+
+Rendered on the favourite take at +24 dB drive. Each dropout mutes one 320-sample frame
+(~14.5 ms at 22.05 kHz), voice, hiss and hum together, before loudness normalisation.
+
+| Rate | Gaps in 14.7 s | Character |
+|---|---|---|
+| 3% | 32 | an occasional tick |
+| 10% | 90 (~6/s) | a steady crackle |
+| 20% | 163 (~11/s) | a fast crackle or stutter |
+| 60% | 232, many merged | more silence than voice |
+
+## Decision (2026-11-17)
+
+**`cctv-overdriven` = the `overdriven` chain at +30 dB drive, room echo on, no dropouts**
+(`degrade.py` `overdriven` with `volume=30dB`). The creator compared drive levels from
++12 to +36 dB, with and without room echo, and dropout rates of 3%, 10%, 20% and 60%;
+dropouts were rejected.

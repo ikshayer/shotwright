@@ -23,7 +23,7 @@ PROFILES = {
                "aresample=6000,aresample=22050,"
                "acrusher=level_in=1.2:level_out=0.8:bits=6:mode=log:aa=0.1"),
         noise=("pink", 0.05), hum=0.03,
-        # ~3% of 40 ms frames drop out entirely; then hard clipping.
+        # ~3% of 320-sample (~14.5 ms at 22.05 kHz) frames drop out entirely; then hard clipping.
         post=",asetnsamples=n=320,volume='if(lt(random(1),0.03),0,1)':eval=frame,asoftclip=type=hard:threshold=0.6",
         encode=("pcm_mulaw", 8000)),
     "tape-heavy": dict(
