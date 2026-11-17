@@ -16,8 +16,8 @@ This contract adds **synthesis only**: each operation writes one WAV take and re
 it as a voice `Asset` with full provenance. Out of scope, and must not be started:
 mixing, `PerformanceEdit`, `AudioPostProfile` (FR-32), loudness normalisation,
 resampling, attaching takes to a Shot (the agent does that with the existing
-`revise_shot`, by adding the asset id to `audio_refs`), and `emo_audio_prompt` (untested,
-spike 05 "Still open").
+`revise_shot`, by adding the asset id to `audio_refs`). `emo_audio_prompt` was out of scope
+here until the 2026-11-16 amendment in 3.4 added it as emotion mode `reference`.
 
 ## 1. Runtime layout (fixed, repository-relative, like H3)
 
@@ -38,18 +38,25 @@ The adapters must never install, download, or modify anything in these trees.
 ### 1.1 Piper voice catalog
 
 A committed catalog, `orchestrator/adapters/tts/piper_voices.json`, is the only source of
-allowed voices. Each entry: `voice_id`, `gender`, `license`, `license_source`, `onnx_sha256`,
-`onnx_bytes`, `config_sha256`, `sample_rate`. It starts with exactly one voice:
+allowed voices. Each entry: `voice_id`, `gender`, `license`, `license_source`, `reuse_scope`,
+`onnx_sha256`, `onnx_bytes`, `config_sha256`, `sample_rate`.
 
-| voice_id | gender | license | onnx SHA-256 | onnx bytes | config SHA-256 | rate |
+| voice_id | gender | license (from its model card) | reuse_scope | onnx SHA-256 | onnx bytes | config SHA-256 |
 |---|---|---|---|---|---|---|
-| `en_US-ryan-high` | male | `MIT` | `b3990d7606e183ec8dbfba70a4607074f162de1a0c412e0180d1ff60bb154eca` | 120786792 | `c6d3b98f08315cb4bebf0d49d50fc4ff491b503c64b940cd3d5ca28543b48011` | 22050 |
+| `en_US-ryan-high` | male | CC BY-NC-SA 4.0 | internal evaluation only | `b3990d76…` | 120786792 | `c6d3b98f…` |
+| `en_US-lessac-medium` | female | Blizzard 2013 research licence, commercial use prohibited | internal evaluation only | `5efe09e6…` | 63201294 | `efe19c41…` |
 
-`license_source` for it is `"PRD v1.2 §8.4, measured 2026-11-04 (spike 05)"`. Voices are
-added only with a licence verified from the voice's own model card text (FR-16); the
-`.onnx.json` files carry no licence field, so it cannot be read from them. `en_US-lessac-medium`
-is present on disk but is **not** in the catalog: its licence is unverified, and it is female
-(voice gender is a recorded property, never assumed — §8.4).
+Full hashes are in the catalog. Voices are added only with a licence verified from the voice's
+own model card text (FR-16); the `.onnx.json` files carry no licence field, so it cannot be
+read from them. Voice gender is a recorded property, never assumed (§8.4).
+
+*(Amended 2026-11-16, creator decision.)* Both cards were read on 2026-11-16. `en_US-ryan-high`
+was first recorded as MIT from PRD §8.4, which had taken Piper's *engine* licence for the
+voice's; its card says CC BY-NC-SA 4.0. Both voices are non-commercial. FR-16 says such voices
+are rejected; the creator decided instead to allow them **for internal evaluation only**, the
+treatment the TRELLIS figure already has: every take carries the voice's `reuse_scope`, so
+`credits.py` reports it as a publication blocker. A take IndexTTS-2 clones from a reference
+inherits that reference's `reuse_scope`.
 
 Before every Piper run the adapter verifies the chosen voice's `.onnx` size and SHA-256 and
 the `.onnx.json` SHA-256 against the catalog, and refuses on any mismatch.
@@ -145,6 +152,23 @@ IndexTTS-2 `checkpoints_present` (config.yaml exists). Plus a `limitations` list
   exactly that order.
 - `{"mode": "text", "description": str}` — non-blank, at most 500 characters. Passed as
   `use_emo_text=True, emo_text=description`.
+- *(Amended 2026-11-16.)* `{"mode": "reference", "emotion_asset_id": str, "strength": f}` —
+  emotion taken from a recorded performance while the voice stays the speaker's
+  (IndexTTS-2's `emo_audio_prompt`, `emo_alpha = strength`). `strength` is finite, in (0, 1],
+  default 1.0. The clip is a person's voice even though the take will not sound like them,
+  so it obeys every speaker-reference rule: a registered `.wav` of type `voice` or `audio`,
+  bytes matching its checksum, `voice_consent` set (5.2), verified at submission, re-checked
+  at execution, and handed to the worker as a private hashed copy (`input/emotion.wav`,
+  deleted after the run). IndexTTS-2 reads at most its first 15 s. The report records the
+  clip's id, hash, consent, reuse scope and strength; the `GenerationRun` lists it as an
+  input; the take's `reuse_scope` is the most restrictive of the speaker's and the emotion
+  clip's; the take's `voice_consent` is the speaker's, since the speaker is whose voice it is.
+
+**Vector weights and the speaker's own delivery** (measured 2026-11-16): IndexTTS-2 mixes
+`emovec = Σ wᵢ·eᵢ + (1 − Σ wᵢ)·speaker_emotion` (`infer_v2.py:580`). Weights summing below 1
+fill the remainder from the speaker clip's own delivery, so a flat speaker clip needs weights
+summing to about 0.9–1.0 to be heard; spike 05's audible variants did. The operation's field
+description says so, for agents.
 
 No seed field: IndexTTS-2 sampling is not deterministic, and the report must say so.
 
@@ -232,6 +256,15 @@ separately on the asset."* Two optional fields are added to `Asset`:
 
 Both default to `None`, so existing registry records still load (FR-28).
 
+*(Amended 2026-11-17, creator decision.)* A fourth value, `"licensed_recording"`, records a
+recording licensed for reuse but not for cloning, such as a clip from an openly licensed
+emotional-speech dataset (CREMA-D: ODbL + DbCL). It requires a non-blank
+`voice_consent_basis` naming the licence and a `source_url`, like the other non-synthetic
+values. Such a clip may be an IndexTTS-2 **emotion reference** only: it lends delivery, not
+identity. Used as a `speaker_asset_id` it is refused before any job, and a speaker whose
+consent changes to it after submission is refused at execution by the 3.4 re-check. A take
+never inherits `licensed_recording`; its `voice_consent` is always the speaker's.
+
 An IndexTTS-2 `speaker_asset_id` is accepted only if the Asset exists, its `type` is
 `voice` or `audio`, its file is a `.wav` whose bytes match its registered checksum, and
 `voice_consent` is one of the three values above. Anything else is refused before a job is
@@ -252,7 +285,7 @@ On success the take is registered as an `Asset` in place (no copy):
 | `voice_consent` | `synthetic` | inherited from the speaker reference |
 | `voice_consent_basis` | `None` | inherited from the speaker reference |
 | `license` | see below | see below |
-| `reuse_scope` | `project` | `project` |
+| `reuse_scope` | the catalog voice's `reuse_scope` | the speaker reference's `reuse_scope` |
 
 **`license` is an open creator decision, not settled here.** `credits.py` treats any
 licence other than CC0-1.0 / CC-BY-4.0 as a publication blocker. Until the creator decides

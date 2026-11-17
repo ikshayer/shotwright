@@ -80,6 +80,9 @@ class PiperVoice(BaseModel):
     gender: str = Field(min_length=1)
     license: str = Field(min_length=1)
     license_source: str = Field(min_length=1)
+    #: Copied onto every take: a voice whose licence forbids commercial use is usable for
+    #: internal evaluation only, and `credits.py` blocks publication of such takes.
+    reuse_scope: str = Field(min_length=1)
     onnx_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     onnx_bytes: StrictInt = Field(gt=0)
     config_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -161,7 +164,43 @@ class EmotionText(BaseModel):
         return value
 
 
-Emotion = Annotated[EmotionNone | EmotionVector | EmotionText, Field(discriminator="mode")]
+class EmotionReference(BaseModel):
+    """Emotion taken from a recorded performance; the voice still comes from the speaker.
+
+    IndexTTS-2's `emo_audio_prompt`: the clip may be a different person than the speaker
+    reference, so a creator can perform the emotion without lending their voice. Only the
+    first 15 s of the clip are used (IndexTTS-2 truncates there).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    mode: Literal["reference"]
+    emotion_asset_id: str = Field(pattern=_ID)
+    #: IndexTTS-2's `emo_alpha`: how strongly the clip's emotion is applied.
+    strength: float = Field(1.0, gt=0.0, le=1.0, allow_inf_nan=False)
+
+    @field_validator("strength", mode="before")
+    @classmethod
+    def _number_not_boolean(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("strength must be a number, not a boolean")
+        return value
+
+
+Emotion = Annotated[EmotionNone | EmotionVector | EmotionText | EmotionReference,
+                    Field(discriminator="mode")]
+
+
+class VoiceReferenceBinding(BaseModel):
+    """A registered voice clip as verified at submission, re-checked before use."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    asset_id: str = Field(min_length=1)
+    path: str = Field(min_length=1)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    #: An emotion reference may also be a `licensed_recording`; a speaker never may.
+    consent: Literal["synthetic", "creator_own_voice", "licensed_for_cloning", "licensed_recording"]
+    consent_basis: str | None = None
+    reuse_scope: str = Field(min_length=1)
 
 
 # --- requests ---------------------------------------------------------------------------
@@ -223,7 +262,22 @@ class IndexTts2Request(_SpeechRequest):
     speaker_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     speaker_consent: Literal["synthetic", "creator_own_voice", "licensed_for_cloning"]
     speaker_consent_basis: str | None = None
+    #: The reference's reuse scope; a take cloned from a restricted voice inherits it.
+    #: None only for a request built before the field existed; registration then reads the
+    #: reference's current scope rather than assuming a publishable one.
+    speaker_reuse_scope: str | None = Field(None, min_length=1)
     emotion: Emotion
+    #: The verified emotion clip; present exactly when `emotion.mode == "reference"`.
+    emotion_reference: VoiceReferenceBinding | None = None
+
+    @model_validator(mode="after")
+    def _reference_bound_when_used(self) -> IndexTts2Request:
+        uses_reference = isinstance(self.emotion, EmotionReference)
+        if uses_reference != (self.emotion_reference is not None):
+            raise ValueError("emotion_reference is required for, and only for, emotion mode 'reference'")
+        if uses_reference and self.emotion_reference.asset_id != self.emotion.emotion_asset_id:
+            raise ValueError("emotion_reference does not match emotion.emotion_asset_id")
+        return self
 
     @property
     def settings_record(self) -> dict[str, str | bool | int | float]:
@@ -235,6 +289,9 @@ class IndexTts2Request(_SpeechRequest):
                 record[f"emotion_{name}"] = getattr(self.emotion, name)
         elif isinstance(self.emotion, EmotionText):
             record["emotion_description"] = self.emotion.description
+        elif isinstance(self.emotion, EmotionReference):
+            record["emotion_asset_id"] = self.emotion.emotion_asset_id
+            record["emotion_strength"] = self.emotion.strength
         return record
 
 

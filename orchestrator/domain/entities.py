@@ -713,7 +713,11 @@ class EpisodeOutput(Entity):
 # --------------------------------------------------------------------------
 
 
-VoiceConsent = Literal["synthetic", "creator_own_voice", "licensed_for_cloning"]
+VoiceConsent = Literal["synthetic", "creator_own_voice", "licensed_for_cloning", "licensed_recording"]
+#: Consent values under which a recording may be cloned as a speaker voice. A
+#: `licensed_recording` (e.g. an open emotional-speech dataset) was licensed for reuse, not
+#: for cloning, so it may only lend its *emotion*, never its voice identity.
+CLONABLE_VOICE_CONSENT: frozenset[str] = frozenset({"synthetic", "creator_own_voice", "licensed_for_cloning"})
 
 
 class Asset(Entity):

@@ -18,17 +18,19 @@ from orchestrator.adapters.tts.core import (
     PIPER_PYTHON,
     TAKE_LICENSE_PENDING,
     Emotion,
+    EmotionReference,
     IndexTts2Request,
     PiperRequest,
     TtsRequestError,
     TtsResult,
     TtsSetupError,
+    VoiceReferenceBinding,
     load_piper_catalog,
     repository_root,
     sha256_file,
     validate_speech_text,
 )
-from orchestrator.domain.entities import Asset, GenerationRun, Job, Shot
+from orchestrator.domain.entities import CLONABLE_VOICE_CONSENT, Asset, GenerationRun, Job, Shot
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.settings import Settings
 from orchestrator.store.json_store import ProjectStore, RecordNotFound, VersionConflict
@@ -72,8 +74,19 @@ class PiperSpeechBody(_SpeechBody):
 
 
 class IndexTts2SpeechBody(_SpeechBody):
-    speaker_asset_id: str = Field(min_length=1)
-    emotion: Emotion
+    speaker_asset_id: str = Field(
+        min_length=1,
+        description="The voice: a registered .wav with recorded voice_consent. The take sounds like this clip.",
+    )
+    emotion: Emotion = Field(description=(
+        "How the line is delivered. 'reference': emotion taken from a recorded performance "
+        "(emotion_asset_id, a consented .wav; only its first 15 s are used) while the voice "
+        "stays the speaker's; strength 0-1 scales it. 'vector': eight weights 0-1; whatever the "
+        "weights leave below a sum of 1 is filled with the speaker clip's own delivery, so a "
+        "flat speaker clip needs weights summing to about 0.9-1.0 to sound emotional. 'text': a "
+        "short description such as 'terrified, voice shaking'. 'none': the speaker clip's own "
+        "delivery."
+    ))
 
 
 # --- inspection -------------------------------------------------------------------------
@@ -197,11 +210,23 @@ def compose_indextts2_request(store: ProjectStore, *, shot_id: str, episode_id: 
         shot = _current_shot(store, shot_id, episode_id, body.expected_version)
         text = _resolve_text(store._root, body)
         speaker = _verified_speaker(store, body.speaker_asset_id)
+        emotion_reference = None
+        if isinstance(body.emotion, EmotionReference):
+            # A recorded performance is a person's voice even though the take will not sound
+            # like them, so it carries the same consent and integrity rules as a speaker.
+            clip = _verified_speaker(store, body.emotion.emotion_asset_id, role="emotion")
+            emotion_reference = VoiceReferenceBinding(
+                asset_id=clip.asset_id, path=clip.file_path, sha256=clip.checksum,
+                consent=clip.voice_consent, consent_basis=clip.voice_consent_basis,
+                reuse_scope=clip.reuse_scope,
+            )
         return _build(IndexTts2Request, shot_id=shot_id, shot_version=shot.version, run_id=run_id,
                       text=text, speaker_asset_id=speaker.asset_id,
                       speaker_path=speaker.file_path, speaker_sha256=speaker.checksum,
                       speaker_consent=speaker.voice_consent,
-                      speaker_consent_basis=speaker.voice_consent_basis, emotion=body.emotion)
+                      speaker_consent_basis=speaker.voice_consent_basis,
+                      speaker_reuse_scope=speaker.reuse_scope, emotion=body.emotion,
+                      emotion_reference=emotion_reference)
 
 
 def _build(model: type, **fields: Any) -> Any:
@@ -211,36 +236,48 @@ def _build(model: type, **fields: Any) -> Any:
         raise TtsRequestError(str(exc)) from exc
 
 
-def _verified_speaker(store: ProjectStore, asset_id: str) -> Asset:
-    """Accept a speaker reference only if consent is recorded and its bytes are intact."""
+def _verified_speaker(store: ProjectStore, asset_id: str, *, role: str = "speaker") -> Asset:
+    """Accept a voice reference only if consent is recorded and its bytes are intact.
+
+    `role` is "speaker" (the voice) or "emotion" (a recorded performance); both are a
+    person's voice and are checked the same way.
+    """
+    field = "speaker_asset_id" if role == "speaker" else "emotion.emotion_asset_id"
     try:
         asset = store.load(Asset, asset_id)
     except RecordNotFound as exc:
-        raise TtsRequestError(f"speaker_asset_id {asset_id!r} is not a registered asset") from exc
+        raise TtsRequestError(f"{field} {asset_id!r} is not a registered asset") from exc
     if asset.type not in _VOICE_ASSET_TYPES:
         raise TtsRequestError(
-            f"speaker asset {asset_id!r} has type {asset.type!r}; a speaker reference must be "
+            f"{role} asset {asset_id!r} has type {asset.type!r}; a {role} reference must be "
             "type 'voice' or 'audio'"
         )
     if asset.voice_consent is None:
         raise TtsRequestError(
-            f"speaker asset {asset_id!r} has no voice_consent recorded; voice identity needs "
+            f"{role} asset {asset_id!r} has no voice_consent recorded; a voice recording needs "
             "consent, not merely a licence (FR-16). Register the clip with voice_consent "
-            "'synthetic', 'creator_own_voice' or 'licensed_for_cloning'"
+            "'synthetic', 'creator_own_voice', 'licensed_for_cloning' or 'licensed_recording'"
+        )
+    if role == "speaker" and asset.voice_consent not in CLONABLE_VOICE_CONSENT:
+        # A licensed recording (e.g. an open emotional-speech dataset) was licensed for
+        # reuse, not for cloning: it may lend its emotion, never its voice identity.
+        raise TtsRequestError(
+            f"speaker asset {asset_id!r} has voice_consent {asset.voice_consent!r}, which permits "
+            "use as an emotion reference only, never as a speaker voice (FR-16)"
         )
     if not asset.file_path or not asset.file_path.lower().endswith(".wav"):
-        raise TtsRequestError(f"speaker asset {asset_id!r} must be a registered .wav file")
+        raise TtsRequestError(f"{role} asset {asset_id!r} must be a registered .wav file")
     if not asset.checksum:
-        raise TtsRequestError(f"speaker asset {asset_id!r} has no registered checksum")
+        raise TtsRequestError(f"{role} asset {asset_id!r} has no registered checksum")
     try:
         path = store._root.resolve(asset.file_path)
     except ValueError as exc:  # ContainmentError
-        raise TtsRequestError(f"speaker asset {asset_id!r} path is not contained: {exc}") from exc
+        raise TtsRequestError(f"{role} asset {asset_id!r} path is not contained: {exc}") from exc
     if not path.is_file():
-        raise TtsRequestError(f"speaker asset {asset_id!r} file is missing: {asset.file_path}")
+        raise TtsRequestError(f"{role} asset {asset_id!r} file is missing: {asset.file_path}")
     if sha256_file(path) != asset.checksum:
         raise TtsRequestError(
-            f"speaker asset {asset_id!r} bytes do not match its registered checksum; "
+            f"{role} asset {asset_id!r} bytes do not match its registered checksum; "
             "re-register the clip"
         )
     return asset
@@ -276,11 +313,15 @@ def persist_tts_success(store: ProjectStore, job: Job, result: TtsResult,
     if isinstance(request, PiperRequest):
         voice = load_piper_catalog()[request.voice_id]
         model_license, consent, basis = voice.license, "synthetic", None
+        reuse_scope = voice.reuse_scope
         inputs: list[str] = []
     else:
+        # The IndexTTS-2 weights permit commercial use; the speaker reference may not, and
+        # a clone of a restricted voice is restricted the same way.
         model_license = INDEXTTS2_MODEL_LICENSE
         consent, basis = request.speaker_consent, request.speaker_consent_basis
-        inputs = [request.speaker_path]
+        reuse_scope = None  # read under the store lock below, so no change slips in between
+        inputs = _reference_paths(request)
     generation = GenerationRun(
         run_id=request.run_id, tool=_engine_of(request), tool_version=result.tool_version,
         invocation=request.text, seed=None, settings=request.settings_record,
@@ -288,17 +329,62 @@ def persist_tts_success(store: ProjectStore, job: Job, result: TtsResult,
         log_path=result.log_path if result.log_path in hashes else None,
         status="completed", resource_metrics=metrics,
     )
-    asset = Asset(
-        asset_id=f"tts-{request.run_id}", type="voice", generated=True,
-        provider=_engine_of(request), license=TAKE_LICENSE_PENDING,
-        model_or_voice_license=model_license, file_path=result.take_path,
-        checksum=result.take_sha256, reuse_scope="project",
-        voice_consent=consent, voice_consent_basis=basis,
-    )
     with store.command():
+        if reuse_scope is None:
+            reuse_scope = _restricted_scope(store, request)
+        asset = Asset(
+            asset_id=f"tts-{request.run_id}", type="voice", generated=True,
+            provider=_engine_of(request), license=TAKE_LICENSE_PENDING,
+            model_or_voice_license=model_license, file_path=result.take_path,
+            checksum=result.take_sha256, reuse_scope=reuse_scope,
+            voice_consent=consent, voice_consent_basis=basis,
+        )
         store.save(generation, expected_version=0)
         store.save(asset, expected_version=0)
     return asset
+
+
+#: Reuse scopes `credits.py` clears for publication. Any other scope is a restriction.
+_PUBLISHABLE_SCOPES = frozenset({"project", "commercial", "commercial_use", "public"})
+
+
+def _restricted_scope(store: ProjectStore, request: IndexTts2Request) -> str:
+    """The take's reuse scope: never less restrictive than its speaker reference.
+
+    The reference is re-read now, so a restriction added to it while the take was being
+    synthesised still reaches the take. Of the scope recorded at submission and the current
+    one, a restricted scope wins over a publishable one.
+
+    An emotion reference counts too: a take built from a restricted performance is
+    restricted however publishable its voice is.
+    """
+    def current_scope(asset_id: str) -> str | None:
+        try:
+            return store.load(Asset, asset_id).reuse_scope
+        except RecordNotFound:
+            return None
+
+    references = [(request.speaker_asset_id, request.speaker_reuse_scope)]
+    emotion = getattr(request, "emotion_reference", None)
+    if emotion is not None:
+        references.append((emotion.asset_id, emotion.reuse_scope))
+    scopes: list[str] = []
+    for asset_id, recorded in references:
+        found = [scope for scope in (recorded, current_scope(asset_id)) if scope]
+        if not found:
+            raise TtsRequestError(
+                f"reference {asset_id!r} has no recorded reuse scope; cannot classify the take")
+        scopes.extend(found)
+    restricted = [scope for scope in scopes if scope not in _PUBLISHABLE_SCOPES]
+    return restricted[0] if restricted else scopes[0]
+
+
+def _reference_paths(request: IndexTts2Request) -> list[str]:
+    """The registered clips a take was made from: the speaker, and any emotion reference."""
+    paths = [request.speaker_path]
+    if request.emotion_reference is not None:
+        paths.append(request.emotion_reference.path)
+    return paths
 
 
 def _discard_take(root: ProjectRoot, directory: str) -> bool:
@@ -366,7 +452,7 @@ def persist_tts_terminal(store: ProjectStore, job: Job, request: PiperRequest | 
     run = GenerationRun(
         run_id=request.run_id, tool=_engine_of(request), tool_version=version,
         invocation=request.text, settings=request.settings_record,
-        input_paths=[request.speaker_path] if isinstance(request, IndexTts2Request) else [],
+        input_paths=_reference_paths(request) if isinstance(request, IndexTts2Request) else [],
         output_paths=outputs,
         output_hashes={path: sha256_file(root.resolve(path)) for path in outputs
                        if path == report_rel},

@@ -11,11 +11,27 @@ the Shot's `audio_refs` with `revise_shot`. The contract is `CONTRACT.md`.
 | For | processed-source voice (PA, answering machine, broadcast): flat delivery is correct | diegetic voice (someone the recording caught speaking): prosody is the point |
 | Runs on | CPU, never takes the GPU lease | GPU, under the lease, budget and watchdog |
 | Operation | `generate_piper_speech` | `generate_indextts2_speech` |
-| Inputs | a catalog `voice_id`, optional `length_scale`, `sentence_silence_seconds` | a consented `speaker_asset_id` and an `emotion` (`none`, `vector`, `text`) |
+| Inputs | a catalog `voice_id`, optional `length_scale`, `sentence_silence_seconds` | a consented `speaker_asset_id` and an `emotion` (`none`, `vector`, `text`, `reference`) |
 | Deterministic | yes for a given text/voice/settings | **no**, there is no seed |
 
 `inspect_tts` (`GET /models/tts`) reports presence only: it starts no process, imports no
 torch or onnxruntime and hashes nothing.
+
+## Directing emotion (IndexTTS-2)
+
+- **`reference`** — the most direct control: record yourself (or anyone who consents)
+  performing the emotion, register the `.wav` with `voice_consent`, and pass it as
+  `emotion_asset_id`. The voice stays the speaker clip's; only the delivery is borrowed.
+  Any words will do. IndexTTS-2 reads at most the first 15 s. `strength` (0–1) scales it;
+  lower it if the performer's own voice character starts to leak into the take.
+- **`vector`** — eight weights. Whatever they leave below a sum of 1 is filled with the
+  speaker clip's own delivery, so with a flat speaker clip (any Piper take) use weights summing
+  to about 0.9–1.0, e.g. `afraid 0.7, calm 0.2` (spike 05).
+- **`text`** — a description such as `"terrified, voice shaking"`.
+
+A raw take is only part of a performance: spike 05's approved result also needed a
+`PerformanceEdit` (widened pauses, breaths) and an audio degradation profile (FR-32), which
+are not built yet.
 
 ## Settings
 
@@ -71,8 +87,13 @@ Voices are downloaded separately and only become usable once they are in
 `piper_voices.json`. The `.onnx.json` files carry no licence, so a voice is added only with a
 licence verified from its own model card (FR-16). Before every run the adapter verifies the
 voice's `.onnx` size and SHA-256 and the `.onnx.json` SHA-256 against the catalog.
-`en_US-lessac-medium` is on disk but deliberately not in the catalog: its licence is
-unverified and it is female.
+
+Both catalogued voices are **non-commercial** by their model cards: `en_US-ryan-high` (male)
+is CC BY-NC-SA 4.0 and `en_US-lessac-medium` (female) is under a research-only Blizzard 2013
+licence. They are allowed for internal evaluation only: each take records
+`reuse_scope = "internal evaluation only"`, which episode credits report as a publication
+blocker, and an IndexTTS-2 take cloned from such a take inherits it. A publishable episode
+needs a commercially licensed voice, verified from its card, added to the catalog.
 
 ## IndexTTS-2 supervision
 

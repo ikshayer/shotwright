@@ -35,6 +35,7 @@ from .core import (
     INDEXTTS2_CONFIG_SHA256,
     INDEXTTS2_PYTHON,
     INDEXTTS2_REPOSITORY,
+    EmotionReference,
     EmotionText,
     EmotionVector,
     IndexTts2Request,
@@ -279,8 +280,19 @@ class IndexTTS2Adapter:
                 "voice_consent_basis": request.speaker_consent_basis,
                 "copy_path": speaker_copy, "copy_sha256": request.speaker_sha256,
             }
+            emotion_copy = self._stage_emotion(request, files, job)
+            if emotion_copy is not None:
+                binding = request.emotion_reference
+                report["emotion_reference"] = {
+                    "emotion_asset_id": binding.asset_id, "path": binding.path,
+                    "sha256": binding.sha256, "voice_consent": binding.consent,
+                    "voice_consent_basis": binding.consent_basis,
+                    "reuse_scope": binding.reuse_scope, "strength": request.emotion.strength,
+                    "seconds_used_at_most": 15.0,
+                    "copy_path": emotion_copy, "copy_sha256": binding.sha256,
+                }
             worker_result = self._run_worker(request, files, job, attempt, cancel, started,
-                                             speaker_copy, queue)
+                                             speaker_copy, queue, emotion_copy)
             facts = inspect_wav(self.root.resolve(files.temporary_take), job=job)
             files.publish_take()
             take_sha256 = sha256_file(self.root.resolve(files.take))
@@ -354,7 +366,9 @@ class IndexTTS2Adapter:
         if (asset.type not in {"voice", "audio"} or asset.file_path != request.speaker_path
                 or asset.checksum != request.speaker_sha256
                 or asset.voice_consent != request.speaker_consent
-                or asset.voice_consent_basis != request.speaker_consent_basis):
+                or asset.voice_consent_basis != request.speaker_consent_basis
+                or (request.speaker_reuse_scope is not None
+                    and asset.reuse_scope != request.speaker_reuse_scope)):
             raise job_error(JobErrorKind.INVALID_MANIFEST,
                             f"speaker asset {request.speaker_asset_id!r} changed (type, file, checksum "
                             "or voice consent) since the request was submitted; refusing", job)
@@ -370,9 +384,37 @@ class IndexTTS2Adapter:
                             "the staged speaker copy does not match the registered checksum", job)
         return copy_rel
 
+    def _stage_emotion(self, request: IndexTts2Request, files: RunFiles, job: Job) -> str | None:
+        """The emotion clip gets the speaker's treatment: re-verified now, used as a copy."""
+        binding = request.emotion_reference
+        if binding is None:
+            return None
+        try:
+            asset = ProjectStore(self.root).load(Asset, binding.asset_id)
+        except RecordNotFound as exc:
+            raise job_error(JobErrorKind.INVALID_MANIFEST,
+                            f"emotion asset {binding.asset_id!r} no longer exists", job, exc) from exc
+        if (asset.type not in {"voice", "audio"} or asset.file_path != binding.path
+                or asset.checksum != binding.sha256 or asset.voice_consent != binding.consent
+                or asset.voice_consent_basis != binding.consent_basis
+                or asset.reuse_scope != binding.reuse_scope):
+            raise job_error(JobErrorKind.INVALID_MANIFEST,
+                            f"emotion asset {binding.asset_id!r} changed (type, file, checksum, "
+                            "voice consent or reuse scope) since the request was submitted; refusing", job)
+        data = self.root.read_bytes(binding.path)
+        if hashlib.sha256(data).hexdigest() != binding.sha256:
+            raise job_error(JobErrorKind.CORRUPT_ARTIFACT,
+                            f"emotion reference {binding.path} no longer matches its registered checksum", job)
+        copy_rel = f"{request.run_directory}/input/emotion.wav"
+        self.root.write_bytes(copy_rel, data)
+        if sha256_file(self.root.resolve(copy_rel)) != binding.sha256:
+            raise job_error(JobErrorKind.CORRUPT_ARTIFACT,
+                            "the staged emotion copy does not match the registered checksum", job)
+        return copy_rel
+
     def _run_worker(self, request: IndexTts2Request, files: RunFiles, job: Job, attempt: _Attempt,
                     cancel: Callable[[], bool] | None, started: float, speaker_rel: str,
-                    queue: Any) -> dict[str, Any]:
+                    queue: Any, emotion_rel: str | None = None) -> dict[str, Any]:
         cfg = self.settings.indextts2
         run = request.run_directory
         request_rel, result_rel = f"{run}/worker_request.json", f"{run}/worker_result.json"
@@ -382,6 +424,12 @@ class IndexTTS2Adapter:
             emotion_record["emo_vector"] = emotion.as_list()
         elif isinstance(emotion, EmotionText):
             emotion_record["description"] = emotion.description
+        elif isinstance(emotion, EmotionReference):
+            if emotion_rel is None:
+                raise job_error(JobErrorKind.INVALID_MANIFEST,
+                                "emotion mode 'reference' reached the worker without a staged clip", job)
+            emotion_record.update(audio_path=str(self.root.resolve(emotion_rel)),
+                                  alpha=emotion.strength)
         repo_dir = self.repository.resolve(INDEXTTS2_REPOSITORY)
         checkpoints = self.repository.resolve(INDEXTTS2_CHECKPOINTS)
         self.root.write_bytes(request_rel, json.dumps({
@@ -465,7 +513,7 @@ class IndexTTS2Adapter:
     def _cleanup_scratch(self, files: RunFiles) -> None:
         run = files.directory
         for name in ("worker_request.json", "worker_result.json", "worker_result.json.tmp",
-                     "input/speaker.wav"):
+                     "input/speaker.wav", "input/emotion.wav"):
             self.root.resolve(f"{run}/{name}").unlink(missing_ok=True)
         try:
             self.root.resolve(f"{run}/input").rmdir()

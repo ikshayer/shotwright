@@ -146,6 +146,10 @@ def synthesise(request: dict[str, Any]) -> None:
         arguments["emo_vector"] = emotion["emo_vector"]
     elif emotion["mode"] == "text":
         arguments.update(use_emo_text=True, emo_text=emotion["description"])
+    elif emotion["mode"] == "reference":
+        # Emotion from a recorded performance, voice from the speaker reference. IndexTTS-2
+        # reads at most the first 15 s of the clip; emo_alpha scales how strongly it applies.
+        arguments.update(emo_audio_prompt=emotion["audio_path"], emo_alpha=float(emotion["alpha"]))
     started = time.perf_counter()
     produced = engine.infer(
         spk_audio_prompt=request["speaker_path"], text=request["text"],

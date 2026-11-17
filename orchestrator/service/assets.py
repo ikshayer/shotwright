@@ -156,8 +156,9 @@ def _validate_voice_consent(
     clean_basis = basis.strip() if isinstance(basis, str) and basis.strip() else None
     if declared_type == "voice" and voice_consent is None:
         raise AssetRegistrationInvalid(
-            "a voice asset requires voice_consent ('synthetic', 'creator_own_voice' or "
-            "'licensed_for_cloning'); a licence alone does not record consent (FR-16)"
+            "a voice asset requires voice_consent ('synthetic', 'creator_own_voice', "
+            "'licensed_for_cloning' or 'licensed_recording'); a licence alone does not record "
+            "consent (FR-16)"
         )
     if voice_consent is None:
         if clean_basis is not None:

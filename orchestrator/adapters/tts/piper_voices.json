@@ -4,11 +4,23 @@
     {
       "voice_id": "en_US-ryan-high",
       "gender": "male",
-      "license": "MIT",
-      "license_source": "PRD v1.2 §8.4, measured 2026-11-04 (spike 05)",
+      "license": "CC BY-NC-SA 4.0 (training dataset: RyanSpeech; non-commercial)",
+      "license_source": "rhasspy/piper-voices MODEL_CARD en/en_US/ryan/high, read 2026-11-16 (supersedes the MIT recorded in PRD v1.2 §8.4, which was Piper's engine licence)",
+      "reuse_scope": "internal evaluation only",
       "onnx_sha256": "b3990d7606e183ec8dbfba70a4607074f162de1a0c412e0180d1ff60bb154eca",
       "onnx_bytes": 120786792,
       "config_sha256": "c6d3b98f08315cb4bebf0d49d50fc4ff491b503c64b940cd3d5ca28543b48011",
+      "sample_rate": 22050
+    },
+    {
+      "voice_id": "en_US-lessac-medium",
+      "gender": "female",
+      "license": "Blizzard 2013 Research Licence Agreement (Lessac data; research purposes only, commercial use prohibited)",
+      "license_source": "rhasspy/piper-voices MODEL_CARD en/en_US/lessac/medium, and the licence page it links, https://www.cstr.ed.ac.uk/projects/blizzard/2013/lessac_blizzard2013/license.html, read 2026-11-16",
+      "reuse_scope": "internal evaluation only",
+      "onnx_sha256": "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f",
+      "onnx_bytes": 63201294,
+      "config_sha256": "efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0",
       "sample_rate": 22050
     }
   ]
