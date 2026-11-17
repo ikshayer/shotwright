@@ -56,6 +56,8 @@ _GPU_KINDS = frozenset({
 #: Kinds whose output is a candidate/take beside the Shot: payload `{"request": ..., "expected_version": ...}`,
 #: a `run_id` of their own, and no change to the Shot, its status or its ShotOutputs.
 _SIDECAR_KINDS = frozenset({AdapterKind.H3_CANDIDATE, AdapterKind.TTS_PIPER, AdapterKind.TTS_INDEXTTS2})
+#: Kinds whose success registers an Asset, so a cancel must resolve to exactly one outcome.
+_SPEECH_KINDS = frozenset({AdapterKind.TTS_PIPER, AdapterKind.TTS_INDEXTTS2})
 
 
 @dataclass(frozen=True)
@@ -384,7 +386,22 @@ class JobRunner:
                         # (not earlier, while this job may still wait for the GPU lock), so a
                         # concurrent job on the same adapter cannot replace or clear it.
                         set_cancel_check(lambda: self._is_cancelled(key))
-                    return adapter.invoke(request, active, queue=queue)
+                    value = adapter.invoke(request, active, queue=queue)
+                    if request.kind in _SPEECH_KINDS:
+                        # Decided before the queue or the CPU path journals "completed": a
+                        # cancel already recorded wins (the take is then discarded); otherwise
+                        # the job is finalizing and a later cancel leaves it to complete. Done
+                        # any later, a cancel could land between the "completed" entry and
+                        # the decision, and the job would read completed with no take.
+                        with self._condition:
+                            if key in self._cancelled:
+                                raise _job_error(JobErrorKind.CANCELLED,
+                                                 "job cancelled before its take was registered", active)
+                            # Only while the job is still the runner's: a watchdog may have
+                            # retired it already, and its cleanup would never discard the key.
+                            if key in self._active:
+                                self._finalizing.add(key)
+                    return value
                 except Exception as exc:
                     raise JobError.from_exception(
                         exc, job_id=active.job_id, shot_id=active.shot_id,
@@ -420,16 +437,9 @@ class JobRunner:
                 persist_h3_candidate(store, job, result.value, request.payload["request"])
             elif request.kind in {AdapterKind.TTS_PIPER, AdapterKind.TTS_INDEXTTS2}:
                 from orchestrator.service.tts import persist_tts_success
-                with self._condition:
-                    # The decision is one locked step; the persistence I/O is not, so a slow
-                    # disk cannot stall other jobs' cancels and notifications. A cancel that
-                    # took the lock first is seen here; one that arrives after finds the job
-                    # finalizing and leaves it to complete (`cancel`). Exactly one of
-                    # {completed with Asset, cancelled without} results.
-                    if key in self._cancelled:
-                        raise _job_error(JobErrorKind.CANCELLED,
-                                         "job cancelled before its take was registered", job)
-                    self._finalizing.add(key)
+                # The keep-or-cancel decision was made when the adapter returned (see
+                # invoke_if_not_cancelled); the job is finalizing, so persistence runs without
+                # the runner lock and a cancel arriving now leaves it to complete.
                 try:
                     persist_tts_success(store, job, result.value, request.payload["request"])
                 finally:
@@ -493,6 +503,7 @@ class JobRunner:
             with self._condition:
                 self._active.discard(key)
                 self._cancelled.discard(key)
+                self._finalizing.discard(key)
                 self._condition.notify_all()
 
     def _startup_allowance(self, kind: AdapterKind) -> float:
