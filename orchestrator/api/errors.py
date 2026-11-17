@@ -18,6 +18,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from orchestrator.adapters.assets.models import ProviderConfigurationError
+from orchestrator.adapters.audiopost.runner import AudioPostRequestError
 from orchestrator.adapters.minimax_h3.core import H3RequestError, H3SetupError
 from orchestrator.adapters.tts.core import TtsRequestError, TtsSetupError
 from orchestrator.domain.state import ReviewApprovalError, TransitionError
@@ -70,7 +71,7 @@ _PROMOTED = ("expected", "actual", "current", "limit", "observed", "remediation"
 #: a malformed request body) are mapped by the surface that can raise them.
 MAPPED: tuple[type[BaseException], ...] = (
     VersionConflict, RecordNotFound, ContainmentError, UploadRejected,
-    H3RequestError, H3SetupError, TtsRequestError, TtsSetupError,
+    H3RequestError, H3SetupError, TtsRequestError, TtsSetupError, AudioPostRequestError,
     TransitionError, ReviewApprovalError, JobError, MissingAdapter, RequestMismatch,
     AdapterRequestInvalid,
     AssetRegistrationInvalid,
@@ -104,6 +105,8 @@ def describe(exc: BaseException) -> tuple[int, dict[str, Any]] | None:
     """
     if isinstance(exc, TtsRequestError):
         return 422, error_body("validation_error", str(exc), field="speech_request")
+    if isinstance(exc, AudioPostRequestError):
+        return 422, error_body("validation_error", str(exc), field="audio_post_request")
     if isinstance(exc, TtsSetupError):
         return 503, error_body("tts_setup_unavailable", str(exc), field="tts")
     if isinstance(exc, H3RequestError):

@@ -53,6 +53,7 @@ from orchestrator.domain.base import (
 )
 from orchestrator.domain.entities import (
     Asset,
+    AudioPostProfile,
     CameraProfile,
     Episode,
     EpisodeOutput,
@@ -149,6 +150,7 @@ _LAYOUTS: dict[type[Entity], _Layout] = {
     Location: _Layout(True, "location_id", lambda i, _e: f"locations/{i}"),
     CameraProfile: _Layout(True, "camera_id", lambda i, _e: f"camera_profiles/{i}"),
     PostProfile: _Layout(False, "name", lambda i, _e: f"post_profiles/{i}.json"),
+    AudioPostProfile: _Layout(False, "name", lambda i, _e: f"audio_post_profiles/{i}.json"),
     StyleBible: _Layout(True, "project_id", lambda _i, _e: "references/style_bible"),
     # Review is the only writer of approval state (10.1), so it must be
     # persistable: without a layout here every production approval failed with
@@ -485,6 +487,8 @@ class ProjectStore:
         relative = layout.place(self._id_of(entity, layout), None)
         if isinstance(entity, H3Candidate) and expected_version != 0:
             raise _invalid("H3Candidate receipts are immutable; only expected_version=0 creation is allowed")
+        if isinstance(entity, AudioPostProfile) and expected_version != 0:
+            raise _invalid("AudioPostProfile records are immutable; a changed chain needs a new name")
         with self._lock:
             creating = False
             try:

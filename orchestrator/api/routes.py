@@ -27,6 +27,7 @@ from orchestrator.domain.entities import (
     Shot,
     VoiceConsent,
 )
+from orchestrator.service.audiopost import AudioPostApplyBody, AudioPostProfileCreation
 from orchestrator.service.minimax_h3 import H3CancelBody, H3GenerateBody, H3PromoteBody
 from orchestrator.service.tts import IndexTts2SpeechBody, PiperSpeechBody
 
@@ -196,6 +197,7 @@ OPERATIONS = (
     Operation("create_project", "POST", "/projects", "Create a project", True, "service.dependencies.create_project / store", Project, _call("create_project")),
     Operation("create_camera_profile", "POST", "/projects/{project_id}/camera-profiles/{camera_id}", "Create a camera profile", True, "service.dependencies.create_camera_profile", CameraProfileCreation, _call("create_camera_profile")),
     Operation("create_post_profile", "POST", "/projects/{project_id}/post-profiles/{profile_name}", "Create a post profile", True, "service.dependencies.create_post_profile", PostProfileCreation, _call("create_post_profile")),
+    Operation("create_audio_post_profile", "POST", "/projects/{project_id}/audio-post-profiles/{profile_name}", "Create an audio post profile: a versioned, seeded voice degradation chain, pinned to the installed FFmpeg", True, "service.audiopost", AudioPostProfileCreation, _call("create_audio_post_profile")),
     Operation("create_episode", "POST", "/projects/{project_id}/episodes", "Create an episode", True, "service.dependencies.create_episode", EpisodeCreation, _call("create_episode")),
     Operation("create_location", "POST", "/projects/{project_id}/locations/{location_id}", "Create a project Location with its base shell and placements", True, "service.dependencies.create_location", LocationCreation, _call("create_location")),
     Operation("revise_location", "POST", "/projects/{project_id}/locations/{location_id}/revise", "Revise a Location and invalidate dependent shots", True, "service.dependencies.revise_location", LocationRevision, _call("revise_location")),
@@ -227,6 +229,7 @@ OPERATIONS = (
     Operation("inspect_tts", "GET", "/models/tts", "Inspect configured text-to-speech runtimes (Piper, IndexTTS-2) and the Piper voice catalog", False, "service.tts", None, _call("inspect_tts")),
     Operation("generate_piper_speech", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/speech/piper", "Synthesise a processed-source voice take (PA, answering machine, broadcast) with Piper on the CPU", True, "service.tts", PiperSpeechBody, _call("generate_piper_speech")),
     Operation("generate_indextts2_speech", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/speech/indextts2", "Synthesise a diegetic voice take with IndexTTS-2 on the GPU, cloning a consented speaker reference and steering emotion", True, "service.tts", IndexTts2SpeechBody, _call("generate_indextts2_speech")),
+    Operation("apply_audio_post_profile", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/speech/post", "Degrade a registered voice take with an AudioPostProfile on the CPU; the result is a new voice Asset with the source take's rights", True, "service.audiopost", AudioPostApplyBody, _call("apply_audio_post_profile")),
     Operation("report_jobs", "GET", "/projects/{project_id}/jobs", "Report jobs", False, "jobs.queue", None, _call("report_jobs")),
     Operation("apply_typed_feedback", "POST", "/projects/{project_id}/feedback", "Apply typed feedback", True, "service.apply_typed_feedback", OpenRequest, _call("apply_typed_feedback")),
     Operation("score_rubric", "POST", "/projects/{project_id}/rubric/score", "Score rubric criteria", True, "domain.entities.RubricScores", RubricRequest, _call("score_rubric")),
@@ -247,4 +250,5 @@ ASYNC_ADAPTER_OPERATIONS = frozenset({
     "generate_h3_candidate",
     "generate_piper_speech",
     "generate_indextts2_speech",
+    "apply_audio_post_profile",
 })

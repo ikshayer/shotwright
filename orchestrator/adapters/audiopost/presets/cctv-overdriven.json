@@ -1,0 +1,19 @@
+{
+  "audio_post_profile": {
+    "name": "cctv-overdriven",
+    "semver": "1.0.0",
+    "intent": "Voice recorded on cheap CCTV audio hardware: overdriven and clipped, band-limited, a short room echo, heavily compressed, with pink noise and mains hum, delivered as 8 kHz mu-law. The creator's choice from spike 29.",
+    "voice_stages": [
+      {"name": "rumble_cut", "filter": "highpass", "params": {"f": 350, "poles": 2}},
+      {"name": "drive", "filter": "volume", "params": {"gain_db": 30}},
+      {"name": "clip", "filter": "asoftclip", "params": {"type": "hard", "threshold": 0.25}},
+      {"name": "band_top", "filter": "lowpass", "params": {"f": 2800, "poles": 2}},
+      {"name": "band_bottom", "filter": "highpass", "params": {"f": 450, "poles": 2}},
+      {"name": "room", "filter": "aecho", "params": {"in_gain": 0.8, "out_gain": 0.45, "delays_ms": [28, 47], "decays": [0.3, 0.2]}},
+      {"name": "squash", "filter": "acompressor", "params": {"threshold": 0.03, "ratio": 12, "attack": 5, "release": 500, "makeup": 4}}
+    ],
+    "noise": {"color": "pink", "amplitude": 0.035},
+    "hum": {"frequency_hz": 60, "amplitude": 0.02, "harmonics": [{"multiple": 3, "relative": 0.3333333333333333}]},
+    "encode": {"codec": "pcm_mulaw", "sample_rate": 8000}
+  }
+}

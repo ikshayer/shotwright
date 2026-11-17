@@ -23,13 +23,14 @@ import re
 from datetime import date, datetime
 from enum import StrEnum
 from pathlib import PurePosixPath, PureWindowsPath
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
     StrictInt,
+    ValidationError,
     field_serializer,
     field_validator,
     model_validator,
@@ -601,6 +602,185 @@ class PostProfile(Entity):
         return v
 
 
+# --------------------------------------------------------------------------
+# audio post-profile (FR-32, first half)
+# --------------------------------------------------------------------------
+
+
+def _finite(*, gt: float | None = None, ge: float | None = None, le: float | None = None) -> Any:
+    """A real number that is finite and not a boolean, within the stated bounds."""
+    return Annotated[float, Field(strict=True, allow_inf_nan=False, gt=gt, ge=ge, le=le)]
+
+
+def _whole(ge: int, le: int) -> Any:
+    return Annotated[int, Field(strict=True, ge=ge, le=le)]
+
+
+class _AudioParams(BaseModel):
+    """Typed parameters of one allowlisted filter; unknown keys are refused."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class _CutoffParams(_AudioParams):
+    f: _whole(20, 20000)
+    poles: _whole(1, 2) = 2
+
+
+class _VolumeParams(_AudioParams):
+    gain_db: _finite(ge=-60, le=60)
+
+
+class _SoftclipParams(_AudioParams):
+    type: Literal["hard", "tanh", "atan", "cubic", "exp", "alg", "quintic", "sin", "erf"]
+    threshold: _finite(gt=0, le=1)
+
+
+class _EchoParams(_AudioParams):
+    in_gain: _finite(gt=0, le=1)
+    out_gain: _finite(gt=0, le=1)
+    delays_ms: Annotated[list[_whole(1, 1000)], Field(min_length=1, max_length=4)]
+    decays: Annotated[list[_finite(gt=0, le=1)], Field(min_length=1, max_length=4)]
+
+    @model_validator(mode="after")
+    def _one_decay_per_delay(self) -> _EchoParams:
+        if len(self.decays) != len(self.delays_ms):
+            raise ValueError("decays must have the same count as delays_ms")
+        return self
+
+
+class _CompressorParams(_AudioParams):
+    threshold: _finite(ge=0.000976563, le=1)
+    ratio: _finite(ge=1, le=20)
+    attack: _finite(ge=0.01, le=2000)
+    release: _finite(ge=0.01, le=9000)
+    makeup: _finite(ge=1, le=64)
+
+
+class _CrusherParams(_AudioParams):
+    bits: _finite(ge=1, le=64)
+    mode: Literal["lin", "log"]
+    aa: _finite(ge=0, le=1)
+    samples: _finite(ge=1, le=250) = 1.0
+    level_in: _finite(ge=0.015625, le=64) = 1.0
+    level_out: _finite(ge=0.015625, le=64) = 1.0
+
+
+class _ModulationParams(_AudioParams):
+    f: _finite(ge=0.1, le=20000)
+    d: _finite(ge=0, le=1)
+
+
+class _ResampleParams(_AudioParams):
+    sample_rate: _whole(1000, 192000)
+
+
+#: The closed allowlist of voice-stage filters (contract 2). The code builds the FFmpeg
+#: graph text from these typed values; no caller string is ever interpolated into it.
+AUDIO_STAGE_PARAMS: dict[str, type[_AudioParams]] = {
+    "highpass": _CutoffParams, "lowpass": _CutoffParams, "volume": _VolumeParams,
+    "asoftclip": _SoftclipParams, "aecho": _EchoParams, "acompressor": _CompressorParams,
+    "acrusher": _CrusherParams, "vibrato": _ModulationParams, "tremolo": _ModulationParams,
+    "aresample": _ResampleParams,
+}
+
+
+class AudioStage(Entity):
+    """One ordered filter of the voice chain: an allowlisted filter and its typed params."""
+
+    name: str = Field(pattern=r"^[a-z0-9_]{1,32}$")
+    filter: Literal[
+        "highpass", "lowpass", "volume", "asoftclip", "aecho", "acompressor", "acrusher",
+        "vibrato", "tremolo", "aresample",
+    ]
+    #: Stored normalised: defaults filled in, so the record states every value used.
+    params: dict[str, Any]
+
+    @field_validator("params", mode="after")
+    @classmethod
+    def _params_match_filter(cls, value: dict[str, Any], info: Any) -> dict[str, Any]:
+        stage_filter = info.data.get("filter")
+        if stage_filter is None:
+            return value  # the filter itself was refused; that error is already recorded
+        try:
+            return AUDIO_STAGE_PARAMS[stage_filter].model_validate(value).model_dump(mode="python")
+        except ValidationError as exc:
+            raise ValueError(f"invalid params for {stage_filter!r}: {exc}") from exc
+
+
+class AudioNoise(Entity):
+    color: Literal["white", "pink", "brown"]
+    amplitude: _finite(gt=0, le=0.5)
+
+
+class AudioHumHarmonic(Entity):
+    multiple: _whole(2, 10)
+    relative: _finite(gt=0, le=1)
+
+
+class AudioHum(Entity):
+    frequency_hz: Literal[50, 60]
+    amplitude: _finite(gt=0, le=0.2)
+    harmonics: list[AudioHumHarmonic] = Field(default_factory=list, max_length=4)
+
+
+class AudioEncode(Entity):
+    """The delivery encoding. Always mono; loudness is not a field (it is FR-08's -18 LUFS)."""
+
+    codec: Literal["pcm_s16le", "pcm_mulaw"]
+    sample_rate: Literal[8000, 16000, 22050, 44100, 48000]
+
+    @model_validator(mode="after")
+    def _mulaw_is_narrowband(self) -> AudioEncode:
+        if self.codec == "pcm_mulaw" and self.sample_rate != 8000:
+            raise ValueError("pcm_mulaw requires sample_rate 8000")
+        return self
+
+
+class AudioPostProfile(Entity):
+    """A versioned, seeded degradation chain for one voice take (FR-32).
+
+    Immutable once written: a changed chain is a new name, never an edit.
+    """
+
+    name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")
+    semver: str
+    #: what source this imitates
+    intent: str
+    voice_stages: list[AudioStage] = Field(min_length=1, max_length=24)
+    noise: AudioNoise | None = None
+    hum: AudioHum | None = None
+    encode: AudioEncode
+    #: Measured by the create operation, never asserted by the caller. None until then, so
+    #: a re-validated dump of a create body (which carries the default) is distinguishable
+    #: from a body that supplied a value, even an empty one.
+    pinned_binaries: dict[str, str] | None = None
+
+    @field_validator("semver")
+    @classmethod
+    def _semver_shape(cls, v: str) -> str:
+        parts = v.split(".")
+        if len(parts) != 3 or not all(p.isascii() and p.isdigit() for p in parts):
+            raise ValueError(f"semver must be MAJOR.MINOR.PATCH, got {v!r}")
+        return v
+
+    @field_validator("intent")
+    @classmethod
+    def _intent_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("intent must not be blank")
+        return v
+
+    @field_validator("voice_stages")
+    @classmethod
+    def _stage_names_unique(cls, stages: list[AudioStage]) -> list[AudioStage]:
+        names = [stage.name for stage in stages]
+        duplicated = sorted({name for name in names if names.count(name) > 1})
+        if duplicated:
+            raise ValueError(f"stage names must be unique; repeated: {duplicated}")
+        return stages
+
+
 class TimelineEntry(Entity):
     type: str  # shot | card | pause
     ref: str | None = None
@@ -1051,6 +1231,12 @@ __all__ = [
     "Asset",
     "AssetPlacement",
     "Attestation",
+    "AudioEncode",
+    "AudioHum",
+    "AudioHumHarmonic",
+    "AudioNoise",
+    "AudioPostProfile",
+    "AudioStage",
     "Beat",
     "BeatSceneDirection",
     "CameraMode",

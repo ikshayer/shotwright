@@ -45,6 +45,12 @@ from orchestrator.service.assets import (
     register_asset,
     validate_asset_source,
 )
+from orchestrator.service.audiopost import (
+    AudioPostApplyBody,
+    AudioPostProfileCreation,
+    compose_audio_post_request,
+    create_audio_post_profile,
+)
 from orchestrator.service.compose import compose_render_request
 from orchestrator.service.dependencies import (
     create_camera_profile,
@@ -191,6 +197,16 @@ class OperationContext:
             profile = PostProfile.model_validate(data["post_profile"])
             _require_path_match(data, "profile_name", profile.name)
             created = create_post_profile(self._store(data["project_id"]), profile)
+            return created.model_dump(mode="json")
+        if operation == "create_audio_post_profile":
+            creation = AudioPostProfileCreation.model_validate(
+                {"audio_post_profile": data["audio_post_profile"]})
+            profile = creation.audio_post_profile
+            _require_path_match(data, "profile_name", profile.name)
+            created = create_audio_post_profile(
+                self._store(data["project_id"]), profile,
+                ffmpeg_exe=self.settings.binaries.ffmpeg_exe,
+            )
             return created.model_dump(mode="json")
         if operation == "create_episode":
             episode = Episode.model_validate(data["episode"])
@@ -451,6 +467,8 @@ class OperationContext:
             return inspect_tts(self.settings)
         if operation in {"generate_piper_speech", "generate_indextts2_speech"}:
             return self._submit_speech(operation, data)
+        if operation == "apply_audio_post_profile":
+            return self._submit_audio_post(data)
         if operation == "report_jobs":
             queue = self.job_queues.get(data["project_id"])
             return self._read_job_reports(data["project_id"], root=queue.root if queue else None)
@@ -555,6 +573,27 @@ class OperationContext:
         job = self.job_runner.submit(data["project_id"], request)
         return {"job_id": job.job_id, "state": job.state, "run_id": run_id,
                 "asset_id": f"tts-{run_id}"}
+
+    def _submit_audio_post(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Validate an audio post request, then submit it as a CPU job bound to its Shot."""
+        if self.job_runner is None:
+            raise RuntimeError("default JobRunner was not configured")
+        body = AudioPostApplyBody.model_validate({key: value for key, value in data.items()
+                                                  if key in AudioPostApplyBody.model_fields})
+        run_id = uuid.uuid4().hex
+        post = compose_audio_post_request(
+            self._store(data["project_id"]), shot_id=data["shot_id"], episode_id=data["episode_id"],
+            body=body, run_id=run_id,
+        )
+        request = AdapterRequest(
+            kind=AdapterKind.AUDIO_POST,
+            payload={"request": post, "expected_version": body.expected_version},
+            record_id=data["shot_id"], record_version=post.shot_version,
+            episode_id=data["episode_id"],
+        )
+        job = self.job_runner.submit(data["project_id"], request)
+        return {"job_id": job.job_id, "state": job.state, "run_id": run_id,
+                "asset_id": f"audiopost-{run_id}"}
 
     def _read_job_reports(
         self, project_id: str, *, root: ProjectRoot | None = None
@@ -1025,6 +1064,9 @@ class _DefaultRuntime:
                 elif kind is AdapterKind.TTS_INDEXTTS2:
                     from orchestrator.adapters.tts import IndexTTS2Adapter
                     adapter = IndexTTS2Adapter(project_root, effective_indextts2_settings(self.settings))
+                elif kind is AdapterKind.AUDIO_POST:
+                    from orchestrator.adapters.audiopost import AudioPostAdapter
+                    adapter = AudioPostAdapter(project_root, self.settings)
                 elif kind is AdapterKind.DEGRADE:
                     from orchestrator.adapters.postprofile.runner import PostProfileAdapter
                     adapter = PostProfileAdapter(project_root, self.settings)

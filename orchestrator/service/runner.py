@@ -45,19 +45,24 @@ class AdapterKind(StrEnum):
     H3_CANDIDATE = "h3_candidate"
     TTS_PIPER = "tts_piper"
     TTS_INDEXTTS2 = "tts_indextts2"
+    AUDIO_POST = "audio_post"
 
 
 #: Kinds that never take the GPU lease: they pass CPU admission and run outside the GPU lock.
-_CPU_KINDS = frozenset({AdapterKind.SCENE, AdapterKind.DEGRADE, AdapterKind.TTS_PIPER})
+_CPU_KINDS = frozenset({
+    AdapterKind.SCENE, AdapterKind.DEGRADE, AdapterKind.TTS_PIPER, AdapterKind.AUDIO_POST,
+})
 #: Kinds that run under the GPU lease, the budget ledger and the watchdog.
 _GPU_KINDS = frozenset({
     AdapterKind.RENDER, AdapterKind.GENERATE, AdapterKind.H3_CANDIDATE, AdapterKind.TTS_INDEXTTS2,
 })
 #: Kinds whose output is a candidate/take beside the Shot: payload `{"request": ..., "expected_version": ...}`,
 #: a `run_id` of their own, and no change to the Shot, its status or its ShotOutputs.
-_SIDECAR_KINDS = frozenset({AdapterKind.H3_CANDIDATE, AdapterKind.TTS_PIPER, AdapterKind.TTS_INDEXTTS2})
-#: Kinds whose success registers an Asset, so a cancel must resolve to exactly one outcome.
-_SPEECH_KINDS = frozenset({AdapterKind.TTS_PIPER, AdapterKind.TTS_INDEXTTS2})
+_SIDECAR_KINDS = frozenset({
+    AdapterKind.H3_CANDIDATE, AdapterKind.TTS_PIPER, AdapterKind.TTS_INDEXTTS2, AdapterKind.AUDIO_POST,
+})
+#: Kinds whose success registers a take Asset, so a cancel must resolve to exactly one outcome.
+_TAKE_KINDS = frozenset({AdapterKind.TTS_PIPER, AdapterKind.TTS_INDEXTTS2, AdapterKind.AUDIO_POST})
 
 
 @dataclass(frozen=True)
@@ -124,7 +129,7 @@ class _AdapterShim:
                 cancel=self.cancel_check or _cancel_callback(request.payload),
             )
             return AdapterResult(artifact_path=result.av_path, value=result)
-        if self.kind in {AdapterKind.TTS_PIPER, AdapterKind.TTS_INDEXTTS2}:
+        if self.kind in _TAKE_KINDS:
             return self.adapter.invoke(request, job, queue=queue, cancel=self.cancel_check)
         if isinstance(payload, dict):
             payload = payload.get("request", payload)
@@ -184,7 +189,7 @@ class JobRunner:
         self._condition = threading.Condition()
         self._pending: deque[tuple[str, AdapterRequest, Job]] = deque()
         self._cancelled: set[tuple[str, str]] = set()
-        #: Speech jobs whose result is being registered; a cancel no longer applies to them.
+        #: Take jobs (speech, audio post) whose result is being registered; a cancel no longer applies to them.
         self._finalizing: set[tuple[str, str]] = set()
         self._active: set[tuple[str, str]] = set()
         self._project_locks: dict[str, threading.Lock] = {}
@@ -387,7 +392,7 @@ class JobRunner:
                         # concurrent job on the same adapter cannot replace or clear it.
                         set_cancel_check(lambda: self._is_cancelled(key))
                     value = adapter.invoke(request, active, queue=queue)
-                    if request.kind in _SPEECH_KINDS:
+                    if request.kind in _TAKE_KINDS:
                         # Decided before the queue or the CPU path journals "completed": a
                         # cancel already recorded wins (the take is then discarded); otherwise
                         # the job is finalizing and a later cancel leaves it to complete. Done
@@ -435,13 +440,13 @@ class JobRunner:
             if request.kind is AdapterKind.H3_CANDIDATE:
                 from orchestrator.service.minimax_h3 import persist_h3_candidate
                 persist_h3_candidate(store, job, result.value, request.payload["request"])
-            elif request.kind in {AdapterKind.TTS_PIPER, AdapterKind.TTS_INDEXTTS2}:
-                from orchestrator.service.tts import persist_tts_success
+            elif request.kind in _TAKE_KINDS:
+                persist_success = _take_persistence(request.kind)[0]
                 # The keep-or-cancel decision was made when the adapter returned (see
                 # invoke_if_not_cancelled); the job is finalizing, so persistence runs without
                 # the runner lock and a cancel arriving now leaves it to complete.
                 try:
-                    persist_tts_success(store, job, result.value, request.payload["request"])
+                    persist_success(store, job, result.value, request.payload["request"])
                 finally:
                     with self._condition:
                         self._finalizing.discard(key)
@@ -455,7 +460,7 @@ class JobRunner:
                                         status="cancelled" if exc.kind is JobErrorKind.CANCELLED else "failed")
                 except Exception as receipt_error:  # noqa: BLE001 - a receipt failure annotates the primary job error.
                     exc.add_note(f"H3 terminal GenerationRun persistence failed: {type(receipt_error).__name__}: {receipt_error}")
-            self._persist_tts_terminal(
+            self._persist_take_terminal(
                 store, job, request,
                 status="cancelled" if exc.kind is JobErrorKind.CANCELLED else "failed", error=exc,
             )
@@ -484,7 +489,7 @@ class JobRunner:
                     persist_h3_terminal(store, job, request.payload["request"], status="failed")
                 except Exception as receipt_error:  # noqa: BLE001 - a receipt failure annotates the primary job error.
                     exc.add_note(f"H3 terminal GenerationRun persistence failed: {type(receipt_error).__name__}: {receipt_error}")
-            self._persist_tts_terminal(store, job, request, status="failed", error=exc)
+            self._persist_take_terminal(store, job, request, status="failed", error=exc)
             error = JobError.from_exception(
                 exc, job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id, origin="runner"
             )
@@ -512,15 +517,15 @@ class JobRunner:
         return self.settings.resources.startup_allowance_seconds
 
     @staticmethod
-    def _persist_tts_terminal(store: ProjectStore, job: Job, request: AdapterRequest, *,
-                              status: str, error: BaseException) -> None:
-        if request.kind not in {AdapterKind.TTS_PIPER, AdapterKind.TTS_INDEXTTS2}:
+    def _persist_take_terminal(store: ProjectStore, job: Job, request: AdapterRequest, *,
+                               status: str, error: BaseException) -> None:
+        if request.kind not in _TAKE_KINDS:
             return
         try:
-            from orchestrator.service.tts import persist_tts_terminal
-            persist_tts_terminal(store, job, request.payload["request"], status=status)
+            persist_terminal = _take_persistence(request.kind)[1]
+            persist_terminal(store, job, request.payload["request"], status=status)
         except Exception as receipt_error:  # noqa: BLE001 - a receipt failure annotates the primary job error.
-            error.add_note(f"speech terminal GenerationRun persistence failed: "
+            error.add_note(f"take terminal GenerationRun persistence failed: "
                            f"{type(receipt_error).__name__}: {receipt_error}")
 
     def _record_result(self, store: ProjectStore, root: ProjectRoot, request: AdapterRequest,
@@ -607,6 +612,15 @@ class JobRunner:
     def _is_cancelled(self, key: tuple[str, str]) -> bool:
         with self._condition:
             return key in self._cancelled
+
+
+def _take_persistence(kind: AdapterKind) -> tuple[Callable[..., Any], Callable[..., Any]]:
+    """The (success, terminal) persistence pair of a take-producing kind."""
+    if kind is AdapterKind.AUDIO_POST:
+        from orchestrator.service.audiopost import persist_audio_post_success, persist_audio_post_terminal
+        return persist_audio_post_success, persist_audio_post_terminal
+    from orchestrator.service.tts import persist_tts_success, persist_tts_terminal
+    return persist_tts_success, persist_tts_terminal
 
 
 def _kind_queue(factory: Callable[[str], JobQueue], project_id: str,

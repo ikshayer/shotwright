@@ -45,6 +45,21 @@ def derive_seed(
     return int(digest, 16) % (max_value + 1)
 
 
+#: FFmpeg's `anoisesrc` seed accepts 0..UINT32_MAX.
+UINT32_MAX = 0xFFFFFFFF
+
+
+def derive_audio_seed(profile_name: str, semver: str, stage_name: str, line_id: str) -> int:
+    """Derive an audio stage's seed from FR-32's `(profile, stage, line)` tuple.
+
+    Follows `derive_seed`'s method (SHA-256 of a `|`-joined string, first 16 hex digits,
+    modulo the range) with an `audio|` prefix so an audio seed cannot collide with a video
+    seed, reduced modulo `UINT32_MAX + 1` and never otherwise wrapped or masked.
+    """
+    material = f"audio|{profile_name}|{semver}|{stage_name}|{line_id}".encode()
+    return int(hashlib.sha256(material).hexdigest()[:16], 16) % (UINT32_MAX + 1)
+
+
 def derive_unit_interval(shot_id: str, degrade_seed: int, stage_name: str) -> float:
     """A deterministic float in [0, 1) for jitter that is not a filter seed."""
     return derive_seed(shot_id, degrade_seed, stage_name, INT32_MAX) / (INT32_MAX + 1)

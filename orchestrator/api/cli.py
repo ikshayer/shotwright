@@ -64,11 +64,14 @@ def _error_payload(exc: Exception) -> dict[str, Any]:
 
 #: Jobs whose GPU/CPU process is owned by this CLI process: they cannot outlive it, so
 #: `--no-wait` is refused and Ctrl+C requests cancellation and waits for cleanup.
-_SPEECH_OPERATIONS = frozenset({"generate_piper_speech", "generate_indextts2_speech"})
+_SPEECH_OPERATIONS = frozenset({
+    "generate_piper_speech", "generate_indextts2_speech", "apply_audio_post_profile",
+})
 _LOCALLY_OWNED_JOBS = {
     "generate_h3_candidate": "H3",
     "generate_piper_speech": "Piper",
     "generate_indextts2_speech": "IndexTTS-2",
+    "apply_audio_post_profile": "Audio post",
 }
 
 
