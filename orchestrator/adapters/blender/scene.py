@@ -244,6 +244,18 @@ class AssetBinding(_FrozenModel):
         return value
 
 
+class SharedLocation(_FrozenModel):
+    """The versioned room and camera rig this shot can reuse within an Episode."""
+
+    episode_id: str = Field(min_length=1)
+    location_id: str = Field(min_length=1)
+    location_version: int = Field(ge=1)
+    camera_id: str = Field(min_length=1)
+    object_names: tuple[str, ...]
+    light_names: tuple[str, ...]
+    material_names: tuple[str, ...]
+
+
 class RenderRequest(_FrozenModel):
     shot_id: str
     shot_version: int = Field(ge=1)
@@ -255,6 +267,7 @@ class RenderRequest(_FrozenModel):
     master_resolution: tuple[StrictInt, StrictInt] = (1280, 960)
     camera_profile: CameraProfile
     scene: SceneSpec
+    shared_location: SharedLocation | None = None
     asset_bindings: dict[str, AssetBinding] = Field(default_factory=dict)
     event_sec: float | None = Field(default=None, ge=0)
     anomaly: AnomalySpec | None = None

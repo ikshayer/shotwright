@@ -261,6 +261,415 @@ def _configure_pbr_material(bpy, material, spec: dict) -> None:
     material.use_nodes = True
 
 
+def _create_materials(bpy, specs):
+    materials = {}
+    for spec in specs:
+        mat = bpy.data.materials.new(spec["name"])
+        mat.diffuse_color = tuple(spec["color"])
+        mat.use_nodes = True
+        if spec.get("textures") is not None:
+            _configure_pbr_material(bpy, mat, spec)
+            shader = None
+        else:
+            shader = mat.node_tree.nodes.get("Principled BSDF")
+        if shader is not None:
+            shader.inputs["Base Color"].default_value = tuple(spec["color"])
+            shader.inputs["Roughness"].default_value = spec["roughness"]
+            shader.inputs["Metallic"].default_value = spec.get("metallic", 0.0)
+            if spec.get("emission_strength", 0.0):
+                emission = shader.inputs.get("Emission Color") or shader.inputs.get(
+                    "Emission"
+                )
+                if emission is not None:
+                    emission.default_value = tuple(spec["color"])
+                strength = shader.inputs.get("Emission Strength")
+                if strength is not None:
+                    strength.default_value = spec["emission_strength"]
+            if spec.get("surface", "plain") != "plain":
+                _configure_material_surface(mat, spec)
+        materials[spec["name"]] = mat
+    return materials
+
+
+def _create_object(bpy, Matrix, Euler, Vector, scene, spec, materials, mode):
+    kind = spec["kind"]
+    if kind not in {"box", "cylinder", "sphere", "cone", "torus"}:
+        raise ValueError(f"unsupported object kind {kind!r}")
+    imported_objects = []
+    if spec.get("asset_id") is not None:
+        obj, imported_objects = _import_gltf_asset(
+            bpy, Matrix, Euler, Vector, scene, spec
+        )
+    else:
+        if kind == "box":
+            bpy.ops.mesh.primitive_cube_add(size=1, location=spec["location"])
+        elif kind == "cylinder":
+            bpy.ops.mesh.primitive_cylinder_add(
+                vertices=32, radius=0.5, depth=1, location=spec["location"]
+            )
+        elif kind == "sphere":
+            bpy.ops.mesh.primitive_uv_sphere_add(
+                segments=32, ring_count=16, radius=0.5, location=spec["location"]
+            )
+        elif kind == "cone":
+            bpy.ops.mesh.primitive_cone_add(
+                vertices=32, radius1=0.5, radius2=0.12, depth=1, location=spec["location"]
+            )
+        else:
+            bpy.ops.mesh.primitive_torus_add(
+                major_segments=48, minor_segments=12, location=spec["location"]
+            )
+        obj = bpy.context.object
+        obj.dimensions = tuple(spec["dimensions"])
+        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+        obj.rotation_euler = tuple(spec.get("rotation", (0, 0, 0)))
+        bevel = float(spec.get("bevel", 0))
+        if bevel and kind == "box":
+            mod = obj.modifiers.new(name="Soft edges", type="BEVEL")
+            mod.width = min(bevel, min(spec["dimensions"]) * 0.48)
+            mod.segments = 3
+            obj.modifiers.new(name="Weighted normals", type="WEIGHTED_NORMAL")
+        if kind == "sphere":
+            for poly in obj.data.polygons:
+                poly.use_smooth = True
+    obj.name = spec["name"]
+    if mode == "master" and not imported_objects:
+        obj.data.materials.append(materials[spec["material"]])
+    if spec["name"] == "RoomShell" and not imported_objects:
+        bpy.ops.object.mode_set(mode="EDIT")
+        bpy.ops.mesh.select_all(action="SELECT")
+        bpy.ops.mesh.flip_normals()
+        bpy.ops.object.mode_set(mode="OBJECT")
+    return obj, imported_objects
+
+
+def _record_asset_bounds(metadata, obj, imported_objects, spec, Vector):
+    meshes = [item for item in imported_objects if item.type == "MESH"]
+    if not meshes:
+        raise RuntimeError(f"asset {spec['asset_id']!r} has no placed mesh geometry")
+    points = [item.matrix_world @ Vector(corner) for item in meshes for corner in item.bound_box]
+    placed_min = tuple(min(point[a] for point in points) for a in range(3))
+    placed_max = tuple(max(point[a] for point in points) for a in range(3))
+    metadata["asset_bounds"].append({
+        "object_name": spec["name"], "asset_id": spec["asset_id"],
+        "fit_mode": spec.get("fit_mode", "exact"),
+        "source_min": list(obj.get("cctv_source_min", ())),
+        "source_max": list(obj.get("cctv_source_max", ())),
+        "source_dimensions": list(obj.get("cctv_source_dimensions", ())),
+        "placed_world_min": list(placed_min), "placed_world_max": list(placed_max),
+        "placed_dimensions": [placed_max[a]-placed_min[a] for a in range(3)],
+    })
+
+
+def _animate_object(obj, imported_objects, spec):
+    for key in spec["keyframes"]:
+        obj.location = tuple(key["location"])
+        obj.keyframe_insert(data_path="location", frame=key["frame"])
+    visibility_targets = imported_objects or [obj]
+    for key in spec.get("visibility_keyframes", []):
+        for target in visibility_targets:
+            target.hide_render = not bool(key["visible"])
+            target.keyframe_insert(data_path="hide_render", frame=key["frame"])
+    _linearize_action(obj)
+    for target in visibility_targets:
+        _constantize_action_path(target, "hide_render")
+
+
+def _light_energy_scale(camera_settings):
+    scale = float(camera_settings["practical_light_intensity"])
+    return scale * 0.35 if camera_settings["monochrome_night"] else scale
+
+
+def _create_light(bpy, Vector, scene, spec, camera_settings, mode, energy_scale):
+    light_kind = spec.get("kind", "area").upper()
+    light = bpy.data.lights.new(spec["name"], type=light_kind)
+    expected_energy = spec["energy"] * energy_scale
+    light.energy = expected_energy
+    expected_color = (
+        (1.0, 1.0, 1.0)
+        if mode == "preview"
+        else tuple(
+            _temperature_color(spec["color"], camera_settings["practical_light_color_k"])
+        )
+    )
+    if camera_settings["monochrome_night"]:
+        value = sum(expected_color) / 3
+        expected_color = (value, value, value)
+        light.energy = expected_energy
+    light.color = expected_color
+    if any(
+        not math.isclose(float(actual), expected, rel_tol=1e-6, abs_tol=1e-6)
+        for actual, expected in zip(light.color, expected_color)
+    ):
+        raise RuntimeError(f"light {spec['name']!r} color failed readback")
+    if light_kind == "AREA":
+        light.shape = "RECTANGLE"
+        light.size = spec["size"]
+        light.size_y = spec["size"] * 0.23
+    else:
+        light.shadow_soft_size = spec["size"]
+    actual_size = light.size if light_kind == "AREA" else light.shadow_soft_size
+    if not math.isclose(
+        light.energy, expected_energy, rel_tol=1e-6, abs_tol=1e-6
+    ) or not math.isclose(actual_size, float(spec["size"]), rel_tol=1e-6, abs_tol=1e-6):
+        raise RuntimeError(f"light {spec['name']!r} energy or size was clamped")
+    obj = bpy.data.objects.new(spec["name"], light)
+    obj.location = spec["location"]
+    if spec.get("target") is not None:
+        target = Vector(spec["target"])
+        if target == Vector(spec["location"]):
+            raise ValueError("light target coincides with location")
+        obj.rotation_euler = (
+            (target - Vector(spec["location"]))
+            .normalized()
+            .to_track_quat("-Z", "Y")
+            .to_euler()
+        )
+    scene.collection.objects.link(obj)
+    return obj
+
+
+def _animate_light(light, spec, energy_scale):
+    for key in spec.get("energy_keyframes", []):
+        light.energy = float(key["energy"]) * energy_scale
+        light.keyframe_insert(data_path="energy", frame=key["frame"])
+    _linearize_action(light)
+
+
+def _create_camera(bpy, Vector, scene, scene_data, camera_settings):
+    camera_data = bpy.data.cameras.new("CCTV Camera")
+    camera = bpy.data.objects.new("CCTV Camera", camera_data)
+    position = camera_settings["camera_position"] or tuple(scene_data["camera_location"])
+    camera.location = position
+    target = Vector(scene_data["camera_target"])
+    if Vector(position) == target:
+        raise ValueError("camera position override coincides with target")
+    camera.rotation_euler = (
+        (target - Vector(position)).normalized().to_track_quat("-Z", "Y").to_euler()
+    )
+    camera_data.sensor_width = 36.0
+    camera_data.sensor_fit = "HORIZONTAL"
+    camera_data.lens = camera_settings["field_of_view_mm"]
+    if not math.isclose(
+        camera_data.lens, float(camera_settings["field_of_view_mm"]), rel_tol=1e-6, abs_tol=1e-6
+    ):
+        raise RuntimeError("camera lens was clamped by Blender")
+    scene.collection.objects.link(camera)
+    scene.camera = camera
+    if camera_settings["depth_of_field"] is not None:
+        camera_data.dof.use_dof = True
+        camera_data.dof.focus_distance = camera_settings["depth_of_field"]
+        camera_data.dof.aperture_fstop = 5.6
+        if not camera_data.dof.use_dof or not math.isclose(
+            camera_data.dof.focus_distance,
+            float(camera_settings["depth_of_field"]),
+            rel_tol=1e-6,
+            abs_tol=1e-6,
+        ):
+            raise RuntimeError("camera depth-of-field focus distance was clamped")
+
+
+def _animate_camera(Vector, camera, scene_data):
+    for key in scene_data.get("camera_keyframes", []):
+        camera.location = tuple(key["location"])
+        key_target = Vector(key["target"])
+        if Vector(key["location"]) == key_target:
+            raise ValueError("camera keyframe location coincides with target")
+        camera.rotation_euler = (
+            (key_target - Vector(key["location"]))
+            .normalized()
+            .to_track_quat("-Z", "Y")
+            .to_euler()
+        )
+        camera.keyframe_insert(data_path="location", frame=key["frame"])
+        camera.keyframe_insert(data_path="rotation_euler", frame=key["frame"])
+    _linearize_action(camera)
+
+
+def _configure_scene_view(bpy, scene, scene_data, camera_settings, mode, metadata):
+    monochrome_master = mode == "master" and camera_settings["monochrome_night"]
+    if (
+        camera_settings["barrel_distortion"]
+        or camera_settings["exposure_ev"]
+        or monochrome_master
+    ):
+        _configure_compositor(
+            bpy,
+            scene,
+            camera_settings["barrel_distortion"],
+            camera_settings["exposure_ev"],
+            monochrome=monochrome_master,
+        )
+    scene.view_settings.view_transform = "Standard"
+    # Blender's view exposure is display-referred; apply through compositor so
+    # scene-linear EXR masters carry the rebuild-triggering exposure change.
+    scene.view_settings.exposure = 0.0
+    if mode == "preview":
+        world = bpy.data.worlds.new("Preview Neutral World")
+        world.use_nodes = True
+        background = world.node_tree.nodes.get("Background")
+        if background:
+            background.inputs["Color"].default_value = (0.55, 0.55, 0.55, 1.0)
+            background.inputs["Strength"].default_value = 0.5
+        scene.world = world
+    elif camera_settings["monochrome_night"]:
+        world = bpy.data.worlds.new("Monochrome Night World")
+        world.use_nodes = True
+        background = world.node_tree.nodes.get("Background")
+        if background:
+            background.inputs["Color"].default_value = (0.12, 0.12, 0.12, 1)
+            background.inputs["Strength"].default_value = 0.2
+        scene.world = world
+    else:
+        # Spike 02 measured this world illumination for the synthetic
+        # interior; retain it as the neutral baseline for generated scenes.
+        world = bpy.data.worlds.new("CCTV Neutral World")
+        world.use_nodes = True
+        background = world.node_tree.nodes.get("Background")
+        if background:
+            background.inputs["Color"].default_value = (0.08, 0.082, 0.09, 1.0)
+            background.inputs["Strength"].default_value = 1.6
+        scene.world = world
+    if mode == "master" and scene_data.get("world_strength") is not None and not scene_data.get("environment"):
+        background = scene.world.node_tree.nodes.get("Background") if scene.world and scene.world.use_nodes else None
+        if background is None:
+            raise RuntimeError("scene world has no Background node for configured world_strength")
+        background.inputs["Strength"].default_value = float(scene_data["world_strength"])
+    if mode == "master" and scene_data.get("environment") is not None:
+        _configure_environment(bpy, scene, scene_data["environment"])
+        metadata["applied_environment"] = _environment_metadata(scene_data)
+
+
+def _finish_materials(materials, specs, camera_settings, mode):
+    if mode == "master" and camera_settings["monochrome_night"]:
+        for mat in materials.values():
+            shader = mat.node_tree.nodes.get("Principled BSDF")
+            if shader:
+                color = shader.inputs["Base Color"].default_value
+                luminance = 0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]
+                shader.inputs["Base Color"].default_value = (
+                    luminance,
+                    luminance,
+                    luminance,
+                    color[3],
+                )
+    if mode == "master":
+        textured = {
+            spec["name"]
+            for spec in specs
+            if spec.get("surface", "plain") != "plain"
+        }
+        for name, mat in materials.items():
+            if name not in textured:
+                _add_surface_roughness(mat)
+
+
+def _environment_metadata(scene_data):
+    env = scene_data["environment"]
+    return {"asset_id": env["asset_id"], "asset_checksum": env["binding"]["asset_checksum"],
+            "strength": env["strength"], "rotation_rad": env["rotation_rad"]}
+
+
+def _open_shared_base(bpy, shared):
+    binding = shared["input"]
+    path = binding["path"]
+    if not os.path.isabs(path):
+        raise RuntimeError("shared blend input is not an authorized absolute path")
+    with open(path, "rb") as stream:
+        if hashlib.file_digest(stream, "sha256").hexdigest() != binding["sha256"]:
+            raise RuntimeError("shared blend input does not match its SHA-256")
+    result = bpy.ops.wm.open_mainfile(filepath=path, load_ui=False, use_scripts=False)
+    if "FINISHED" not in result:
+        raise RuntimeError("could not open the worker-generated shared blend")
+    if bpy.context.scene.get("cctv_shared_base") != shared["key"]:
+        raise RuntimeError("shared blend identity does not match the current plan")
+    _verify_shared_base_dependencies(bpy)
+    bpy.context.view_layer.update()
+
+
+def _verify_shared_base_dependencies(bpy):
+    if bpy.data.libraries:
+        raise RuntimeError("shared blend depends on an external Blender library")
+    for image in bpy.data.images:
+        if image.source in {"FILE", "TILED", "SEQUENCE", "MOVIE"} and not image.packed_files:
+            raise RuntimeError(f"shared blend depends on unpacked image {image.name!r}")
+
+
+def _prepare_shared_base(bpy, Matrix, Euler, Vector, scene, shared, camera_settings, mode, metadata):
+    static = shared["scene"]
+    if mode != "master":
+        raise RuntimeError("only master renders can use a shared blend")
+    if shared["input"] is not None:
+        if static.get("environment") is not None:
+            metadata["applied_environment"] = _environment_metadata(static)
+        action = "reused"
+    else:
+        materials = _create_materials(bpy, static["materials"])
+        for material in materials.values():
+            material.use_fake_user = True
+        # Blender suffixes a datablock name on collision. Imported glTF objects can
+        # choose any name, so preserve the mapping rather than looking up a plan name.
+        object_names = {}
+        for spec in static["objects"]:
+            obj, _ = _create_object(bpy, Matrix, Euler, Vector, scene, spec, materials, mode)
+            object_names[spec["name"]] = obj.name
+        light_names = {}
+        energy_scale = _light_energy_scale(camera_settings)
+        for spec in static["lights"]:
+            obj = _create_light(bpy, Vector, scene, spec, camera_settings, mode, energy_scale)
+            light_names[spec["name"]] = obj.name
+        _create_camera(bpy, Vector, scene, static, camera_settings)
+        _configure_scene_view(bpy, scene, static, camera_settings, mode, metadata)
+        _finish_materials(materials, static["materials"], camera_settings, mode)
+        _verify_shared_base_dependencies(bpy)
+        scene["cctv_shared_base"] = shared["key"]
+        scene["cctv_shared_materials"] = {name: material.name for name, material in materials.items()}
+        scene["cctv_shared_objects"] = object_names
+        scene["cctv_shared_lights"] = light_names
+        scene.render.filepath = "//frames/"
+        result = bpy.ops.wm.save_as_mainfile(filepath=shared["output"], compress=False, copy=True)
+        if "FINISHED" not in result:
+            raise RuntimeError("could not save the shared blend")
+        action = "built"
+    metadata["shared_base"] = {"key": shared["key"], "action": action}
+    return (scene["cctv_shared_materials"], scene["cctv_shared_objects"], scene["cctv_shared_lights"])
+
+
+def _populate_shot(bpy, Matrix, Euler, Vector, scene, plan, metadata):
+    scene_data, camera_settings, mode = plan["scene"], plan["camera"], plan["mode"]
+    shared = plan.get("shared_base")
+    static_materials, static_objects, static_lights = {}, {}, {}
+    if shared is not None:
+        static_materials, static_objects, static_lights = _prepare_shared_base(
+            bpy, Matrix, Euler, Vector, scene, shared, camera_settings, mode, metadata,
+        )
+    materials = {name: bpy.data.materials[actual_name] for name, actual_name in static_materials.items()}
+    new_specs = [spec for spec in scene_data["materials"] if spec["name"] not in static_materials]
+    new_materials = _create_materials(bpy, new_specs) if mode == "master" else {}
+    materials.update(new_materials)
+    for spec in scene_data["objects"]:
+        if spec["name"] in static_objects:
+            obj = scene.objects[static_objects[spec["name"]]]
+            imported_objects = list(obj.children) if spec.get("asset_id") is not None else []
+        else:
+            obj, imported_objects = _create_object(bpy, Matrix, Euler, Vector, scene, spec, materials, mode)
+        if spec.get("asset_id") is not None:
+            _record_asset_bounds(metadata, obj, imported_objects, spec, Vector)
+        _animate_object(obj, imported_objects, spec)
+    energy_scale = _light_energy_scale(camera_settings)
+    for spec in scene_data["lights"]:
+        if spec["name"] in static_lights:
+            obj = scene.objects[static_lights[spec["name"]]]
+        else:
+            obj = _create_light(bpy, Vector, scene, spec, camera_settings, mode, energy_scale)
+        _animate_light(obj.data, spec, energy_scale)
+    if shared is None:
+        _create_camera(bpy, Vector, scene, scene_data, camera_settings)
+        _configure_scene_view(bpy, scene, scene_data, camera_settings, mode, metadata)
+    _animate_camera(Vector, scene.camera, scene_data)
+    _finish_materials(new_materials, new_specs, camera_settings, mode)
+
+
 def _run(plan_path: str) -> None:
     with open(plan_path, encoding="utf-8") as stream:
         plan = json.load(stream)
@@ -277,7 +686,6 @@ def _run(plan_path: str) -> None:
     from mathutils import Euler, Matrix, Vector
 
     started = time.monotonic()
-    scene_data = plan["scene"]
     output = plan["outputs"]
     camera_settings = plan["camera"]
     metadata = {
@@ -307,7 +715,11 @@ def _run(plan_path: str) -> None:
     # Emit identity before any geometry work so failures still leave attributable metadata.
     _write_json(output["metadata"], metadata)
     try:
-        bpy.ops.wm.read_factory_settings(use_empty=True)
+        shared = plan.get("shared_base")
+        if shared is not None and shared["input"] is not None:
+            _open_shared_base(bpy, shared)
+        else:
+            bpy.ops.wm.read_factory_settings(use_empty=True)
         scene = bpy.context.scene
         filepaths = bpy.context.preferences.filepaths
         filepaths.use_auto_save_temporary_files = False
@@ -381,276 +793,8 @@ def _run(plan_path: str) -> None:
                 )
         metadata["applied_settings"]["engine"] = selected
 
-        materials = {}
-        if plan["mode"] == "master":
-            for spec in scene_data["materials"]:
-                mat = bpy.data.materials.new(spec["name"])
-                mat.diffuse_color = tuple(spec["color"])
-                mat.use_nodes = True
-                if spec.get("textures") is not None:
-                    _configure_pbr_material(bpy, mat, spec)
-                    shader = None
-                else:
-                    shader = mat.node_tree.nodes.get("Principled BSDF")
-                if shader is not None:
-                    shader.inputs["Base Color"].default_value = tuple(spec["color"])
-                    shader.inputs["Roughness"].default_value = spec["roughness"]
-                    shader.inputs["Metallic"].default_value = spec.get("metallic", 0.0)
-                    if spec.get("emission_strength", 0.0):
-                        emission = shader.inputs.get("Emission Color") or shader.inputs.get(
-                            "Emission"
-                        )
-                        if emission is not None:
-                            emission.default_value = tuple(spec["color"])
-                        strength = shader.inputs.get("Emission Strength")
-                        if strength is not None:
-                            strength.default_value = spec["emission_strength"]
-                    if spec.get("surface", "plain") != "plain":
-                        _configure_material_surface(mat, spec)
-                materials[spec["name"]] = mat
-        for spec in scene_data["objects"]:
-            kind = spec["kind"]
-            if kind not in {"box", "cylinder", "sphere", "cone", "torus"}:
-                raise ValueError(f"unsupported object kind {kind!r}")
-            imported_objects = []
-            if spec.get("asset_id") is not None:
-                obj, imported_objects = _import_gltf_asset(
-                    bpy, Matrix, Euler, Vector, scene, spec
-                )
-                meshes = [item for item in imported_objects if item.type == "MESH"]
-                points = [item.matrix_world @ Vector(corner) for item in meshes for corner in item.bound_box]
-                placed_min = tuple(min(point[a] for point in points) for a in range(3))
-                placed_max = tuple(max(point[a] for point in points) for a in range(3))
-                metadata["asset_bounds"].append({
-                    "object_name": spec["name"], "asset_id": spec["asset_id"],
-                    "fit_mode": spec.get("fit_mode", "exact"),
-                    "source_min": list(obj.get("cctv_source_min", ())),
-                    "source_max": list(obj.get("cctv_source_max", ())),
-                    "source_dimensions": list(obj.get("cctv_source_dimensions", ())),
-                    "placed_world_min": list(placed_min), "placed_world_max": list(placed_max),
-                    "placed_dimensions": [placed_max[a]-placed_min[a] for a in range(3)],
-                })
-            else:
-                if kind == "box":
-                    bpy.ops.mesh.primitive_cube_add(size=1, location=spec["location"])
-                elif kind == "cylinder":
-                    bpy.ops.mesh.primitive_cylinder_add(
-                        vertices=32, radius=0.5, depth=1, location=spec["location"]
-                    )
-                elif kind == "sphere":
-                    bpy.ops.mesh.primitive_uv_sphere_add(
-                        segments=32, ring_count=16, radius=0.5, location=spec["location"]
-                    )
-                elif kind == "cone":
-                    bpy.ops.mesh.primitive_cone_add(
-                        vertices=32, radius1=0.5, radius2=0.12, depth=1, location=spec["location"]
-                    )
-                else:
-                    bpy.ops.mesh.primitive_torus_add(
-                        major_segments=48, minor_segments=12, location=spec["location"]
-                    )
-                obj = bpy.context.object
-                obj.dimensions = tuple(spec["dimensions"])
-                bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
-                obj.rotation_euler = tuple(spec.get("rotation", (0, 0, 0)))
-                bevel = float(spec.get("bevel", 0))
-                if bevel and kind == "box":
-                    mod = obj.modifiers.new(name="Soft edges", type="BEVEL")
-                    mod.width = min(bevel, min(spec["dimensions"]) * 0.48)
-                    mod.segments = 3
-                    obj.modifiers.new(name="Weighted normals", type="WEIGHTED_NORMAL")
-                if kind == "sphere":
-                    for poly in obj.data.polygons:
-                        poly.use_smooth = True
-            obj.name = spec["name"]
-            if plan["mode"] == "master" and not imported_objects:
-                obj.data.materials.append(materials[spec["material"]])
-            if spec["name"] == "RoomShell" and not imported_objects:
-                bpy.ops.object.mode_set(mode="EDIT")
-                bpy.ops.mesh.select_all(action="SELECT")
-                bpy.ops.mesh.flip_normals()
-                bpy.ops.object.mode_set(mode="OBJECT")
-            for key in spec["keyframes"]:
-                obj.location = tuple(key["location"])
-                obj.keyframe_insert(data_path="location", frame=key["frame"])
-            visibility_targets = imported_objects or [obj]
-            for key in spec.get("visibility_keyframes", []):
-                for target in visibility_targets:
-                    target.hide_render = not bool(key["visible"])
-                    target.keyframe_insert(data_path="hide_render", frame=key["frame"])
-            _linearize_action(obj)
-            for target in visibility_targets:
-                _constantize_action_path(target, "hide_render")
-        for spec in scene_data["lights"]:
-            light_kind = spec.get("kind", "area").upper()
-            light = bpy.data.lights.new(spec["name"], type=light_kind)
-            energy_scale = float(camera_settings["practical_light_intensity"])
-            if camera_settings["monochrome_night"]:
-                energy_scale *= 0.35
-            expected_energy = spec["energy"] * energy_scale
-            light.energy = expected_energy
-            expected_color = (
-                (1.0, 1.0, 1.0)
-                if plan["mode"] == "preview"
-                else tuple(
-                    _temperature_color(spec["color"], camera_settings["practical_light_color_k"])
-                )
-            )
-            if camera_settings["monochrome_night"]:
-                value = sum(expected_color) / 3
-                expected_color = (value, value, value)
-                light.energy = expected_energy
-            light.color = expected_color
-            if any(
-                not math.isclose(float(actual), expected, rel_tol=1e-6, abs_tol=1e-6)
-                for actual, expected in zip(light.color, expected_color)
-            ):
-                raise RuntimeError(f"light {spec['name']!r} color failed readback")
-            if light_kind == "AREA":
-                light.shape = "RECTANGLE"
-                light.size = spec["size"]
-                light.size_y = spec["size"] * 0.23
-            else:
-                light.shadow_soft_size = spec["size"]
-            actual_size = light.size if light_kind == "AREA" else light.shadow_soft_size
-            if not math.isclose(
-                light.energy, expected_energy, rel_tol=1e-6, abs_tol=1e-6
-            ) or not math.isclose(actual_size, float(spec["size"]), rel_tol=1e-6, abs_tol=1e-6):
-                raise RuntimeError(f"light {spec['name']!r} energy or size was clamped")
-            for key in spec.get("energy_keyframes", []):
-                light.energy = float(key["energy"]) * energy_scale
-                light.keyframe_insert(data_path="energy", frame=key["frame"])
-            _linearize_action(light)
-            obj = bpy.data.objects.new(spec["name"], light)
-            obj.location = spec["location"]
-            if spec.get("target") is not None:
-                target = Vector(spec["target"])
-                if target == Vector(spec["location"]):
-                    raise ValueError("light target coincides with location")
-                obj.rotation_euler = (
-                    (target - Vector(spec["location"]))
-                    .normalized()
-                    .to_track_quat("-Z", "Y")
-                    .to_euler()
-                )
-            scene.collection.objects.link(obj)
-        camera_data = bpy.data.cameras.new("CCTV Camera")
-        camera = bpy.data.objects.new("CCTV Camera", camera_data)
-        position = camera_settings["camera_position"] or tuple(scene_data["camera_location"])
-        camera.location = position
-        target = Vector(scene_data["camera_target"])
-        if Vector(position) == target:
-            raise ValueError("camera position override coincides with target")
-        camera.rotation_euler = (
-            (target - Vector(position)).normalized().to_track_quat("-Z", "Y").to_euler()
-        )
-        camera_data.sensor_width = 36.0
-        camera_data.sensor_fit = "HORIZONTAL"
-        camera_data.lens = camera_settings["field_of_view_mm"]
-        if not math.isclose(
-            camera_data.lens, float(camera_settings["field_of_view_mm"]), rel_tol=1e-6, abs_tol=1e-6
-        ):
-            raise RuntimeError("camera lens was clamped by Blender")
-        scene.collection.objects.link(camera)
-        scene.camera = camera
-        for key in scene_data.get("camera_keyframes", []):
-            camera.location = tuple(key["location"])
-            key_target = Vector(key["target"])
-            if Vector(key["location"]) == key_target:
-                raise ValueError("camera keyframe location coincides with target")
-            camera.rotation_euler = (
-                (key_target - Vector(key["location"]))
-                .normalized()
-                .to_track_quat("-Z", "Y")
-                .to_euler()
-            )
-            camera.keyframe_insert(data_path="location", frame=key["frame"])
-            camera.keyframe_insert(data_path="rotation_euler", frame=key["frame"])
-        _linearize_action(camera)
-        if camera_settings["depth_of_field"] is not None:
-            camera_data.dof.use_dof = True
-            camera_data.dof.focus_distance = camera_settings["depth_of_field"]
-            camera_data.dof.aperture_fstop = 5.6
-            if not camera_data.dof.use_dof or not math.isclose(
-                camera_data.dof.focus_distance,
-                float(camera_settings["depth_of_field"]),
-                rel_tol=1e-6,
-                abs_tol=1e-6,
-            ):
-                raise RuntimeError("camera depth-of-field focus distance was clamped")
+        _populate_shot(bpy, Matrix, Euler, Vector, scene, plan, metadata)
         monochrome_master = plan["mode"] == "master" and camera_settings["monochrome_night"]
-        if (
-            camera_settings["barrel_distortion"]
-            or camera_settings["exposure_ev"]
-            or monochrome_master
-        ):
-            _configure_compositor(
-                bpy,
-                scene,
-                camera_settings["barrel_distortion"],
-                camera_settings["exposure_ev"],
-                monochrome=monochrome_master,
-            )
-        scene.view_settings.view_transform = "Standard"
-        # Blender's view exposure is display-referred; apply through compositor so
-        # scene-linear EXR masters carry the rebuild-triggering exposure change.
-        scene.view_settings.exposure = 0.0
-        if plan["mode"] == "preview":
-            world = bpy.data.worlds.new("Preview Neutral World")
-            world.use_nodes = True
-            background = world.node_tree.nodes.get("Background")
-            if background:
-                background.inputs["Color"].default_value = (0.55, 0.55, 0.55, 1.0)
-                background.inputs["Strength"].default_value = 0.5
-            scene.world = world
-        elif camera_settings["monochrome_night"]:
-            for mat in materials.values():
-                shader = mat.node_tree.nodes.get("Principled BSDF")
-                if shader:
-                    color = shader.inputs["Base Color"].default_value
-                    luminance = 0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]
-                    shader.inputs["Base Color"].default_value = (
-                        luminance,
-                        luminance,
-                        luminance,
-                        color[3],
-                    )
-            world = bpy.data.worlds.new("Monochrome Night World")
-            world.use_nodes = True
-            background = world.node_tree.nodes.get("Background")
-            if background:
-                background.inputs["Color"].default_value = (0.12, 0.12, 0.12, 1)
-                background.inputs["Strength"].default_value = 0.2
-            scene.world = world
-        else:
-            # Spike 02 measured this world illumination for the synthetic
-            # interior; retain it as the neutral baseline for generated scenes.
-            world = bpy.data.worlds.new("CCTV Neutral World")
-            world.use_nodes = True
-            background = world.node_tree.nodes.get("Background")
-            if background:
-                background.inputs["Color"].default_value = (0.08, 0.082, 0.09, 1.0)
-                background.inputs["Strength"].default_value = 1.6
-            scene.world = world
-        if plan["mode"] == "master" and scene_data.get("world_strength") is not None and not scene_data.get("environment"):
-            background = scene.world.node_tree.nodes.get("Background") if scene.world and scene.world.use_nodes else None
-            if background is None:
-                raise RuntimeError("scene world has no Background node for configured world_strength")
-            background.inputs["Strength"].default_value = float(scene_data["world_strength"])
-        if plan["mode"] == "master" and scene_data.get("environment") is not None:
-            _configure_environment(bpy, scene, scene_data["environment"])
-            env = scene_data["environment"]
-            binding = env["binding"]
-            metadata["applied_environment"] = {"asset_id": env["asset_id"], "asset_checksum": binding["asset_checksum"], "strength": env["strength"], "rotation_rad": env["rotation_rad"]}
-        if plan["mode"] == "master":
-            textured = {
-                spec["name"]
-                for spec in scene_data["materials"]
-                if spec.get("surface", "plain") != "plain"
-            }
-            for name, mat in materials.items():
-                if name not in textured:
-                    _add_surface_roughness(mat)
         scene.render.engine = selected
         scene.render.resolution_x, scene.render.resolution_y = plan["width"], plan["height"]
         scene.render.resolution_percentage = 100

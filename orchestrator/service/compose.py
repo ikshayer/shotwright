@@ -19,6 +19,7 @@ from orchestrator.adapters.blender.scene import (
     ObjectSpec,
     RenderRequest,
     SceneSpec,
+    SharedLocation,
     american_living_room,
     validate_camera_placement,
 )
@@ -63,6 +64,11 @@ def compose_render_request(
         raise ValueError(
             f"Shot {shot.shot_id!r} references missing scene look {shot.scene_look!r}"
         )
+    location = None
+    location_scene = None
+    if shot.location_id is not None and (mode == "master" or not require_built_scene):
+        location = _load_location_for_shot(store, shot)
+        location_scene = compose_scene_for_location(location)
     if require_built_scene:
         loaded_scene = _load_scene_spec(store, shot)
         # Retain compatibility with callers and test doubles written before the
@@ -70,7 +76,7 @@ def compose_render_request(
         scene, anomaly_precomposed = loaded_scene[:2]
         saved_asset_bindings = loaded_scene[2] if len(loaded_scene) > 2 else {}
     else:
-        scene = _scene_for_shot(store, shot)
+        scene = location_scene if location_scene is not None else _legacy_scene_for_shot(shot)
         anomaly_precomposed = False
         saved_asset_bindings = {}
     asset_bindings = _asset_bindings_for_scene(
@@ -89,6 +95,24 @@ def compose_render_request(
                 f"built scene for Shot {shot.shot_id!r} has asset checksums or paths "
                 "that no longer match the project registry; rebuild the scene",
             )
+    shared_location = None
+    if mode == "master" and location is not None and location_scene is not None:
+        if require_built_scene and not _matches_location_scene(scene, location_scene):
+            raise JobError(
+                JobErrorKind.INVALID_MANIFEST,
+                f"built scene for Shot {shot.shot_id!r} no longer matches "
+                f"Location {location.location_id!r} version {location.version}; rebuild the scene",
+                shot_id=shot.shot_id,
+            )
+        shared_location = SharedLocation(
+            episode_id=shot.episode_id,
+            location_id=location.location_id,
+            location_version=location.version,
+            camera_id=shot.camera_id or camera_profile.camera_id,
+            object_names=tuple(item.name for item in location_scene.objects),
+            light_names=tuple(item.name for item in location_scene.lights),
+            material_names=tuple(item.name for item in location_scene.materials),
+        )
     request = RenderRequest(
         shot_id=shot.shot_id,
         shot_version=shot.version,
@@ -99,6 +123,7 @@ def compose_render_request(
         duration_sec=shot.duration_sec,
         camera_profile=camera_profile,
         scene=scene,
+        shared_location=shared_location,
         asset_bindings=asset_bindings,
         event_sec=shot.event_sec,
         anomaly=shot.anomaly,
@@ -108,6 +133,24 @@ def compose_render_request(
     )
     validate_camera_placement(request)
     return request
+
+
+def _matches_location_scene(scene: SceneSpec, location_scene: SceneSpec) -> bool:
+    """A persisted shot may add figure geometry and animation to the current room."""
+    scene_fields = {"objects", "lights", "materials", "camera_keyframes"}
+    if scene.model_dump(exclude=scene_fields) != location_scene.model_dump(exclude=scene_fields):
+        return False
+    for collection, animated_fields in (
+        ("objects", {"keyframes", "visibility_keyframes"}),
+        ("lights", {"energy_keyframes"}),
+        ("materials", set()),
+    ):
+        actual = {item.name: item.model_dump(exclude=animated_fields)
+                  for item in getattr(scene, collection)}
+        for expected in getattr(location_scene, collection):
+            if actual.get(expected.name) != expected.model_dump(exclude=animated_fields):
+                return False
+    return True
 
 
 def compose_scene_for_location(location: Location) -> SceneSpec:
@@ -158,29 +201,23 @@ def compose_scene_for_location(location: Location) -> SceneSpec:
     })
 
 
-def _scene_for_shot(store: ProjectStore, shot: Shot) -> SceneSpec:
-    """Build a Location's shell and placements, preserving legacy unbound shots."""
-    if shot.location_id is None:
-        if shot.scene_look is None:
-            return american_living_room()
-        if shot.scene_look not in {"bright", "low_key"}:
-            raise ValueError(
-                f"Shot {shot.shot_id!r} references missing scene look {shot.scene_look!r}"
-            )
-        return american_living_room(
-            look=cast(Literal["bright", "low_key"], shot.scene_look)
-        )
+def _legacy_scene_for_shot(shot: Shot) -> SceneSpec:
+    """Preserve the procedural shell for shots that predate Location binding."""
+    if shot.scene_look is None:
+        return american_living_room()
+    return american_living_room(look=cast(Literal["bright", "low_key"], shot.scene_look))
 
+
+def _load_location_for_shot(store: ProjectStore, shot: Shot) -> Location:
+    assert shot.location_id is not None
     try:
-        location = store.load(Location, shot.location_id)
+        return store.load(Location, shot.location_id)
     except RecordNotFound as exc:
         raise JobError(
             JobErrorKind.INVALID_MANIFEST,
             f"Shot {shot.shot_id!r} references missing Location {shot.location_id!r}",
             cause=exc,
         ) from exc
-
-    return compose_scene_for_location(location)
 
 
 def camera_profile_for_render(store: ProjectStore, shot: Shot) -> CameraProfile:

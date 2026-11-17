@@ -12,6 +12,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from orchestrator.platform.settings import Settings
 from orchestrator.store.json_store import ProjectStore, RecordNotFound
 
 from .scene import RenderRequest, build_scene_plan
+from .shared_base import SharedBase, static_scene
 
 
 @dataclass(frozen=True)
@@ -44,9 +46,13 @@ class SceneAssemblyResult:
     scene_path: str
 
 
-def build_command(blender_exe: Path, script_path: Path, plan_path: Path) -> list[str]:
-    return [str(blender_exe), "--background", "--factory-startup", "--disable-autoexec",
-            "--python-exit-code", "1", "--python", str(script_path), "--", str(plan_path)]
+def build_command(blender_exe: Path, script_path: Path, plan_path: Path, *,
+                  vulkan_device: str | None = None) -> list[str]:
+    argv = [str(blender_exe), "--background", "--factory-startup", "--disable-autoexec"]
+    if vulkan_device is not None:
+        argv.extend(("--gpu-backend", "vulkan", "--gpu-device", vulkan_device,
+                     "--gpu-device-no-fallback"))
+    return [*argv, "--python-exit-code", "1", "--python", str(script_path), "--", str(plan_path)]
 
 
 def build_master_command(
@@ -333,11 +339,19 @@ class BlenderAdapter:
                 job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id,
             )
         base_rel = f"renders/{request.shot_id}/v{request.shot_version:04d}/{request.run_id}"
-        base = self.root.resolve(base_rel)
+        owner_rel = f"{base_rel}/job.json"
+        owner = {"job_id": job.job_id, "run_id": request.run_id}
         try:
             base = self.root.write_with(base_rel, lambda path: path.mkdir(exist_ok=False))
         except FileExistsError as exc:
-            raise FileExistsError(f"render run already exists: {base_rel}") from exc
+            if not queue_managed or job.attempts < 2 or not self.root.resolve(owner_rel).is_file():
+                raise FileExistsError(f"render run already exists: {base_rel}") from exc
+            if json.loads(self.root.read_text(owner_rel)) != owner:
+                raise FileExistsError(f"render run is reserved for another job: {base_rel}") from exc
+            base = self.root.resolve(base_rel)
+        else:
+            if queue_managed:
+                self.root.write_text(owner_rel, json.dumps(owner, sort_keys=True))
         result_box: list[RenderResult] = []
         error_box: list[BaseException] = []
         done = threading.Event()
@@ -354,8 +368,13 @@ class BlenderAdapter:
                 if self._control.stopped():
                     raise _CancelledBeforeLaunch("render stopped before attempt setup")
                 attempt_index = max(1, job.attempts)
-                attempt_rel = f"{base_rel}/attempt-{attempt_index:04d}"
-                self.root.make_dir(attempt_rel)
+                pending_attempt = f"{base_rel}/attempt-{attempt_index:04d}"
+                try:
+                    self.root.write_with(pending_attempt, lambda path: path.mkdir(exist_ok=False))
+                except FileExistsError as exc:
+                    error_box.append(exc)
+                    return
+                attempt_rel = pending_attempt
                 source = Path(__file__).with_name("worker.py").read_bytes()
                 script_rel = f"{attempt_rel}/worker.py"
                 self.root.write_bytes(script_rel, source)
@@ -383,8 +402,11 @@ class BlenderAdapter:
                 except OSError as exc:
                     raise JobError(JobErrorKind.WORKER_UNREACHABLE, f"Blender executable unavailable: {exc}",
                                    job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id) from exc
-                cache_identity = hashlib.sha256(
-                    f"{executable_identity}|{worker_identity}|{request.gpu_device}".encode()).hexdigest()
+                vulkan_device = self.settings.binaries.blender_vulkan_device
+                cache_identity_material = f"{executable_identity}|{worker_identity}|{request.gpu_device}"
+                if vulkan_device is not None:
+                    cache_identity_material += f"|vulkan:{vulkan_device}"
+                cache_identity = hashlib.sha256(cache_identity_material.encode()).hexdigest()
                 cache_rel = f"runtime/blender/{cache_identity}"
                 temp_rel = f"{attempt_rel}/temp"
                 config_rel = f"{attempt_rel}/config"
@@ -394,8 +416,19 @@ class BlenderAdapter:
                 # Output authorization goes through write_with; the callbacks only reserve destinations.
                 for rel in (*frame_rels, blend_rel, metadata_rel, log_rel):
                     self.root.write_with(rel, lambda path: None)
-                plan = dict(plan_base)
+                plan = deepcopy(plan_base)
                 self._verify_plan_assets(plan, job=job, bind_paths=True)
+                shared_base = None
+                # JobRunner owns retention for public renders. The standalone adapter
+                # path may quarantine the whole run directory on a queue failure.
+                if queue_managed and request.mode == "master" and request.shared_location is not None:
+                    shared_base = SharedBase.prepare(
+                        self.root, request, plan_base, worker_sha256=worker_identity,
+                        blender_sha256=executable_identity, attempt=attempt_rel,
+                    )
+                    plan["shared_base"] = shared_base.worker_payload(
+                        self.root, static_scene(plan, request.shared_location),
+                    )
                 plan["outputs"] = {
                     "blend": _forward(self.root.resolve(blend_rel)),
                     "frames": [_forward(self.root.resolve(rel)) for rel in frame_rels],
@@ -409,7 +442,10 @@ class BlenderAdapter:
                 plan_digest = hashlib.sha256(plan_bytes).hexdigest()
                 self.root.write_bytes(plan_path_rel, plan_bytes)
                 exe = self.settings.binaries.blender_exe
-                argv = build_command(exe, self.root.resolve(script_rel), self.root.resolve(plan_path_rel))
+                argv = build_command(
+                    exe, self.root.resolve(script_rel), self.root.resolve(plan_path_rel),
+                    vulkan_device=vulkan_device,
+                )
                 env = os.environ.copy()
                 temp_abs = _forward(self.root.resolve(temp_rel))
                 config_abs = _forward(self.root.resolve(config_rel))
@@ -474,6 +510,9 @@ class BlenderAdapter:
                 engine_id, engine_build = _verify_outputs(
                     self.root, metadata, request, frame_rels, blend_rel, metadata_rel, child_pid
                 )
+                shared_receipt = None
+                if shared_base is not None:
+                    shared_receipt = shared_base.verify(self.root, metadata.get("shared_base"))
                 if self._control.stopped():
                     raise _stopped_error(self._control, job)
                 render_elapsed = time.monotonic() - start_time
@@ -555,6 +594,22 @@ class BlenderAdapter:
                         "log_path": assembly_log_path,
                     }
                     assembly_outputs.extend((master_path, assembly_log_path))
+                if self._control.stopped():
+                    raise _stopped_error(self._control, job)
+                input_paths = [script_rel, plan_path_rel]
+                if shared_base is not None and shared_receipt is not None:
+                    if cancel is not None and cancel():
+                        self._control.stop_for(JobErrorKind.CANCELLED)
+                        raise _stopped_error(self._control, job)
+                    evidence = shared_base.publish(self.root, shared_receipt)
+                    metadata["shared_base"] = evidence
+                    run_settings.update({f"shared_base_{key}": value for key, value in evidence.items()})
+                    if shared_base.cached is None:
+                        assembly_outputs.append(shared_receipt.blend_path)
+                        if "cache_blend_path" not in evidence:
+                            assembly_outputs.append(shared_base.receipt_path)
+                    else:
+                        input_paths.extend((shared_receipt.blend_path, shared_base.receipt_path))
                 elapsed = time.monotonic() - start_time
                 metadata["elapsed_seconds"] = elapsed
                 metadata["status"] = "completed"
@@ -567,7 +622,7 @@ class BlenderAdapter:
                     run_id=request.run_id, tool="blender", tool_version=f"{version}+{build_hash}",
                     invocation=json.dumps(generation_invocation), seed=plan["seed"],
                     settings=run_settings,
-                    input_paths=[script_rel, plan_path_rel],
+                    input_paths=input_paths,
                     output_paths=[blend_rel, *frame_rels, metadata_rel, *assembly_outputs],
                     log_path=log_rel,
                     status="completed", resource_metrics=run_metrics)
@@ -1069,6 +1124,13 @@ def _classify_process_failure(log: str, code: int, job: Job) -> JobError:
         kind = JobErrorKind.OUT_OF_MEMORY
     elif "no space left" in lower or "disk full" in lower or "enospc" in lower:
         kind = JobErrorKind.DISK_EXHAUSTED
+    elif any(detail in lower for detail in (
+        "shared blend input does not match its sha-256",
+        "shared blend identity does not match the current plan",
+        "could not open the worker-generated shared blend",
+        "shared blend depends on",
+    )):
+        kind = JobErrorKind.CORRUPT_ARTIFACT
     elif "unsupported render engine" in lower or "device" in lower and "unavailable" in lower \
             or "renderer mismatch" in lower or "invalid scene" in lower or "camera position override" in lower \
             or "unsupported radial distortion" in lower or "clamped" in lower \

@@ -39,6 +39,14 @@ class _Section(BaseModel):
 
 class BinariesSettings(_Section):
     blender_exe: Path = Field(Path(r"D:\Blender\blender.exe"), description="Blender executable.")
+    blender_vulkan_device: str | None = Field(
+        None,
+        pattern=r"^[0-9A-Fa-f]{1,8}/[0-9A-Fa-f]{1,8}/[0-9]+$",
+        description=(
+            "Optional Blender Vulkan adapter selector as listed by Blender "
+            "(hexadecimal vendor/device IDs and decimal index). Disables device fallback."
+        ),
+    )
     ffmpeg_exe: Path = Field(Path("ffmpeg"), description="FFmpeg executable; a bare name is looked up on PATH.")
     comfyui_root: Path = Field(
         Path(r"D:\ComfyUI_3\ComfyUI_windows_portable"), description="ComfyUI portable install directory."
