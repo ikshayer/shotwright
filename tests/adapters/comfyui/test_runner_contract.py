@@ -127,7 +127,11 @@ class FakeTransport:
             if self.mode == "wrong_endpoint":
                 argv = list(argv)
                 argv[argv.index("--base-directory") + 1] = str(self.root.path / "another-runtime")
-            return {"system": {"comfyui_version": "0.21.1", "argv": argv}}
+            version = "0.44.0"
+            if self.mode == "old_version" or (
+                    self.mode == "version_regresses_after_prompt" and self.prompt_count):
+                version = "0.21.1"
+            return {"system": {"comfyui_version": version, "argv": argv}}
         if method == "GET" and path == "/object_info":
             return object_info()  # type: ignore[return-value]
         if method == "POST" and path == "/free":
@@ -265,7 +269,7 @@ def test_success_retains_reopenable_png_graph_provenance_and_generation_run(tmp_
     assert all(not Path(value).is_absolute() for value in
                (*result.image_paths, result.workflow_path, result.metadata_path, result.log_path))
     assert result.generation_run.tool == "comfyui"
-    assert result.generation_run.tool_version == "0.21.1"
+    assert result.generation_run.tool_version == "0.44.0"
     assert result.generation_run.seed is not None
     assert result.generation_run.status == "completed"
     assert json.loads(result.generation_run.invocation) == json.loads(
@@ -713,3 +717,22 @@ def test_readiness_rejects_wrong_runtime_endpoint_without_mutating_it(tmp_path: 
                    for method, path, _payload, _timeout in transport.calls)
     assert popen.calls and all(call[2].poll() is not None for call in popen.calls)
     assert not any(root.resolve("generated").rglob("generation-run.json"))
+
+
+@pytest.mark.parametrize("mode", ["old_version", "version_regresses_after_prompt"])
+def test_server_reporting_the_superseded_0_21_1_is_refused(tmp_path: Path, mode: str) -> None:
+    """A4.1: 0.44.0 is required at boot readiness and again after completion."""
+    root, _settings, adapter, queue, job, req, popen, transport = setup(tmp_path, mode=mode, retries=1)
+    with pytest.raises(JobError):
+        adapter.generate(req, job, queue=queue)
+    assert not any(root.resolve("generated").rglob("generation-run.json"))
+    if mode == "old_version":
+        assert not any(method == "POST" and path in {"/prompt", "/free", "/interrupt", "/queue"}
+                       for method, path, _payload, _timeout in transport.calls)
+        assert popen.calls and all(call[2].poll() is not None for call in popen.calls)
+        assert not queue.lease._owned
+    else:
+        # Post-completion refusal: the contract does not say whether the lease is released
+        # (the implementation holds it while the endpoint is untrusted); only the child's
+        # confirmed stop is asserted here.
+        assert popen.calls and all(call[2].poll() is not None for call in popen.calls)

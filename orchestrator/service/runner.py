@@ -282,11 +282,7 @@ class JobRunner:
                 required_ram_gb=request.required_ram_gb,
                 required_disk_gb=request.required_disk_gb,
                 shot_id=request.record_id, episode_id=episode_id,
-                run_id=(request.payload.run_id
-                        if isinstance(request.payload, (RenderRequest, DegradeRequest))
-                        else request.payload["request"].run_id
-                        if request.kind in _SIDECAR_KINDS and isinstance(request.payload, dict)
-                        else uuid.uuid4().hex),
+                run_id=_job_run_id(request),
             )
             # Admission refusal is part of submit's synchronous contract. The id is
             # not persisted or returned until preflight succeeds.
@@ -639,6 +635,25 @@ def _kind_queue(factory: Callable[[str], JobQueue], project_id: str,
                 kind: AdapterKind) -> JobQueue:
     specialized = getattr(factory, "for_kind", None)
     return specialized(project_id, kind) if callable(specialized) else factory(project_id)
+
+
+def _job_run_id(request: AdapterRequest) -> str:
+    """The run the job records: the request's own run_id wherever the adapter checks it.
+
+    ComfyAdapter.generate refuses a job whose run_id differs from its ImageRequest's, so a
+    still-image job must carry the request's run_id -- whether the API composed an
+    ImageRequest from a pinned profile or passed an explicit request dict through.
+    """
+    payload = request.payload
+    if isinstance(payload, (RenderRequest, DegradeRequest, ImageRequest)):
+        return payload.run_id
+    if request.kind in _SIDECAR_KINDS and isinstance(payload, dict):
+        return payload["request"].run_id
+    if request.kind is AdapterKind.GENERATE:
+        run_id = _payload_value(_payload_body(payload), "run_id")
+        if isinstance(run_id, str) and run_id.strip():
+            return run_id
+    return uuid.uuid4().hex
 
 
 def _payload_body(payload: Any) -> Any:
