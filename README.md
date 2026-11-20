@@ -94,7 +94,8 @@ the virtualenv, so give the command's full path:
 }
 ```
 
-Never commit the token. Tools are prefixed `pipeline_`. Uploads are CLI-only.
+Never commit the token. Tools are prefixed `pipeline_`. Uploads are CLI-only. The adapter also
+serves reference documents as MCP resources, including `cctv-pipeline://references/scene-realism`.
 
 Run the tests with `pytest`.
 

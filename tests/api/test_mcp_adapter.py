@@ -473,7 +473,11 @@ def test_initialize_negotiates_protocol_and_identifies_server(
     assert response is not None
     result = response["result"]
     assert result["protocolVersion"] == expected
-    assert result["capabilities"] == {"tools": {"listChanged": False}}
+    # Part D added read-only resources beside the tools.
+    assert result["capabilities"] == {
+        "tools": {"listChanged": False},
+        "resources": {"subscribe": False, "listChanged": False},
+    }
     assert result["serverInfo"]["name"] == "cctv-pipeline"
     assert isinstance(result["serverInfo"]["version"], str)
     assert result["serverInfo"]["version"]

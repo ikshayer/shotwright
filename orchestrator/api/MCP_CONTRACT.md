@@ -321,6 +321,64 @@ would replace the attribute.)
   is a real failure and propagates.
 - Returns `0` when `serve` returns.
 
+## Part D — reference documents as MCP resources
+
+Agents driving the pipeline need the project's hard-won production guidance (first: what
+makes a generated scene read as real rather than CGI) in the same session as the tools.
+The adapter publishes such documents as read-only MCP **resources**. They are static files
+shipped inside the package; reading one never contacts the orchestrator server, so it works
+while the server is down.
+
+### D1. Where the documents live
+
+- Markdown files in `orchestrator/api/mcp_resources/`, shipped as package data
+  (`pyproject.toml`: `[tool.setuptools.package-data]`, `"orchestrator.api" =
+  ["mcp_resources/*.md"]`). Not under the repository's top-level `references/`, which holds
+  third-party reference frames and is never packaged.
+- Read with `importlib.resources.files("orchestrator.api") / "mcp_resources" / <file>`,
+  decoded as UTF-8, **on every read** (no cache), so an edited document is served without a
+  restart. Standard library only, as for the rest of the adapter.
+
+### D2. The registry — binding interface
+
+```python
+RESOURCE_URI_PREFIX = "cctv-pipeline://references/"
+
+@dataclass(frozen=True)
+class ReferenceResource:
+    slug: str          # URI suffix, e.g. "scene-realism"
+    file: str          # file name inside mcp_resources/, e.g. "scene_realism.md"
+    title: str         # human-readable
+    description: str   # one sentence: what it is and when an agent should read it
+
+REFERENCE_RESOURCES: tuple[ReferenceResource, ...]   # the single source; order = list order
+```
+
+`REFERENCE_RESOURCES` holds exactly one entry for now:
+`ReferenceResource("scene-realism", "scene_realism.md", "Scene realism",
+"<one sentence: read before building, dressing or lighting a 3D scene>")`. A resource's URI
+is `RESOURCE_URI_PREFIX + slug`.
+
+### D3. Protocol additions to `McpServer.handle`
+
+| Message | Response |
+|---|---|
+| `initialize` | as B5, plus `capabilities.resources = {"subscribe": false, "listChanged": false}` and a top-level `instructions` string that names every resource URI and says to read `scene-realism` before building, dressing or lighting a 3D scene |
+| `resources/list` | `{"resources": [{"uri", "name": slug, "title", "description", "mimeType": "text/markdown"}, ...]}` in registry order. Static: needs no manifest and makes **no** transport request. No pagination. |
+| `resources/templates/list` | `{"resourceTemplates": []}` |
+| `resources/read` | params must be an object with a string `uri`, else `-32602`. A URI not in the registry is error `-32002` (the MCP "resource not found" code) whose message quotes the URI. Otherwise `{"contents": [{"uri", "mimeType": "text/markdown", "text": <file text>}]}`. |
+| `resources/subscribe`, `resources/unsubscribe` | `-32601` (subscribe is advertised as unsupported) |
+
+- A registered document that is missing or unreadable from the package is `-32603` naming
+  the file — a packaging defect, never an empty `text`.
+- `resources/read` makes **no** transport request.
+- Everything in B5 about tools is unchanged; `tools/list` still lists only tools.
+
+### D4. Documentation
+
+`README.md`'s MCP section gains one sentence saying the adapter also serves the reference
+documents as resources and naming the `scene-realism` URI.
+
 ## Test rules
 
 - No GPU, Blender, ComfyUI or network beyond loopback.
@@ -340,3 +398,11 @@ would replace the attribute.)
   async operation's 202 survives into the result text; an unknown tool is `-32602`; a
   notification gets no response; malformed JSON is `-32700`; `main` with no token returns
   `2` and writes nothing to stdout; no output anywhere contains the token.
+- Part D, at minimum: `initialize` advertises `resources` and its `instructions` names the
+  `scene-realism` URI; `resources/list` and `resources/read` succeed through a transport
+  that **fails the test if called at all**; the listed URIs equal the registry's;
+  `resources/read` returns the packaged file's exact text; an unknown URI is `-32002`; a
+  missing or non-string `uri` is `-32602`; `resources/templates/list` is empty;
+  `resources/subscribe` is `-32601`; a registry entry whose file does not exist yields
+  `-32603` (patch the registry, do not delete the real file); `tools/list` contains no
+  resource; and every `ReferenceResource.file` in the shipped registry exists.
