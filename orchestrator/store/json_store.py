@@ -44,6 +44,7 @@ from typing import Any, ClassVar, Literal, TypeVar
 from pydantic import ValidationError
 
 from orchestrator.domain.base import (
+    LEGACY_SCHEMA_VERSION,
     SCHEMA_VERSION,
     Entity,
     FramingStatus,
@@ -57,6 +58,7 @@ from orchestrator.domain.entities import (
     CameraProfile,
     Episode,
     EpisodeOutput,
+    Export,
     GenerationRun,
     H3Candidate,
     Location,
@@ -102,6 +104,7 @@ _PATH_FIELDS: dict[type[Entity], tuple[str, ...]] = {
     Shot: ("audio_refs", "framing_panel_ref"),
     Timeline: ("audio_tracks",),
     EpisodeOutput: ("relative_path", "credit_manifest_path"),
+    Export: ("output_path",),
     H3Candidate: ("source_path", "av_path", "wav_path", "report_path"),
     GenerationRun: ("input_paths", "output_paths", "log_path"),
 }
@@ -159,6 +162,7 @@ _LAYOUTS: dict[type[Entity], _Layout] = {
     Review: _Layout(False, "review_id", lambda i, _e: f"reviews/{i}.json"),
     GenerationRun: _Layout(False, "run_id", lambda i, _e: f"generations/{i}.json"),
     H3Candidate: _Layout(False, "candidate_id", lambda i, _e: f"generated/h3/candidates/{i}.json"),
+    Export: _Layout(False, "export_id", lambda i, _e: f"exports/{i}/export.json"),
 }
 
 
@@ -489,6 +493,8 @@ class ProjectStore:
             raise _invalid("H3Candidate receipts are immutable; only expected_version=0 creation is allowed")
         if isinstance(entity, AudioPostProfile) and expected_version != 0:
             raise _invalid("AudioPostProfile records are immutable; a changed chain needs a new name")
+        if isinstance(entity, Export) and expected_version != 0:
+            raise _invalid("Export receipts are immutable; only expected_version=0 creation is allowed")
         with self._lock:
             creating = False
             try:
@@ -1169,7 +1175,7 @@ class ProjectStore:
                 f"{relative} has schema_version {stored}, newer than this build "
                 f"({SCHEMA_VERSION}); refusing to load it",
             )
-        if stored < SCHEMA_VERSION:
+        if stored not in {LEGACY_SCHEMA_VERSION, SCHEMA_VERSION}:
             raise JobError(
                 JobErrorKind.SCHEMA_VERSION_MISMATCH,
                 f"{relative} has schema_version {stored} and no migration to "

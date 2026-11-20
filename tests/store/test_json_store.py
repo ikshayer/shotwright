@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator.domain.base import FramingStatus, ShotStatus
+from orchestrator.domain.base import SCHEMA_VERSION, FramingStatus, ShotStatus
 from orchestrator.domain.entities import (
     Beat,
     CameraProfile,
@@ -282,7 +282,7 @@ def test_schema_version_is_written_on_every_record(store, root):
     store.create(make_shot())
     store.save(Project(project_id="p1", title="t"), expected_version=0)
     for path in (shot_dir(root) / "v0001.json", root.path / "project.json"):
-        assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 1
+        assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == SCHEMA_VERSION
 
 
 def test_absolute_paths_are_refused(store):

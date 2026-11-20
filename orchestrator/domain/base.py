@@ -11,9 +11,17 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    FieldSerializationInfo,
+    field_serializer,
+    field_validator,
+)
 
-SCHEMA_VERSION = 1
+LEGACY_SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class ShotStatus(StrEnum):
@@ -121,6 +129,30 @@ class Entity(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     schema_version: int = SCHEMA_VERSION
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _migrate_schema_version(cls, value: Any) -> int:
+        if type(value) is not int:
+            raise ValueError("schema_version must be an integer")
+        if value == LEGACY_SCHEMA_VERSION:
+            # Version 2 adds the native Export layout. Existing entity payloads
+            # retain their fields and lifecycle metadata through the migration.
+            return 2
+        if value != SCHEMA_VERSION:
+            raise ValueError(f"schema_version {value} has no migration to {SCHEMA_VERSION}")
+        return value
+
+    @field_serializer("schema_version")
+    def _serialize_schema_version(self, value: int, info: FieldSerializationInfo) -> int:
+        current = self._migrate_schema_version(value)
+        if isinstance(info.context, dict) and info.context.get("entity_schema_version") == LEGACY_SCHEMA_VERSION:
+            return LEGACY_SCHEMA_VERSION
+        return current
+
+    def schema_v1_payload(self) -> dict[str, Any]:
+        """Render a JSON value for comparisons against exact legacy receipts and journals."""
+        return self.model_dump(mode="json", context={"entity_schema_version": LEGACY_SCHEMA_VERSION})
 
 
 class VersionedEntity(Entity):

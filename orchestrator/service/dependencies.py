@@ -9,7 +9,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from orchestrator.domain.base import ShotStatus, VersionedEntity
+from orchestrator.domain.base import LEGACY_SCHEMA_VERSION, ShotStatus, VersionedEntity
 from orchestrator.domain.entities import (
     ArtifactScheduleEntry,
     CameraProfile,
@@ -66,7 +66,7 @@ def validated_cascades(store: ProjectStore) -> tuple[dict[str, Any], ...]:
             stored_before, stored_token = store.load_with_version(
                 cls, record_id, episode_id=episode_id, version=before.version,
             )
-            if (stored_before.model_dump(mode="json") != plan["before"]
+            if (not _same(stored_before, plan["before"])
                     or stored_token != plan["expected_version"]):
                 raise ValueError("planned before payload or mutation token does not match retained history")
             # Exercise domain impact validation as well as successor validation;
@@ -140,8 +140,11 @@ def _plan(store: ProjectStore, before: VersionedEntity, after: VersionedEntity,
     }
 
 
-def _same(a: VersionedEntity, payload: dict[str, Any]) -> bool:
-    return a.model_dump(mode="json") == payload
+def _same(entity: VersionedEntity, payload: dict[str, Any]) -> bool:
+    # Compare the full stored value in the journal's schema without changing its bytes.
+    stored = (entity.schema_v1_payload() if payload.get("schema_version") == LEGACY_SCHEMA_VERSION
+              else entity.model_dump(mode="json"))
+    return stored == payload
 
 
 def _revoke_gates(store: ProjectStore, plan: dict[str, Any], revoked: list[str]) -> None:

@@ -220,6 +220,8 @@ def test_adapter_operation_returns_contract_status(
             assert registered.source_url == "https://assets.example.invalid/route.png", (
                 f"create_asset lost the supplied source_url; observed {registered.source_url!r}"
             )
+        elif operation == "export":
+            assert resp.status_code == 404, f"{op.key} answered {resp.status_code}: {resp.text}"
         elif operation in WIRED:
             assert resp.status_code == 202, f"{op.key} answered {resp.status_code}: {resp.text}"
             job_ids = [v for v in find_key(resp.json(), lambda k: "job" in k.lower() and "id" in k.lower())

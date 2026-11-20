@@ -25,7 +25,6 @@ from .test_parity import _cli
 ENTRY_NAMES = {"create_episode", "draft_script", "propose_shots"}
 DELIBERATE_501 = {
     "sample_references",
-    "export",
     "apply_typed_feedback",
 }
 
