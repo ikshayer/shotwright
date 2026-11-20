@@ -23,7 +23,8 @@ from orchestrator.adapters.audiopost.runner import (
 )
 from orchestrator.adapters.tts.core import sha256_file
 from orchestrator.domain.entities import Asset, AudioPostProfile, GenerationRun, Job, Project, Shot
-from orchestrator.platform.containment import ContainmentError, ProjectRoot
+from orchestrator.platform.containment import ContainmentError
+from orchestrator.service.take_files import discard_take, mark_report_discarded
 from orchestrator.store.json_store import ProjectStore, RecordNotFound, VersionConflict
 
 __all__ = [
@@ -208,25 +209,6 @@ def persist_audio_post_success(store: ProjectStore, job: Job, result: AudioPostR
     return asset
 
 
-def _discard_take(root: ProjectRoot, directory: str) -> bool:
-    """A failed or cancelled run never leaves a take.wav (contract 5). True if one existed."""
-    found = False
-    for name in ("take.wav", "take.partial.wav"):
-        path = root.resolve(f"{directory}/{name}")
-        if path.is_file():
-            path.unlink()
-            found = found or name == "take.wav"
-    return found
-
-
-def _mark_report_discarded(root: ProjectRoot, report_rel: str, status: str) -> None:
-    """A report from a run that finished before it was cancelled must not claim a take."""
-    if root.resolve(report_rel).is_file():
-        report = json.loads(root.read_text(report_rel, encoding="utf-8"))
-        report.update(status=status, take_discarded=True)
-        root.write_text(report_rel, json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
-
-
 def persist_audio_post_terminal(store: ProjectStore, job: Job, request: AudioPostRequest,
                                 *, status: str) -> GenerationRun:
     """Record a failed or cancelled run: a GenerationRun, no take, no Asset.
@@ -250,8 +232,8 @@ def persist_audio_post_terminal(store: ProjectStore, job: Job, request: AudioPos
             pass
         else:
             return existing  # Fully registered; nothing of this run is left to undo.
-        if _discard_take(root, directory):
-            _mark_report_discarded(root, report_rel, status)
+        if discard_take(root, directory):
+            mark_report_discarded(root, report_rel, status)
         kept = [path for path in existing.output_paths if root.resolve(path).is_file()]
         repaired = existing.model_copy(update={
             "status": status, "output_paths": kept,
@@ -260,8 +242,8 @@ def persist_audio_post_terminal(store: ProjectStore, job: Job, request: AudioPos
         })
         store.save(GenerationRun.model_validate(repaired.model_dump()), expected_version=token)
         return repaired
-    if _discard_take(root, directory):
-        _mark_report_discarded(root, report_rel, status)
+    if discard_take(root, directory):
+        mark_report_discarded(root, report_rel, status)
     log_rel = f"{directory}/logs/ffmpeg.log"
     outputs = [path for path in (report_rel, log_rel) if root.resolve(path).is_file()]
     version = "unknown"
