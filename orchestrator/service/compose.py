@@ -485,8 +485,12 @@ def compose_post_profile_spec(
         sample_aspect_ratio=identity.sample_aspect_ratio,
         artifact_schedule=tuple(identity.artifact_schedule),
         overlay=(OverlaySpec.model_validate(
+            # The entity's schema_version (top level and on the nested indicator) is
+            # storage metadata; the FFmpeg spec carries its own.
             identity.overlay.model_dump(
-                mode="python", exclude={"schema_version", "font_relative"}
+                mode="python",
+                exclude={"schema_version": True, "font_relative": True,
+                         "indicator": {"schema_version"}},
             )
         )
                  if identity.overlay is not None else None),

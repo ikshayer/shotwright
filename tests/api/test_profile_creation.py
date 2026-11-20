@@ -411,10 +411,22 @@ def test_fresh_project_materializes_default_profiles_on_disk_and_composes_withou
         sample_aspect_ratio=low_light_post.sample_aspect_ratio,
         artifact_schedule=tuple(low_light_post.artifact_schedule),
         overlay=OverlaySpec.model_validate(
-            low_light_post.overlay.model_dump(exclude={"schema_version", "font_relative"})
+            low_light_post.overlay.model_dump(
+                exclude={"schema_version": True, "font_relative": True,
+                         "indicator": {"schema_version"}}
+            )
         ),
         encode=EncodeSpec.model_validate(low_light_post.encode.model_dump(exclude={"schema_version"})),
     )
+    # Real composition of a profile with a battery/REC indicator. The nested indicator
+    # entity's schema_version must not leak into the FFmpeg spec (it broke when entity
+    # records moved to schema 2 while the indicator spec stayed at 1).
+    low_light_override = Shot(
+        shot_id="shot-low-light-override", episode_id="ep-default",
+        camera_profile=low_light_camera.camera_id, duration_sec=5.625,
+        post_profile=low_light_post.name,
+    )
+    assert compose_post_profile_spec(store, shot=low_light_override) == low_light_spec
     assert Fraction(*low_light_spec.storage_resolution) == Fraction(11, 9)
     assert Fraction(*low_light_spec.storage_resolution) * Fraction(12, 11) == Fraction(4, 3)
     low_light_checked = validate_profile(
