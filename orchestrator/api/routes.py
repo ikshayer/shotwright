@@ -86,6 +86,14 @@ class RubricRequest(BaseModel):
     scores: RubricScores
 
 
+class ProjectExportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    episode_id: str = Field(min_length=1)
+    cut_output_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_-]+$")
+    expected_version: int = Field(strict=True, gt=0)
+
+
 class ScriptDerivationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     expected_version: int = Field(ge=1)
@@ -233,7 +241,7 @@ OPERATIONS = (
     Operation("report_jobs", "GET", "/projects/{project_id}/jobs", "Report jobs", False, "jobs.queue", None, _call("report_jobs")),
     Operation("apply_typed_feedback", "POST", "/projects/{project_id}/feedback", "Apply typed feedback", True, "service.apply_typed_feedback", OpenRequest, _call("apply_typed_feedback")),
     Operation("score_rubric", "POST", "/projects/{project_id}/rubric/score", "Score rubric criteria", True, "domain.entities.RubricScores", RubricRequest, _call("score_rubric")),
-    Operation("export", "POST", "/projects/{project_id}/export", "Export a project", True, "export adapter", OpenRequest, _call("export")),
+    Operation("export", "POST", "/projects/{project_id}/export", "Export an approved episode cut and its portable project source package", True, "adapters.export.package", ProjectExportRequest, _call("export")),
 )
 
 #: Operations that submit work to the JobQueue and answer 202 with a job record rather

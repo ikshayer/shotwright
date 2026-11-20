@@ -801,9 +801,9 @@ class Timeline(Entity):
     @property
     def content_sha256(self) -> str:
         """Stable digest of the declarative cut, independent of store metadata."""
+        # EpisodeOutput receipts bind to the schema-1 digest representation.
         payload = json.dumps(
-            self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"),
-            ensure_ascii=False,
+            self.schema_v1_payload(), sort_keys=True, separators=(",", ":"), ensure_ascii=False,
         ).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
 
@@ -1192,8 +1192,8 @@ class Review(Entity):
 
 
 class Export(Entity):
-    export_id: str
-    output_path: str
+    export_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_-]+$")
+    output_path: str = Field(min_length=1)
     codec: str
     resolution: tuple[int, int]
     frame_rate: float = Field(gt=0)
@@ -1202,6 +1202,7 @@ class Export(Entity):
     filter_graph_hash: str
     manifest_checksum: str
     validation_results: dict[str, bool] = Field(default_factory=dict)
+    silent_audio_added: bool | None = None
 
 
 #: Every field of CameraProfile must carry a 4.4 tag. Checked at import so a

@@ -15,6 +15,7 @@ from urllib.parse import quote, urlsplit
 from fastapi import Body, FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, Response
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from orchestrator.adapters.assets.models import (
@@ -271,6 +272,15 @@ class OperationContext:
         if operation == "score_rubric":
             scores = RubricScores.model_validate(data.get("scores", data))
             return {"scores": scores.model_dump(mode="json"), "passed": scores.passed()}
+        if operation == "export":
+            from orchestrator.adapters.export.package import export_project
+
+            return export_project(
+                self._store(data["project_id"]), self.settings,
+                episode_id=data["episode_id"],
+                cut_output_id=data["cut_output_id"],
+                expected_version=data["expected_version"],
+            )
         if operation == "create_asset":
             uploads = data.get("uploads", ())
             if len(uploads) != 1:
@@ -869,6 +879,9 @@ def _register_operation(app: FastAPI, operation: Operation, context: OperationCo
         data.update({key: value for key, value in values.items() if value is not None})
         if files:
             data["uploads"] = [await _describe_upload(item) for item in files]
+        if operation.name == "export":
+            # The request waits for the package, while copies and FFmpeg run off the event loop.
+            return await run_in_threadpool(operation.invoke, context, data)
         result = operation.invoke(context, data)
         if operation.name == "asset_browser":
             return HTMLResponse(content=_asset_browser_html(result), media_type="text/html")
