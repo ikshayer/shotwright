@@ -1,8 +1,9 @@
-"""Build and render the furnished found-footage walkthrough with a contained run directory."""
+"""Build and render the narrow apartment found-footage walkthrough with a contained run directory."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import math
@@ -22,21 +23,25 @@ sys.path.insert(0, str(REPO))
 
 from orchestrator.adapters.blender.scene import (
     RenderRequest,
+    SceneSpec,
     american_living_room,
     build_scene_plan,
 )
 from orchestrator.domain.entities import CameraProfile
 from orchestrator.platform.containment import ProjectRoot
+from orchestrator.service.assets import _validate_format
 
 FPS = 15
 DURATION = 6
 WIDTH, HEIGHT = 384, 288
 SEED = 30518
-START_XY = (1.48, -1.72)
-STOP_XY = (0.94, 0.84)
+ROOM_SCALE = (0.72, 0.83, 0.91)
+ENTRY_WALL_INNER_Y = -2.076 + 0.12 / 2  # Rear return behind the operator in render.py
+START_XY = (1.03, -1.41)
+STOP_XY = (0.72, 0.70)
 PACE_START = 0.45
 PACE_END = 4.95
-HALL_AIM_XY = (0.66, 1.98)
+HALL_AIM_XY = (0.475, 1.58)
 
 
 def _ease(t: float) -> float:
@@ -55,7 +60,7 @@ def _camera_pose(frame: int) -> dict:
     sway = 0.012 * gait * math.sin(foot / 2)
     x = START_XY[0] + dx * travel + dy / length * sway
     y = START_XY[1] + dy * travel - dx / length * sway
-    z = 1.59 + 0.024 * gait * math.sin(foot) + 0.006 * math.sin(2.0 * t)
+    z = 1.55 + 0.024 * gait * math.sin(foot) + 0.006 * math.sin(2.0 * t)
     heading = math.atan2(dx, dy)
     opening_glance = math.radians(-10) * (1 - _ease(t / PACE_START))
     hall_heading = math.atan2(HALL_AIM_XY[0] - STOP_XY[0], HALL_AIM_XY[1] - STOP_XY[1])
@@ -64,26 +69,51 @@ def _camera_pose(frame: int) -> dict:
     yaw += math.radians(0.75 * gait * math.sin(foot / 2 + 0.35))
     pitch = math.radians(-7 + 5 * settle + 0.8 * gait * math.sin(foot + 0.8))
     target = [x + math.sin(yaw), y + math.cos(yaw), z + math.tan(pitch)]
-    if not 0.90 <= x <= 1.57 or not -1.78 <= y <= 0.93 or not 1.52 <= z <= 1.66:
-        raise ValueError(f"Camera frame {frame} leaves the open aisle")
     return {
         "frame": frame, "location": [x, y, z], "target": target,
         "roll": math.radians(1.1 * gait * math.sin(foot / 2 + 0.3) + 0.32 * math.sin(2.7 * t)),
     }
 
 
-def _path_metrics(poses: list[dict]) -> dict:
+def _path_metrics(poses: list[dict], scene: SceneSpec) -> dict:
+    room_objects = {obj.name: obj for obj in scene.objects}
+    scale_x, scale_y, scale_z = ROOM_SCALE
+    right = room_objects["Right wall"]
+    rear = room_objects["Rear wall right"]
+    ceiling = room_objects["Ceiling"]
+    room_right = (right.location[0] - right.dimensions[0] / 2) * scale_x
+    room_rear = (rear.location[1] - rear.dimensions[1] / 2) * scale_y
+    room_front = ENTRY_WALL_INNER_Y * scale_y
+    ceiling_height = (ceiling.location[2] - ceiling.dimensions[2] / 2) * scale_z
+    furniture = {
+        "coffee_table": room_objects["Coffee table top"],
+        "tv_console": room_objects["TV console top"],
+        "bookcase": room_objects["Bookcase top"],
+    }
+    clearance: dict[str, list[float]] = {name: [] for name in furniture}
+    wall_clearance = []
     start, finish = poses[0]["location"], poses[-1]["location"]
     dx, dy = finish[0] - start[0], finish[1] - start[1]
     travel = math.hypot(dx, dy)
     lateral = []
-    clearance = []
+    for pose in poses:
+        x, y, z = pose["location"]
+        lateral.append(abs(dy * (x - start[0]) - dx * (y - start[1])) / travel)
+        distance_to_wall = min(room_right - abs(x), y - room_front, room_rear - y)
+        if distance_to_wall <= 0 or not 0 < z < ceiling_height:
+            raise ValueError(f"Camera frame {pose['frame']} leaves the apartment envelope")
+        wall_clearance.append(distance_to_wall)
+        for name, obj in furniture.items():
+            outside_x = max(abs(x - obj.location[0] * scale_x) - obj.dimensions[0] / 2 * scale_x, 0)
+            outside_y = max(abs(y - obj.location[1] * scale_y) - obj.dimensions[1] / 2 * scale_y, 0)
+            clearance[name].append(math.hypot(outside_x, outside_y))
+            if clearance[name][-1] <= 0:
+                raise ValueError(f"Camera frame {pose['frame']} crosses the {name} footprint")
+
     angles = []
     walking_speed = 0.2
     for prior, pose, following in zip(poses, poses[1:], poses[2:], strict=False):
         x, y, _ = pose["location"]
-        lateral.append(abs(dy * (x - start[0]) - dx * (y - start[1])) / travel)
-        clearance.append(math.hypot(max(abs(x) - 0.74, 0), max(abs(y + 0.15) - 0.46, 0)))
         vx = following["location"][0] - prior["location"][0]
         vy = following["location"][1] - prior["location"][1]
         if math.hypot(vx, vy) * FPS / 2 < walking_speed:
@@ -94,7 +124,11 @@ def _path_metrics(poses: list[dict]) -> dict:
     return {
         "horizontal_travel_m": round(travel, 3),
         "max_lateral_offset_m": round(max(lateral), 3),
-        "min_coffee_table_clearance_m": round(min(clearance), 3),
+        "room_inner_width_m": round(2 * room_right, 3),
+        "room_inner_depth_m": round(room_rear - room_front, 3),
+        "room_ceiling_height_m": round(ceiling_height, 3),
+        "min_wall_clearance_m": round(min(wall_clearance), 3),
+        **{f"min_{name}_clearance_m": round(min(distances), 3) for name, distances in clearance.items()},
         "active_walk_min_speed_m_s": walking_speed,
         "active_walk_frames": len(angles),
         "active_walk_mean_gaze_delta_deg": round(sum(angles) / len(angles), 2),
@@ -130,12 +164,29 @@ def _room_tone() -> bytes:
     return content.getvalue()
 
 
-def _write_plan(root: ProjectRoot, *, samples: int, preview: bool, run_id: str) -> Path:
+def _inspect_sofa_asset(root: ProjectRoot, relative: str, yaw_deg: float) -> dict[str, str | float]:
+    path = root.resolve(relative)
+    if path.suffix.lower() != ".glb":
+        raise ValueError("--sofa-asset must be a project-relative .glb file")
+    if not math.isfinite(yaw_deg):
+        raise ValueError("--sofa-yaw must be a finite angle in degrees")
+    with path.open("rb") as stream:
+        _validate_format(stream, filename=path.name, size=os.fstat(stream.fileno()).st_size)
+        stream.seek(0)
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    return {"path": str(path), "sha256": digest, "yaw_deg": yaw_deg}
+
+
+def _write_plan(
+    root: ProjectRoot, *, samples: int, preview: bool, run_id: str,
+    sofa_asset: dict[str, str | float] | None = None,
+) -> Path:
+    scene = american_living_room()
     request = RenderRequest(
         shot_id="handheld-walkthrough", shot_version=1, run_id=run_id, degrade_seed=SEED,
         duration_sec=DURATION, camera_profile=CameraProfile(
-            camera_id="walkthrough", profile_name="Walkthrough diagnostic", field_of_view_mm=17,
-        ), scene=american_living_room(), engine="cycles", samples=samples, gpu_device="CPU",
+            camera_id="walkthrough", profile_name="Narrow apartment walkthrough", field_of_view_mm=17,
+        ), scene=scene, engine="cycles", samples=samples, gpu_device="CPU",
     )
     plan = build_scene_plan(request)
     sequence = list(range(1, FPS * DURATION + 1))
@@ -151,7 +202,8 @@ def _write_plan(root: ProjectRoot, *, samples: int, preview: bool, run_id: str) 
     }
     plan["walkthrough"] = {
         "camera": poses,
-        "path_metrics": _path_metrics(poses),
+        "room_scale": ROOM_SCALE,
+        "path_metrics": _path_metrics(poses, scene),
         "blend": str(root.write_with("walkthrough.blend", lambda path: None)),
         "frames": [
             [frame, str(root.write_with(f"frames/frame_{frame:03d}.png", lambda path: None))]
@@ -161,6 +213,8 @@ def _write_plan(root: ProjectRoot, *, samples: int, preview: bool, run_id: str) 
         "report": str(root.write_with("walkthrough.json", lambda path: None)),
         "worker": str(REPO / "orchestrator/adapters/blender/worker.py"),
     }
+    if sofa_asset is not None:
+        plan["walkthrough"]["sofa_asset"] = sofa_asset
     return root.write_text("plan.json", json.dumps(plan, indent=2))
 
 
@@ -197,13 +251,29 @@ def main() -> None:
     parser.add_argument("--ffmpeg", default="ffmpeg")
     parser.add_argument("--ffprobe", default="ffprobe")
     parser.add_argument("--samples", type=int, default=8, choices=range(4, 33), metavar="4..32")
-    parser.add_argument("--preview", action="store_true", help="Render three review frames only")
+    parser.add_argument("--preview", action="store_true", help="Render the establishing still and five walkthrough frames")
     parser.add_argument("--plan-only", action="store_true", help="Write the plan without starting Blender")
+    parser.add_argument("--sofa-asset", help="Worktree-relative, self-contained GLB sofa model")
+    parser.add_argument("--sofa-yaw", type=float, help="Rotate the imported sofa around Z in degrees")
     options = parser.parse_args()
-    run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S") + "_" + uuid4().hex[:8]
+    if options.sofa_asset is None and options.sofa_yaw is not None:
+        parser.error("--sofa-yaw requires --sofa-asset")
+
     repo = ProjectRoot(REPO)
+    sofa_asset = None
+    if options.sofa_asset is not None:
+        yaw_deg = options.sofa_yaw if options.sofa_yaw is not None else 0.0
+        try:
+            sofa_asset = _inspect_sofa_asset(repo, options.sofa_asset, yaw_deg)
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
+
+    run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S") + "_" + uuid4().hex[:8]
     root = ProjectRoot(repo.make_dir(f"spikes/30_at18_found_footage/_work/{run_id}"))
-    plan_path = _write_plan(root, samples=options.samples, preview=options.preview, run_id=run_id)
+    plan_path = _write_plan(
+        root, samples=options.samples, preview=options.preview, run_id=run_id,
+        sofa_asset=sofa_asset,
+    )
     print(f"Plan: {plan_path}", flush=True)
     if options.plan_only:
         return
