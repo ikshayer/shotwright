@@ -32,6 +32,7 @@ from orchestrator.adapters.tts.core import (
 )
 from orchestrator.domain.entities import CLONABLE_VOICE_CONSENT, Asset, GenerationRun, Job, Shot
 from orchestrator.platform.containment import ProjectRoot
+from orchestrator.service.take_files import discard_take, mark_report_discarded
 from orchestrator.platform.settings import Settings
 from orchestrator.store.json_store import ProjectStore, RecordNotFound, VersionConflict
 
@@ -387,17 +388,6 @@ def _reference_paths(request: IndexTts2Request) -> list[str]:
     return paths
 
 
-def _discard_take(root: ProjectRoot, directory: str) -> bool:
-    """A failed or cancelled run never leaves a take.wav (contract 5.1). True if one existed."""
-    found = False
-    for name in ("take.wav", "take.partial.wav"):
-        path = root.resolve(f"{directory}/{name}")
-        if path.is_file():
-            path.unlink()
-            found = found or name == "take.wav"
-    return found
-
-
 def persist_tts_terminal(store: ProjectStore, job: Job, request: PiperRequest | IndexTts2Request,
                          *, status: str) -> GenerationRun:
     """Record a failed or cancelled run: a GenerationRun, no take, no Asset.
@@ -422,11 +412,8 @@ def persist_tts_terminal(store: ProjectStore, job: Job, request: PiperRequest | 
             return existing  # Fully registered; nothing of this run is left to undo.
         # The run was saved but its Asset was not (the two are separate writes): undo the
         # take so the receipt cannot describe a take that has no registered identity.
-        discarded = _discard_take(root, directory)
-        if discarded and root.resolve(report_rel).is_file():
-            report = json.loads(root.read_text(report_rel, encoding="utf-8"))
-            report.update(status=status, take_discarded=True)
-            root.write_text(report_rel, json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+        if discard_take(root, directory):
+            mark_report_discarded(root, report_rel, status)
         kept = [path for path in existing.output_paths if root.resolve(path).is_file()]
         repaired = existing.model_copy(update={
             "status": status, "output_paths": kept,
@@ -435,13 +422,10 @@ def persist_tts_terminal(store: ProjectStore, job: Job, request: PiperRequest | 
         })
         store.save(GenerationRun.model_validate(repaired.model_dump()), expected_version=token)
         return repaired
-    discarded = _discard_take(root, directory)
-    if discarded and root.resolve(report_rel).is_file():
+    if discard_take(root, directory):
         # A report written by a run that finished before it was cancelled would otherwise
         # still claim a completed take that no longer exists.
-        report = json.loads(root.read_text(report_rel, encoding="utf-8"))
-        report.update(status=status, take_discarded=True)
-        root.write_text(report_rel, json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+        mark_report_discarded(root, report_rel, status)
     outputs = [f"{directory}/{name}" for name in ("text.txt", "report.json", "logs/stderr.txt")
                if root.resolve(f"{directory}/{name}").is_file()]
     version = "unknown"
