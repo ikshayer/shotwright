@@ -23,6 +23,7 @@ from orchestrator.adapters.assets.models import (
     AssetPreviewRequest,
     AssetSearchRequest,
 )
+from orchestrator.adapters.perfedit import PauseDetection
 from orchestrator.domain.base import ShotStatus
 from orchestrator.domain.entities import (
     CameraProfile,
@@ -50,6 +51,11 @@ from orchestrator.service.audiopost import (
     AudioPostProfileCreation,
     compose_audio_post_request,
     create_audio_post_profile,
+)
+from orchestrator.service.perfedit import (
+    PerformanceEditBody,
+    compose_performance_edit_request,
+    inspect_take_pauses,
 )
 from orchestrator.service.compose import compose_render_request
 from orchestrator.service.dependencies import (
@@ -469,6 +475,12 @@ class OperationContext:
             return self._submit_speech(operation, data)
         if operation == "apply_audio_post_profile":
             return self._submit_audio_post(data)
+        if operation == "inspect_take_pauses":
+            detection = PauseDetection.model_validate(
+                {key: data[key] for key in PauseDetection.model_fields if key in data})
+            return inspect_take_pauses(self._store(data["project_id"]), data["asset_id"], detection)
+        if operation == "apply_performance_edit":
+            return self._submit_performance_edit(data)
         if operation == "report_jobs":
             queue = self.job_queues.get(data["project_id"])
             return self._read_job_reports(data["project_id"], root=queue.root if queue else None)
@@ -594,6 +606,27 @@ class OperationContext:
         job = self.job_runner.submit(data["project_id"], request)
         return {"job_id": job.job_id, "state": job.state, "run_id": run_id,
                 "asset_id": f"audiopost-{run_id}"}
+
+    def _submit_performance_edit(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Validate a performance edit, including pause detection, then submit it as a CPU job."""
+        if self.job_runner is None:
+            raise RuntimeError("default JobRunner was not configured")
+        body = PerformanceEditBody.model_validate({key: value for key, value in data.items()
+                                                   if key in PerformanceEditBody.model_fields})
+        run_id = uuid.uuid4().hex
+        edit = compose_performance_edit_request(
+            self._store(data["project_id"]), shot_id=data["shot_id"], episode_id=data["episode_id"],
+            body=body, run_id=run_id,
+        )
+        request = AdapterRequest(
+            kind=AdapterKind.PERFORMANCE_EDIT,
+            payload={"request": edit, "expected_version": body.expected_version},
+            record_id=data["shot_id"], record_version=edit.shot_version,
+            episode_id=data["episode_id"],
+        )
+        job = self.job_runner.submit(data["project_id"], request)
+        return {"job_id": job.job_id, "state": job.state, "run_id": run_id,
+                "asset_id": f"perfedit-{run_id}"}
 
     def _read_job_reports(
         self, project_id: str, *, root: ProjectRoot | None = None
@@ -912,7 +945,8 @@ def _register_operation(app: FastAPI, operation: Operation, context: OperationCo
                     default=default,
                     annotation=Annotated[model_field.annotation, Form()],
                 ))
-    elif operation.name in {"search_assets", "asset_browser", "list_asset_categories", "asset_preview"}:
+    elif operation.name in {"search_assets", "asset_browser", "list_asset_categories",
+                            "asset_preview", "inspect_take_pauses"}:
         for name, model_field in operation.request_model.model_fields.items():
             default = (
                 Parameter.empty if model_field.is_required()
@@ -1067,6 +1101,9 @@ class _DefaultRuntime:
                 elif kind is AdapterKind.AUDIO_POST:
                     from orchestrator.adapters.audiopost import AudioPostAdapter
                     adapter = AudioPostAdapter(project_root, self.settings)
+                elif kind is AdapterKind.PERFORMANCE_EDIT:
+                    from orchestrator.adapters.perfedit import PerformanceEditAdapter
+                    adapter = PerformanceEditAdapter(project_root, self.settings)
                 elif kind is AdapterKind.DEGRADE:
                     from orchestrator.adapters.postprofile.runner import PostProfileAdapter
                     adapter = PostProfileAdapter(project_root, self.settings)

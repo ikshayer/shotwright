@@ -27,8 +27,10 @@ from orchestrator.domain.entities import (
     Shot,
     VoiceConsent,
 )
+from orchestrator.adapters.perfedit import PauseDetection
 from orchestrator.service.audiopost import AudioPostApplyBody, AudioPostProfileCreation
 from orchestrator.service.minimax_h3 import H3CancelBody, H3GenerateBody, H3PromoteBody
+from orchestrator.service.perfedit import PerformanceEditBody
 from orchestrator.service.tts import IndexTts2SpeechBody, PiperSpeechBody
 
 
@@ -230,6 +232,8 @@ OPERATIONS = (
     Operation("generate_piper_speech", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/speech/piper", "Synthesise a processed-source voice take (PA, answering machine, broadcast) with Piper on the CPU", True, "service.tts", PiperSpeechBody, _call("generate_piper_speech")),
     Operation("generate_indextts2_speech", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/speech/indextts2", "Synthesise a diegetic voice take with IndexTTS-2 on the GPU, cloning a consented speaker reference and steering emotion", True, "service.tts", IndexTts2SpeechBody, _call("generate_indextts2_speech")),
     Operation("apply_audio_post_profile", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/speech/post", "Degrade a registered voice take with an AudioPostProfile on the CPU; the result is a new voice Asset with the source take's rights", True, "service.audiopost", AudioPostApplyBody, _call("apply_audio_post_profile")),
+    Operation("inspect_take_pauses", "GET", "/projects/{project_id}/assets/{asset_id}/pauses", "Find the pauses in a registered voice take (read-only, model-free), so an agent can write a performance edit", False, "service.perfedit", PauseDetection, _call("inspect_take_pauses")),
+    Operation("apply_performance_edit", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/speech/edit", "Widen a take's own pauses, add procedural breaths, a gain contour and a false start on the CPU, leaving speech samples bit-identical; the result is a new voice Asset with the source take's rights", True, "service.perfedit", PerformanceEditBody, _call("apply_performance_edit")),
     Operation("report_jobs", "GET", "/projects/{project_id}/jobs", "Report jobs", False, "jobs.queue", None, _call("report_jobs")),
     Operation("apply_typed_feedback", "POST", "/projects/{project_id}/feedback", "Apply typed feedback", True, "service.apply_typed_feedback", OpenRequest, _call("apply_typed_feedback")),
     Operation("score_rubric", "POST", "/projects/{project_id}/rubric/score", "Score rubric criteria", True, "domain.entities.RubricScores", RubricRequest, _call("score_rubric")),
@@ -251,4 +255,5 @@ ASYNC_ADAPTER_OPERATIONS = frozenset({
     "generate_piper_speech",
     "generate_indextts2_speech",
     "apply_audio_post_profile",
+    "apply_performance_edit",
 })
