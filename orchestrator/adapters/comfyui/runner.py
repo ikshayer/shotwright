@@ -1,4 +1,4 @@
-"""Queue-integrated FLUX.2 still generation with retained provenance."""
+"""Queue-integrated ComfyUI still generation with retained provenance."""
 from __future__ import annotations
 
 import hashlib
@@ -21,8 +21,8 @@ from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.platform.settings import Settings
 
-from .runtime import HttpTransport, OwnedComfyWorker, build_command
-from .workflow import ImageRequest, build_workflow
+from .runtime import COMFYUI_VERSION, HttpTransport, OwnedComfyWorker, build_command
+from .workflow import ImageRequest, build_workflow, family_sampler, graph_seed
 
 #: The watchdog's startup clock runs until the first progress update, and this adapter
 #: does considerably more than boot a server before then: it verifies the hash of every
@@ -39,6 +39,11 @@ from .workflow import ImageRequest, build_workflow
 #: an over-long allowance only delays stall detection, while a short one fails working
 #: jobs. Replace it with a direct measurement of pre-progress cost when one exists.
 COMFYUI_STARTUP_ALLOWANCE_SECONDS = 128.4
+
+# DERIVED UPPER BOUND for Z-Image's pre-progress pin hashing: 128.4 x 14.90 / 11.94
+# rounds up to 161 s for the measured 14.90 GB pin set (including RealGen), scaled
+# from FLUX's 11.94 GB bound. This is not a measurement; A4.8 replaces it.
+COMFYUI_Z_IMAGE_STARTUP_ALLOWANCE_SECONDS = 161
 
 
 @dataclass(frozen=True)
@@ -125,7 +130,7 @@ class ComfyAdapter:
                         record.update({"job_id": job.job_id, "shot_id": job.shot_id, "run_id": job.run_id})
                         try:
                             self.root.write_text(f"{attempt_rel}/job.jsonl", json.dumps(record, sort_keys=True)+"\n")
-                            self.root.write_text(f"{attempt_rel}/metadata.json", json.dumps({"status":"failed", "error":record}, sort_keys=True, indent=2))
+                            self.root.write_text(f"{attempt_rel}/metadata.json", json.dumps({"status":"failed", "family": request.family, "error":record}, sort_keys=True, indent=2))
                         except OSError as log_exc:
                             errors[-1] = JobError(JobErrorKind.DISK_EXHAUSTED,
                                 f"original {error.kind.value} failure: {error.message}; failure log write failed: {log_exc}", cause=log_exc)
@@ -169,8 +174,11 @@ class ComfyAdapter:
                 if errors: raise errors[0]
                 if not box: raise JobError(JobErrorKind.INTERNAL, "ComfyUI attempt ended without a result")
                 return box[0]
+            startup_allowance = (COMFYUI_Z_IMAGE_STARTUP_ALLOWANCE_SECONDS
+                                 if request.family == "z_image"
+                                 else COMFYUI_STARTUP_ALLOWANCE_SECONDS)
             result = queue.run(job, invoke, partial_artifacts=partial_paths,
-                               startup_allowance_seconds=COMFYUI_STARTUP_ALLOWANCE_SECONDS)
+                               startup_allowance_seconds=startup_allowance)
             return result
         finally:
             self._epoch += 1
@@ -308,12 +316,13 @@ class ComfyAdapter:
                     raise JobError(JobErrorKind.CORRUPT_ARTIFACT, f"model changed during generation: {pin.path}")
             stats = self.transport.request("GET", "/system_stats", timeout=self._remaining())
             version = str(stats.get("system", {}).get("comfyui_version", stats.get("comfyui_version", "")))
-            if version != "0.21.1": raise JobError(JobErrorKind.WORKER_UNREACHABLE, f"unexpected ComfyUI version {version!r}")
+            if version != COMFYUI_VERSION: raise JobError(JobErrorKind.WORKER_UNREACHABLE, f"unexpected ComfyUI version {version!r}")
             now = time.time()
             metrics = {"vram_baseline_mb": telemetry[0],
                        "vram_peak_mb": max(telemetry[1], queue.nvml.device_memory().used_mb)}
             schema_defaults = _schema_defaults(object_info)
-            metadata = {"status": "completed", "prompt_id": prompt_id, "child_pid": self._control.child_pid,
+            metadata = {"status": "completed", "family": request.family,
+                        "prompt_id": prompt_id, "child_pid": self._control.child_pid,
                         "server_version": version, "system_stats": stats, "workflow_sha256": hashlib.sha256(graph_bytes).hexdigest(),
                         "image_sha256": _sha(self.root.resolve(retained_rel)), "models": [_pin_data(p) for p in pins.values()],
                         "object_info": "object-info.json", "model_manifest": "model-manifest.json",
@@ -322,9 +331,15 @@ class ComfyAdapter:
                         "duration_seconds": self.settings.budget.per_shot_wall_clock_seconds-(self._deadline-time.monotonic()),
                         "history": history, **metrics}
             gen = GenerationRun(run_id=request.run_id, tool="comfyui", tool_version=version,
-                invocation=graph_bytes.decode(), seed=graph["9"]["inputs"]["noise_seed"],
-                settings={"steps": request.steps, "precision": request.precision, "sampler": "euler", "memory_mode": request.memory_mode,
-                          "workflow_sha256": metadata["workflow_sha256"], "child_pid": int(self._control.child_pid or 0), "prompt_id": prompt_id,
+                invocation=graph_bytes.decode(), seed=graph_seed(graph),
+                settings={"steps": request.steps, "precision": request.precision,
+                          "sampler": family_sampler(request.family), "memory_mode": request.memory_mode,
+                          "family": request.family,
+                          "cfg": 1.0 if request.family == "flux2_klein" else 4.0,
+                          **({"lora_strength": request.lora_strength}
+                             if request.lora_strength is not None else {}),
+                          "workflow_sha256": metadata["workflow_sha256"],
+                          "child_pid": int(self._control.child_pid or 0), "prompt_id": prompt_id,
                           **{f"{p.role}_id": p.path.name for p in pins.values()},
                           **{f"{p.role}_sha256": p.sha256 for p in pins.values()},
                           **{f"{p.role}_license": p.license_id for p in pins.values()}},
@@ -356,7 +371,7 @@ class ComfyAdapter:
             try:
                 record = error.to_log_record()
                 self.root.write_text(f"{attempt_rel}/job.jsonl", json.dumps(record, sort_keys=True)+"\n")
-                self.root.write_text(f"{attempt_rel}/metadata.json", json.dumps({"status":"failed","error":record,"prompt_id":prompt_id},sort_keys=True,indent=2))
+                self.root.write_text(f"{attempt_rel}/metadata.json", json.dumps({"status":"failed","family":request.family,"error":record,"prompt_id":prompt_id},sort_keys=True,indent=2))
                 gen_path = self.root.resolve(f"{attempt_rel}/generation-run.json")
                 if gen_path.is_file():
                     previous_gen = GenerationRun.model_validate_json(
@@ -377,12 +392,17 @@ class ComfyAdapter:
         for pin in pins.values():
             resolved = pin.path.resolve(strict=True)
             manifest.append({**_pin_data(pin), "resolved_path": str(resolved), "resolved_parent": str(resolved.parent)})
+        model_dirs = {
+            "diffusion_models": str(pins["diffusion"].path.resolve(strict=True).parent),
+            "text_encoders": str(pins["text_encoder"].path.resolve(strict=True).parent),
+            "vae": str(pins["vae"].path.resolve(strict=True).parent),
+        }
+        if "lora" in pins:
+            model_dirs["loras"] = str(pins["lora"].path.resolve(strict=True).parent)
         config = {"cctv_pinned": {
             "base_path": str(self.root.resolve(self._runtime_rel)),
             "is_default": True,
-            **{category: str(pin.path.resolve(strict=True).parent) for category, pin in
-               (("diffusion_models", pins["diffusion"]),
-                ("text_encoders", pins["text_encoder"]), ("vae", pins["vae"]))},
+            **model_dirs,
         }}
         self.root.write_text(f"{self._runtime_rel}/models.yaml", json.dumps(config, sort_keys=True, indent=2))
         self.root.write_text(manifest_rel, json.dumps(manifest, sort_keys=True, indent=2))

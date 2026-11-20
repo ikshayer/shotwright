@@ -158,6 +158,10 @@ def _wired_request_kwargs(app: FastAPI, op) -> dict:
     body = kwargs.get("json")
     if isinstance(body, dict):
         body.update(project_id="x", episode_id="x", shot_id="x")
+        if op.path.endswith("/media/generate"):
+            # CONTRACT A4.7: a request without models is composed from a pinned profile
+            # and must carry a prompt; anything less is refused before submission.
+            body["request"] = {"prompt": "contract-status probe"}
     return kwargs
 
 

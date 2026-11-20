@@ -17,6 +17,8 @@ from orchestrator.jobs.lease import ComfyWorkerControl
 from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.platform.settings import Settings
 
+COMFYUI_VERSION = "0.44.0"
+
 
 class HttpTransport:
     def __init__(self, port: int) -> None:
@@ -130,7 +132,7 @@ class OwnedComfyWorker(ComfyWorkerControl):
             raise JobError(JobErrorKind.CORRUPT_ARTIFACT, "ComfyUI ownership response is malformed")
         system = stats["system"]
         version = str(system.get("comfyui_version", ""))
-        if version != "0.21.1" or not _endpoint_matches(system.get("argv"), self.runtime_dir, self.port, self._gpu_index):
+        if version != COMFYUI_VERSION or not _endpoint_matches(system.get("argv"), self.runtime_dir, self.port, self._gpu_index):
             if not self.terminate(interrupt=False):
                 self._unsafe_stop = True
                 raise JobError(JobErrorKind.WORKER_UNREACHABLE,
@@ -299,7 +301,7 @@ class OwnedComfyWorker(ComfyWorkerControl):
             if not isinstance(system, dict):
                 raise JobError(JobErrorKind.CORRUPT_ARTIFACT, "ComfyUI system_stats lacks system metadata")
             version = str(system.get("comfyui_version", stats.get("comfyui_version", "")))
-            if version != "0.21.1":
+            if version != COMFYUI_VERSION:
                 raise JobError(JobErrorKind.WORKER_UNREACHABLE, f"unexpected ComfyUI version {version!r}")
             server_argv = system.get("argv")
             if not _endpoint_matches(server_argv, self.runtime_dir, self.port, self._gpu_index):

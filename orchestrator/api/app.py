@@ -24,6 +24,7 @@ from orchestrator.adapters.assets.models import (
     AssetPreviewRequest,
     AssetSearchRequest,
 )
+from orchestrator.adapters.comfyui.profiles import PROFILES, compose_image_request
 from orchestrator.adapters.perfedit import PauseDetection
 from orchestrator.domain.base import ShotStatus
 from orchestrator.domain.entities import (
@@ -508,6 +509,7 @@ class OperationContext:
             if not record_id:
                 raise AdapterRequestInvalid(f"{operation} requires shot_id")
             store = self._store(data["project_id"])
+            composed_profile = None
             if operation in {"build_scene", "render_preview", "render_master"}:
                 # Only build_scene composes its own scene; both renders consume the one
                 # it persisted, so neither silently re-derives geometry of its own.
@@ -524,20 +526,67 @@ class OperationContext:
             else:
                 shot = store.load(Shot, record_id, episode_id=data.get("episode_id"))
                 payload = data.get("request", data)
-                record_version = data.get("record_version")
-                if record_version is None:
-                    record_version = getattr(payload, "shot_version", None)
-                if record_version is None and isinstance(payload, dict):
-                    record_version = payload.get("shot_version")
-                if record_version is None:
-                    record_version = shot.version
+                if operation == "generate_media":
+                    if isinstance(payload, dict) and "models" in payload:
+                        if "profile" in data:
+                            raise AdapterRequestInvalid("profile cannot be supplied alongside request.models")
+                    else:
+                        request_body = data.get("request")
+                        if not isinstance(request_body, dict):
+                            raise AdapterRequestInvalid("generate_media requires a request object")
+                        allowed_request_keys = {"prompt", "run_id", "width", "height"}
+                        unknown_request_keys = set(request_body) - allowed_request_keys
+                        if unknown_request_keys:
+                            raise AdapterRequestInvalid(
+                                f"unsupported composed request keys: {sorted(unknown_request_keys)}"
+                            )
+                        prompt = request_body.get("prompt")
+                        if not isinstance(prompt, str) or not prompt.strip():
+                            raise AdapterRequestInvalid("request.prompt is required and must be nonblank")
+                        profile_value = data.get("profile", self.settings.image_models.default_profile)
+                        valid_profiles = ", ".join(PROFILES)
+                        if not isinstance(profile_value, str) or profile_value not in PROFILES:
+                            raise AdapterRequestInvalid(
+                                f"unknown profile {profile_value!r}; valid profiles: {valid_profiles}"
+                            )
+                        composed_profile = PROFILES[profile_value]
+                        compose_values: dict[str, Any] = {
+                            "profile": profile_value,
+                            "weights_dir": self.settings.image_models.weights_dir,
+                            "shot_id": record_id,
+                            "shot_version": shot.version,
+                            "degrade_seed": shot.degrade_seed,
+                            "run_id": request_body.get("run_id", uuid.uuid4().hex),
+                            "prompt": prompt,
+                        }
+                        if "width" in request_body:
+                            compose_values["width"] = request_body["width"]
+                        if "height" in request_body:
+                            compose_values["height"] = request_body["height"]
+                        try:
+                            payload = compose_image_request(**compose_values)
+                        except (TypeError, ValueError) as exc:
+                            raise AdapterRequestInvalid(f"invalid composed generate_media request: {exc}") from exc
+                        record_version = shot.version
+                if not (operation == "generate_media" and composed_profile is not None):
+                    record_version = data.get("record_version")
+                    if record_version is None:
+                        record_version = getattr(payload, "shot_version", None)
+                    if record_version is None and isinstance(payload, dict):
+                        record_version = payload.get("shot_version")
+                    if record_version is None:
+                        record_version = shot.version
                 episode_id = shot.episode_id
             if type(record_version) is not int or record_version < 1:
                 raise AdapterRequestInvalid("record_version must be a positive content version")
             resources = data.get("resources", {})
             if not isinstance(resources, dict):
                 raise AdapterRequestInvalid("resources must be an object")
-            required_vram = data.get("required_vram_gb", resources.get("required_vram_gb", 0.0))
+            has_vram_override = "required_vram_gb" in data or "required_vram_gb" in resources
+            if operation == "generate_media" and composed_profile is not None and not has_vram_override:
+                required_vram = composed_profile.required_vram_gb
+            else:
+                required_vram = data.get("required_vram_gb", resources.get("required_vram_gb", 0.0))
             if (isinstance(required_vram, bool) or not isinstance(required_vram, (int, float))
                     or not math.isfinite(required_vram)
                     or required_vram < 0):

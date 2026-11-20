@@ -1,0 +1,468 @@
+[
+ {
+  "graph": {
+   "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+     "unet_name": "flux-2-klein-4b.safetensors",
+     "weight_dtype": "default"
+    }
+   },
+   "10": {
+    "class_type": "EmptyFlux2LatentImage",
+    "inputs": {
+     "batch_size": 1,
+     "height": 960,
+     "width": 1280
+    }
+   },
+   "11": {
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {
+     "guider": [
+      "6",
+      0
+     ],
+     "latent_image": [
+      "10",
+      0
+     ],
+     "noise": [
+      "9",
+      0
+     ],
+     "sampler": [
+      "8",
+      0
+     ],
+     "sigmas": [
+      "7",
+      0
+     ]
+    }
+   },
+   "12": {
+    "class_type": "VAEDecodeTiled",
+    "inputs": {
+     "overlap": 64,
+     "samples": [
+      "11",
+      0
+     ],
+     "temporal_overlap": 8,
+     "temporal_size": 64,
+     "tile_size": 512,
+     "vae": [
+      "3",
+      0
+     ]
+    }
+   },
+   "13": {
+    "class_type": "SaveImage",
+    "inputs": {
+     "filename_prefix": "generated/shot-1/v0002/run-1",
+     "images": [
+      "12",
+      0
+     ]
+    }
+   },
+   "2": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+     "clip_name": "qwen_3_4b_fp4_flux2.safetensors",
+     "device": "default",
+     "type": "flux2"
+    }
+   },
+   "3": {
+    "class_type": "VAELoader",
+    "inputs": {
+     "vae_name": "flux2-vae.safetensors"
+    }
+   },
+   "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+     "clip": [
+      "2",
+      0
+     ],
+     "text": "A quiet corridor"
+    }
+   },
+   "5": {
+    "class_type": "ConditioningZeroOut",
+    "inputs": {
+     "conditioning": [
+      "4",
+      0
+     ]
+    }
+   },
+   "6": {
+    "class_type": "CFGGuider",
+    "inputs": {
+     "cfg": 1.0,
+     "model": [
+      "1",
+      0
+     ],
+     "negative": [
+      "5",
+      0
+     ],
+     "positive": [
+      "4",
+      0
+     ]
+    }
+   },
+   "7": {
+    "class_type": "Flux2Scheduler",
+    "inputs": {
+     "height": 960,
+     "steps": 4,
+     "width": 1280
+    }
+   },
+   "8": {
+    "class_type": "KSamplerSelect",
+    "inputs": {
+     "sampler_name": "euler"
+    }
+   },
+   "9": {
+    "class_type": "RandomNoise",
+    "inputs": {
+     "noise_seed": 17529983140957799238
+    }
+   }
+  },
+  "name": "default",
+  "output_prefix": "generated/shot-1/v0002/run-1",
+  "request": {
+   "degrade_seed": 41,
+   "prompt": "A quiet corridor",
+   "run_id": "run-1",
+   "shot_id": "shot-1",
+   "shot_version": 2
+  },
+  "text_encoder": "qwen_3_4b_fp4_flux2.safetensors"
+ },
+ {
+  "graph": {
+   "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+     "unet_name": "flux-2-klein-4b.safetensors",
+     "weight_dtype": "fp8_e4m3fn"
+    }
+   },
+   "10": {
+    "class_type": "EmptyFlux2LatentImage",
+    "inputs": {
+     "batch_size": 1,
+     "height": 480,
+     "width": 640
+    }
+   },
+   "11": {
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {
+     "guider": [
+      "6",
+      0
+     ],
+     "latent_image": [
+      "10",
+      0
+     ],
+     "noise": [
+      "9",
+      0
+     ],
+     "sampler": [
+      "8",
+      0
+     ],
+     "sigmas": [
+      "7",
+      0
+     ]
+    }
+   },
+   "12": {
+    "class_type": "VAEDecodeTiled",
+    "inputs": {
+     "overlap": 64,
+     "samples": [
+      "11",
+      0
+     ],
+     "temporal_overlap": 8,
+     "temporal_size": 64,
+     "tile_size": 512,
+     "vae": [
+      "3",
+      0
+     ]
+    }
+   },
+   "13": {
+    "class_type": "SaveImage",
+    "inputs": {
+     "filename_prefix": "generated/shot-1/v0002/run-1",
+     "images": [
+      "12",
+      0
+     ]
+    }
+   },
+   "2": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+     "clip_name": "qwen_3_4b_fp4_flux2.safetensors",
+     "device": "default",
+     "type": "flux2"
+    }
+   },
+   "3": {
+    "class_type": "VAELoader",
+    "inputs": {
+     "vae_name": "flux2-vae.safetensors"
+    }
+   },
+   "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+     "clip": [
+      "2",
+      0
+     ],
+     "text": "Empty parking garage, 3am"
+    }
+   },
+   "5": {
+    "class_type": "ConditioningZeroOut",
+    "inputs": {
+     "conditioning": [
+      "4",
+      0
+     ]
+    }
+   },
+   "6": {
+    "class_type": "CFGGuider",
+    "inputs": {
+     "cfg": 1.0,
+     "model": [
+      "1",
+      0
+     ],
+     "negative": [
+      "5",
+      0
+     ],
+     "positive": [
+      "4",
+      0
+     ]
+    }
+   },
+   "7": {
+    "class_type": "Flux2Scheduler",
+    "inputs": {
+     "height": 480,
+     "steps": 8,
+     "width": 640
+    }
+   },
+   "8": {
+    "class_type": "KSamplerSelect",
+    "inputs": {
+     "sampler_name": "euler"
+    }
+   },
+   "9": {
+    "class_type": "RandomNoise",
+    "inputs": {
+     "noise_seed": 14256456671797500687
+    }
+   }
+  },
+  "name": "fp8_small_more_steps",
+  "output_prefix": "generated/shot-1/v0002/run-1",
+  "request": {
+   "degrade_seed": 987654321,
+   "gpu_device": 0,
+   "height": 480,
+   "memory_mode": "lowvram",
+   "precision": "fp8_e4m3fn",
+   "prompt": "Empty parking garage, 3am",
+   "run_id": "run-9",
+   "shot_id": "cam_7",
+   "shot_version": 5,
+   "steps": 8,
+   "width": 640
+  },
+  "text_encoder": "qwen_3_4b_fp4_flux2.safetensors"
+ },
+ {
+  "graph": {
+   "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+     "unet_name": "flux-2-klein-4b.safetensors",
+     "weight_dtype": "fp8_e5m2"
+    }
+   },
+   "10": {
+    "class_type": "EmptyFlux2LatentImage",
+    "inputs": {
+     "batch_size": 1,
+     "height": 768,
+     "width": 1024
+    }
+   },
+   "11": {
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {
+     "guider": [
+      "6",
+      0
+     ],
+     "latent_image": [
+      "10",
+      0
+     ],
+     "noise": [
+      "9",
+      0
+     ],
+     "sampler": [
+      "8",
+      0
+     ],
+     "sigmas": [
+      "7",
+      0
+     ]
+    }
+   },
+   "12": {
+    "class_type": "VAEDecodeTiled",
+    "inputs": {
+     "overlap": 64,
+     "samples": [
+      "11",
+      0
+     ],
+     "temporal_overlap": 8,
+     "temporal_size": 64,
+     "tile_size": 512,
+     "vae": [
+      "3",
+      0
+     ]
+    }
+   },
+   "13": {
+    "class_type": "SaveImage",
+    "inputs": {
+     "filename_prefix": "generated/shot-1/v0002/run-1",
+     "images": [
+      "12",
+      0
+     ]
+    }
+   },
+   "2": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+     "clip_name": "qwen_3_4b.safetensors",
+     "device": "default",
+     "type": "flux2"
+    }
+   },
+   "3": {
+    "class_type": "VAELoader",
+    "inputs": {
+     "vae_name": "flux2-vae.safetensors"
+    }
+   },
+   "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+     "clip": [
+      "2",
+      0
+     ],
+     "text": "A dim stairwell"
+    }
+   },
+   "5": {
+    "class_type": "ConditioningZeroOut",
+    "inputs": {
+     "conditioning": [
+      "4",
+      0
+     ]
+    }
+   },
+   "6": {
+    "class_type": "CFGGuider",
+    "inputs": {
+     "cfg": 1.0,
+     "model": [
+      "1",
+      0
+     ],
+     "negative": [
+      "5",
+      0
+     ],
+     "positive": [
+      "4",
+      0
+     ]
+    }
+   },
+   "7": {
+    "class_type": "Flux2Scheduler",
+    "inputs": {
+     "height": 768,
+     "steps": 6,
+     "width": 1024
+    }
+   },
+   "8": {
+    "class_type": "KSamplerSelect",
+    "inputs": {
+     "sampler_name": "euler"
+    }
+   },
+   "9": {
+    "class_type": "RandomNoise",
+    "inputs": {
+     "noise_seed": 15021507116632681445
+    }
+   }
+  },
+  "name": "qwen_3_4b_encoder",
+  "output_prefix": "generated/shot-1/v0002/run-1",
+  "request": {
+   "degrade_seed": 0,
+   "height": 768,
+   "precision": "fp8_e5m2",
+   "prompt": "A dim stairwell",
+   "run_id": "run-1",
+   "shot_id": "shot-1",
+   "shot_version": 2,
+   "steps": 6,
+   "width": 1024
+  },
+  "text_encoder": "qwen_3_4b.safetensors"
+ }
+]

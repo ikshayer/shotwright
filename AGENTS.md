@@ -51,7 +51,8 @@ Measured 2026-11-03/04. Paths are literal.
 | | |
 |---|---|
 | Blender | `D:\Blender\blender.exe` — **5.2.0 LTS**, engine id is `BLENDER_EEVEE` (4.4's `BLENDER_EEVEE_NEXT` does **not** work here) |
-| ComfyUI | `D:\ComfyUI_3\ComfyUI_windows_portable` — 0.21.1, embedded Python 3.12 |
+| ComfyUI | `D:\ComfyUI_0.44.0\ComfyUI_windows_portable` — **0.44.0**, embedded Python 3.13, torch 2.14.1+cu130. The old 0.21.1 tree at `D:\ComfyUI_3` is retained, untouched |
+| Image weights | `D:\Work\pipeline-models` — hard links to the seven pinned FLUX.2 klein / Z-Image / RealGen files (`orchestrator/adapters/comfyui/profiles.py`) |
 | FFmpeg | 8.1.1-full (Gyan), on PATH |
 | GPU | RTX 5070 Ti Laptop, 11.94 GB, sm_120. Foreign baseline drifts 1.3–2.7 GB |
 | RAM | 31.1 GB, and a browser routinely holds 9+ GB |

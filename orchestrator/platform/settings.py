@@ -49,7 +49,7 @@ class BinariesSettings(_Section):
     )
     ffmpeg_exe: Path = Field(Path("ffmpeg"), description="FFmpeg executable; a bare name is looked up on PATH.")
     comfyui_root: Path = Field(
-        Path(r"D:\ComfyUI_3\ComfyUI_windows_portable"), description="ComfyUI portable install directory."
+        Path(r"D:\ComfyUI_0.44.0\ComfyUI_windows_portable"), description="ComfyUI portable install directory."
     )
     comfyui_port: int = Field(8188, ge=1, le=65535, description="Port the orchestrator launches ComfyUI on.")
 
@@ -59,6 +59,25 @@ class ModelsSettings(_Section):
         None, description="extra_model_paths.yaml that lets weights live on another volume."
     )
     model_roots: list[Path] = Field(default_factory=list, description="Additional directories holding model weights.")
+
+
+#: Names of the pinned still-image model profiles. The profile contents live with the
+#: adapter (`orchestrator.adapters.comfyui.profiles`); only the names belong to settings.
+ProfileName = Literal["z_image_realgen", "z_image", "flux2_klein"]
+
+
+class ImageModelSettings(_Section):
+    weights_dir: Path = Field(Path(r"D:\Work\pipeline-models"), description="Directory containing pinned image model weights.")
+    default_profile: ProfileName = Field("z_image_realgen", description="Pinned still-image model profile used when callers omit models.")
+
+    @field_validator("weights_dir")
+    @classmethod
+    def _absolute_weights_dir(cls, value: Path) -> Path:
+        # Model pins must be absolute (ModelPin); a relative root would only fail later,
+        # at composition, instead of when the settings are loaded.
+        if not value.is_absolute():
+            raise ValueError("weights_dir must be an absolute path")
+        return value
 
 
 class ServerSettings(_Section):
@@ -258,6 +277,7 @@ class Settings(_Section):
     hosted_video_tier: Literal[1, 2, 3] = Field(1, description="Section 6.2 access tier; 1 = annotate only.")
     binaries: BinariesSettings = BinariesSettings()
     models: ModelsSettings = ModelsSettings()
+    image_models: ImageModelSettings = ImageModelSettings()
     server: ServerSettings = ServerSettings()
     upload: UploadLimits = UploadLimits()
     budget: BudgetSettings = BudgetSettings()
@@ -365,6 +385,8 @@ def check_paths_exist(settings: Settings) -> list[SettingIssue]:
         issues.append(SettingIssue("binaries.ffmpeg_exe", f"{b.ffmpeg_exe} not found on disk or PATH; install FFmpeg or set the path"))
     if not b.comfyui_root.is_dir():
         issues.append(SettingIssue("binaries.comfyui_root", f"{b.comfyui_root} is not a directory; set the ComfyUI install path"))
+    if not settings.image_models.weights_dir.is_dir():
+        issues.append(SettingIssue("image_models.weights_dir", f"{settings.image_models.weights_dir} is not a directory; set the pinned image weights path"))
     if not settings.project_root.is_dir():
         issues.append(SettingIssue("project_root", f"{settings.project_root} is not a directory; create it or change the setting"))
     extra = settings.models.extra_model_paths_file
