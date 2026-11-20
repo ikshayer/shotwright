@@ -66,12 +66,14 @@ def _error_payload(exc: Exception) -> dict[str, Any]:
 #: `--no-wait` is refused and Ctrl+C requests cancellation and waits for cleanup.
 _SPEECH_OPERATIONS = frozenset({
     "generate_piper_speech", "generate_indextts2_speech", "apply_audio_post_profile",
+    "apply_performance_edit",
 })
 _LOCALLY_OWNED_JOBS = {
     "generate_h3_candidate": "H3",
     "generate_piper_speech": "Piper",
     "generate_indextts2_speech": "IndexTTS-2",
     "apply_audio_post_profile": "Audio post",
+    "apply_performance_edit": "Performance edit",
 }
 
 

@@ -46,11 +46,13 @@ class AdapterKind(StrEnum):
     TTS_PIPER = "tts_piper"
     TTS_INDEXTTS2 = "tts_indextts2"
     AUDIO_POST = "audio_post"
+    PERFORMANCE_EDIT = "performance_edit"
 
 
 #: Kinds that never take the GPU lease: they pass CPU admission and run outside the GPU lock.
 _CPU_KINDS = frozenset({
     AdapterKind.SCENE, AdapterKind.DEGRADE, AdapterKind.TTS_PIPER, AdapterKind.AUDIO_POST,
+    AdapterKind.PERFORMANCE_EDIT,
 })
 #: Kinds that run under the GPU lease, the budget ledger and the watchdog.
 _GPU_KINDS = frozenset({
@@ -60,9 +62,13 @@ _GPU_KINDS = frozenset({
 #: a `run_id` of their own, and no change to the Shot, its status or its ShotOutputs.
 _SIDECAR_KINDS = frozenset({
     AdapterKind.H3_CANDIDATE, AdapterKind.TTS_PIPER, AdapterKind.TTS_INDEXTTS2, AdapterKind.AUDIO_POST,
+    AdapterKind.PERFORMANCE_EDIT,
 })
 #: Kinds whose success registers a take Asset, so a cancel must resolve to exactly one outcome.
-_TAKE_KINDS = frozenset({AdapterKind.TTS_PIPER, AdapterKind.TTS_INDEXTTS2, AdapterKind.AUDIO_POST})
+_TAKE_KINDS = frozenset({
+    AdapterKind.TTS_PIPER, AdapterKind.TTS_INDEXTTS2, AdapterKind.AUDIO_POST,
+    AdapterKind.PERFORMANCE_EDIT,
+})
 
 
 @dataclass(frozen=True)
@@ -619,6 +625,12 @@ def _take_persistence(kind: AdapterKind) -> tuple[Callable[..., Any], Callable[.
     if kind is AdapterKind.AUDIO_POST:
         from orchestrator.service.audiopost import persist_audio_post_success, persist_audio_post_terminal
         return persist_audio_post_success, persist_audio_post_terminal
+    if kind is AdapterKind.PERFORMANCE_EDIT:
+        from orchestrator.service.perfedit import (
+            persist_performance_edit_success,
+            persist_performance_edit_terminal,
+        )
+        return persist_performance_edit_success, persist_performance_edit_terminal
     from orchestrator.service.tts import persist_tts_success, persist_tts_terminal
     return persist_tts_success, persist_tts_terminal
 
