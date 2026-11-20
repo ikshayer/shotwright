@@ -26,6 +26,9 @@ cctv-pipeline-serve = "orchestrator.api.launch:main"
 # beside orchestrator/ and refuses to build at all.
 include = ["orchestrator*"]
 
+[tool.setuptools.package-data]
+"orchestrator.api" = ["mcp_resources/*.md"]
+
 [project.optional-dependencies]
 # httpx2 backs starlette.testclient (Starlette 1.x); without it the API tests fail to collect.
 dev = ["pytest>=8", "pytest-cov>=5", "httpx2>=2.0"]

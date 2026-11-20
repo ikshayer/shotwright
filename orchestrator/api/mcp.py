@@ -12,6 +12,7 @@ import argparse
 import base64
 import http.client
 import importlib.metadata
+import importlib.resources
 import json
 import sys
 import urllib.error
@@ -43,6 +44,9 @@ _INVALID_REQUEST = -32600
 _METHOD_NOT_FOUND = -32601
 _INVALID_PARAMS = -32602
 _INTERNAL_ERROR = -32603
+_RESOURCE_NOT_FOUND = -32002
+
+RESOURCE_URI_PREFIX = "cctv-pipeline://references/"
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,24 @@ class HttpResponse:
     status: int
     content_type: str  # the Content-Type header, "" if absent
     body: bytes
+
+
+@dataclass(frozen=True)
+class ReferenceResource:
+    slug: str
+    file: str
+    title: str
+    description: str
+
+
+REFERENCE_RESOURCES: tuple[ReferenceResource, ...] = (
+    ReferenceResource(
+        "scene-realism",
+        "scene_realism.md",
+        "Scene realism",
+        "Read this before building, dressing or lighting a 3D scene.",
+    ),
+)
 
 
 class TransportError(Exception):
@@ -327,16 +349,70 @@ class McpServer:
         arguments = params if isinstance(params, dict) else {}
         if method == "initialize":
             requested = arguments.get("protocolVersion")
+            resource_uris = ", ".join(
+                RESOURCE_URI_PREFIX + resource.slug for resource in REFERENCE_RESOURCES
+            )
             return {
                 "protocolVersion": (
                     requested if requested in SUPPORTED_PROTOCOL_VERSIONS
                     else SUPPORTED_PROTOCOL_VERSIONS[0]
                 ),
-                "capabilities": {"tools": {"listChanged": False}},
+                "capabilities": {
+                    "tools": {"listChanged": False},
+                    "resources": {"subscribe": False, "listChanged": False},
+                },
                 "serverInfo": {"name": "cctv-pipeline", "version": _package_version()},
+                "instructions": (
+                    f"Available reference resources: {resource_uris}. "
+                    "Read scene-realism before building, dressing or lighting a 3D scene."
+                ),
             }
         if method == "ping":
             return {}
+        if method == "resources/list":
+            return {
+                "resources": [
+                    {
+                        "uri": RESOURCE_URI_PREFIX + resource.slug,
+                        "name": resource.slug,
+                        "title": resource.title,
+                        "description": resource.description,
+                        "mimeType": "text/markdown",
+                    }
+                    for resource in REFERENCE_RESOURCES
+                ]
+            }
+        if method == "resources/templates/list":
+            return {"resourceTemplates": []}
+        if method == "resources/read":
+            if not isinstance(params, dict) or not isinstance(params.get("uri"), str):
+                raise _RpcError(_INVALID_PARAMS, "resources/read requires a string 'uri'")
+            uri = params["uri"]
+            resource = next(
+                (
+                    item for item in REFERENCE_RESOURCES
+                    if RESOURCE_URI_PREFIX + item.slug == uri
+                ),
+                None,
+            )
+            if resource is None:
+                raise _RpcError(_RESOURCE_NOT_FOUND, f"resource not found: {uri!r}")
+            try:
+                text = (
+                    importlib.resources.files("orchestrator.api")
+                    / "mcp_resources"
+                    / resource.file
+                ).read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as error:
+                raise _RpcError(
+                    _INTERNAL_ERROR,
+                    f"cannot read packaged reference document {resource.file!r}: {error}",
+                ) from error
+            return {
+                "contents": [
+                    {"uri": uri, "mimeType": "text/markdown", "text": text}
+                ]
+            }
         if method == "tools/list":
             return {"tools": self._refresh_manifest()}
         if method == "tools/call":
