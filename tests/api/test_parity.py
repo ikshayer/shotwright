@@ -32,6 +32,7 @@ CONTRACT_OPERATIONS = {
     "build scene": r"scene",
     "render preview": r"preview",
     "generate media": r"generat",
+    "assemble cut": r"assemble.*cut|cut.*assemble",
     "sample references": r"sample|reference",
     "report jobs": r"job",
     "apply feedback": r"feedback",

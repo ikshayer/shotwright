@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from orchestrator.adapters.blender.scene import build_scene_plan
 from orchestrator.api.routes import OPERATIONS as SHARED_OPERATIONS
+from orchestrator.domain.base import FramingStatus
 from orchestrator.domain.entities import (
     Asset,
     CameraProfile,
@@ -22,6 +23,7 @@ from orchestrator.domain.entities import (
     Shot,
     ShotOutput,
     ShotOutputKind,
+    ShotStatus,
 )
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.service.compose import compose_render_request
@@ -39,6 +41,7 @@ ADAPTER_OPERATIONS = {
     "render master": "render_master",
     "generate media": "generate_media",
     "degrade": "degrade_media",
+    "assemble cut": "assemble_cut",
     "sample references": "sample_references",
     "export": "export",
 }
@@ -53,7 +56,9 @@ def _matches(app: FastAPI, operation_name: str):
     ]
 
 
-def _seed_wired_route_records(app: FastAPI, *, needs_degrade: bool = False) -> None:
+def _seed_wired_route_records(
+    app: FastAPI, *, needs_degrade: bool = False, needs_assembly: bool = False,
+) -> None:
     """The route-table harness substitutes `x` for every path parameter."""
     root = ProjectRoot(app.state.settings.project_root)
     root.make_dir("x")
@@ -61,7 +66,10 @@ def _seed_wired_route_records(app: FastAPI, *, needs_degrade: bool = False) -> N
     store = ProjectStore(project_root)
     store.save(Project(project_id="x", title="Route test"), expected_version=0)
     store.save(
-        Episode(episode_id="x", project_id="x", number=1, duration_target_sec=10),
+        Episode(
+            episode_id="x", project_id="x", number=1, duration_target_sec=10,
+            shot_ids=["x"] if needs_assembly else [],
+        ),
         expected_version=0,
     )
     shot = Shot(shot_id="x", episode_id="x", duration_sec=2)
@@ -74,6 +82,21 @@ def _seed_wired_route_records(app: FastAPI, *, needs_degrade: bool = False) -> N
         CameraProfile(camera_id=shot.camera_profile, profile_name=shot.camera_profile)
     )
     store.create(shot)
+    if needs_assembly:
+        for status in (
+            ShotStatus.PLANNED,
+            ShotStatus.BLOCKING,
+            ShotStatus.BUILDING,
+            ShotStatus.REVIEW,
+        ):
+            current, token = store.load_with_version(
+                Shot, shot.shot_id, episode_id=shot.episode_id,
+            )
+            changes = {"status": status}
+            if status is ShotStatus.BUILDING:
+                changes["framing_status"] = FramingStatus.APPROVED
+            store.update(current.model_copy(update=changes), expected_version=token)
+        shot = store.load(Shot, shot.shot_id, episode_id=shot.episode_id)
 
     # Rendering now consumes a scene, so /preview refuses a shot that has none with
     # "has no scene output; run build_scene first". Seed what build_scene would have
@@ -106,7 +129,7 @@ def _seed_wired_route_records(app: FastAPI, *, needs_degrade: bool = False) -> N
         expected_version=0,
     )
 
-    if needs_degrade:
+    if needs_degrade or needs_assembly:
         # degrade_media composes from the current master receipt and the named
         # project profile. The overlay font is profile-owned and must be persisted
         # as a project-relative path with a real fixture file.
@@ -150,11 +173,34 @@ def _seed_wired_route_records(app: FastAPI, *, needs_degrade: bool = False) -> N
             ),
             expected_version=1,
         )
+        if needs_assembly:
+            degraded_relative = f"degraded/{shot.shot_id}/v{shot.version:04d}/seed/degraded.mp4"
+            degraded_bytes = b"route fixture degraded output"
+            project_root.write_bytes(degraded_relative, degraded_bytes)
+            store.append_shot_output(
+                ShotOutput(
+                    output_id="seed-degraded",
+                    episode_id=shot.episode_id,
+                    shot_id=shot.shot_id,
+                    record_version=shot.version,
+                    kind=ShotOutputKind.DEGRADED,
+                    relative_path=degraded_relative,
+                    content_sha256=hashlib.sha256(degraded_bytes).hexdigest(),
+                    profile_semver="1.0.0",
+                    filter_graph_hash="b" * 64,
+                    pinned_binaries={"ffmpeg": "fixture-build"},
+                    frame_count=24,
+                    output_fps=12,
+                ),
+                expected_version=2,
+            )
 
 
 def _wired_request_kwargs(app: FastAPI, op) -> dict:
     """Provide the shot binding for the project-only media generation route too."""
     kwargs = valid_request_kwargs(app, op)
+    if op.name == "assemble_cut":
+        return kwargs
     body = kwargs.get("json")
     if isinstance(body, dict):
         body.update(project_id="x", episode_id="x", shot_id="x")
@@ -165,7 +211,7 @@ def _wired_request_kwargs(app: FastAPI, op) -> dict:
     return kwargs
 
 
-WIRED = {"build scene", "render preview", "render master", "generate media", "degrade"}
+WIRED = {"build scene", "render preview", "render master", "generate media", "degrade", "assemble cut"}
 
 
 @pytest.mark.parametrize("operation", list(ADAPTER_OPERATIONS))
@@ -181,7 +227,11 @@ def test_adapter_operation_returns_contract_status(
     ops = _matches(app, ADAPTER_OPERATIONS[operation])
     assert ops, f"no route for contract operation {operation!r}"
     if operation in WIRED or operation == "create asset":
-        _seed_wired_route_records(app, needs_degrade=operation == "degrade")
+        _seed_wired_route_records(
+            app,
+            needs_degrade=operation == "degrade",
+            needs_assembly=operation == "assemble cut",
+        )
     for op in ops:
         if operation == "create asset":
             asset = Asset(

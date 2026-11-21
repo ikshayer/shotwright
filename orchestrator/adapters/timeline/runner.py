@@ -587,7 +587,7 @@ class TimelineAssembler:
     def _raise_if_stopped(self, context: str) -> None:
         if not self.control.stopped():
             return
-        reason = getattr(self.control, "_stop_reason", None) or JobErrorKind.CANCELLED
+        reason = getattr(self.control, "stop_reason", None) or JobErrorKind.CANCELLED
         message = f"{context} exceeded its wall-clock budget" if reason is JobErrorKind.BUDGET_EXCEEDED else f"{context} was cancelled"
         raise JobError(reason, message)
 

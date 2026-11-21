@@ -62,10 +62,7 @@ def compose_timeline(store: ProjectStore, *, episode_id: str) -> Timeline:
     cursor = 0.0
     for shot_id in ordered_ids:
         shot = store.load(Shot, shot_id, episode_id=episode_id)
-        if shot.status is not ShotStatus.APPROVED:
-            raise _invalid(
-                f"Shot {shot_id!r} is {shot.status.value}; FR-09 only assembles approved shots"
-            )
+        _require_assembly_status(shot)
         delivered = _delivered_output(store, shot)
         if delivered.frame_count is None or delivered.output_fps is None:
             raise _invalid(
@@ -89,6 +86,7 @@ def assemble_episode(
     run_id: str | None = None,
     budget_seconds: float | None = None,
     credit_card_duration_sec: float = 5.0,
+    output_id: str | None = None,
 ) -> EpisodeOutput:
     """Persist the narrative cut and rights snapshot, encode appended credit cards, then receipt."""
     episode, episode_token = store.load_with_version(Episode, episode_id)
@@ -126,7 +124,8 @@ def assemble_episode(
     if credits["publication_blockers"]:
         raise _invalid("episode has publication-blocking rights metadata: " + "; ".join(credits["publication_blockers"]))
 
-    output_id = uuid.uuid4().hex
+    # A queued job passes its own id so its caller can find exactly this cut.
+    output_id = output_id or uuid.uuid4().hex
     run_id = run_id or uuid.uuid4().hex
     output_relative = f"episodes/{episode_id}/outputs/cuts/{output_id}.mp4"
     log_relative = f"episodes/{episode_id}/outputs/cuts/{output_id}-{run_id}.ffmpeg.log"
@@ -249,8 +248,31 @@ def assemble_episode(
         receipt_values["credit_manifest_path"] = credit_manifest_path
         receipt_values["credit_manifest_sha256"] = credit_manifest_sha256
     receipt = EpisodeOutput(**receipt_values)
-    existing = store.list_episode_outputs(episode_id)
-    store.append_episode_output(receipt, expected_version=len(existing))
+    with store.command():
+        existing = store.list_episode_outputs(episode_id)
+        store.append_episode_output(receipt, expected_version=len(existing))
+        # Gate C binds to a Timeline version, but credit cards are rendered outside the
+        # Timeline, so a new cut of the same version can still be different video. A new
+        # cut therefore revokes the cut approval unless it is byte-identical to a cut
+        # already recorded for the approved version (a deterministic re-assembly). This
+        # runs in the same command as the receipt, so no approval can land between the
+        # two, and a failed assembly never reaches here.
+        current, token = store.load_with_version(Episode, episode_id)
+        identical_to_approved = (
+            current.approved_cut_version is not None
+            and receipt.timeline_store_version == current.approved_cut_version
+            and any(
+                prior.timeline_store_version == current.approved_cut_version
+                and prior.content_sha256 == receipt.content_sha256
+                for prior in existing
+            )
+        )
+        if (current.approved_cut_version is not None or current.approval_review_id is not None) \
+                and not identical_to_approved:
+            store.save(
+                current.model_copy(update={"approved_cut_version": None, "approval_review_id": None}),
+                expected_version=token,
+            )
     return receipt
 
 
@@ -268,10 +290,7 @@ def _outputs_for_timeline(
             if entry.ref not in episode_shots:
                 raise _invalid(f"Timeline refers to Shot {entry.ref!r}, which is not in the Episode")
             shot = store.load(Shot, entry.ref, episode_id=episode.episode_id)
-            if shot.status is not ShotStatus.APPROVED:
-                raise _invalid(
-                    f"Shot {shot.shot_id!r} is {shot.status.value}; FR-09 only assembles approved shots"
-                )
+            _require_assembly_status(shot)
             outputs[shot.shot_id] = _delivered_output(store, shot)
         elif entry.type not in {"card", "pause"}:
             raise _invalid(f"Timeline entry type {entry.type!r} is unsupported")
@@ -317,6 +336,25 @@ def _delivered_output(store: ProjectStore, shot: Shot) -> ShotOutput:
             f"Shot {shot.shot_id!r} has no degraded output; run degrade_media first"
         )
     return delivered[-1]
+
+
+def _require_assembly_status(shot: Shot) -> None:
+    if shot.status in {ShotStatus.REVIEW, ShotStatus.APPROVED}:
+        return
+    next_steps = {
+        ShotStatus.DRAFT: "run build_scene, render_master, and degrade_media",
+        ShotStatus.PLANNED: "finish build_scene, render_master, and degrade_media",
+        ShotStatus.BLOCKING: "approve framing if required, then run render_master and degrade_media",
+        ShotStatus.BUILDING: "finish render_master, then run degrade_media",
+        ShotStatus.STALE: "revise the Shot, then run build_scene, render_master, and degrade_media",
+        ShotStatus.REJECTED: "revise the Shot, then run build_scene, render_master, and degrade_media",
+        ShotStatus.FAILED: "retry the failed stage, then run degrade_media",
+    }
+    remediation = next_steps.get(shot.status, "run render_master and degrade_media")
+    raise _invalid(
+        f"Shot {shot.shot_id!r} is {shot.status.value}; {remediation} to make it eligible "
+        "for cut assembly (review or approved with a current degraded output)"
+    )
 
 
 def _ordered_shots(store: ProjectStore, episode: Episode, shot_ids: Sequence[str]) -> tuple[str, ...]:

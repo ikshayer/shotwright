@@ -128,6 +128,13 @@ class EmptyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class CutAssemblyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    credit_card_duration_sec: float = Field(5.0, gt=0, allow_inf_nan=False)
+    required_disk_gb: float = Field(0.0, ge=0, allow_inf_nan=False)
+
+
 class CameraProfileRevision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -292,6 +299,7 @@ OPERATIONS = (
     Operation("render_master", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/master", "Render the shot's full master with Blender from the built scene. payload {}. Requires shot status blocking (or building, or failed for a retry), a build_scene output that still matches the shot's Location version, and framing approved or not required; moves the shot to building. A shot already in review needs a revise_shot successor and a new build before it can be rendered again. Follow it with degrade_media.", True, "master renderer adapter", OpenRequest, _call("render_master")),
     Operation("generate_media", "POST", "/projects/{project_id}/media/generate", "Generate still media. Omitting request.models uses the pinned default profile (Z-Image Base + RealGen V2 at 0.6); profile may be z_image_realgen, z_image, or flux2_klein (FLUX.2 klein 4B), and request.prompt is required.", True, "media generation adapter", OpenRequest, _call("generate_media")),
     Operation("degrade_media", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/degrade", "Apply the CCTV degradation (an FFmpeg PostProfile composed from the shot and its CameraProfile) to the shot's latest master. payload {}; the request is rebuilt from stored state. Requires a render_master output for the current shot version, shot status building, and, for profiles with a timestamp overlay such as the default dvr-2005, a font at assets/fonts/overlay.ttf (projects are created without one). Success moves the shot to review.", True, "PostProfile adapter", OpenRequest, _call("degrade_media")),
+    Operation("assemble_cut", "POST", "/projects/{project_id}/episodes/{episode_id}/cut/assemble", "Assemble an Episode cut as a queued CPU FFmpeg job; assembly does not approve the cut. Send credit_card_duration_sec (positive, default 5.0) and required_disk_gb (default 0). Every Shot must be in review or approved and have a degraded output for its current version. Returns job_id and state; after completion the newest cut is in list_cuts and can be viewed with inspect_output. The creator approves it afterward with approve_cut.", True, "episode cut assembly adapter", CutAssemblyRequest, _call("assemble_cut")),
     Operation("sample_references", "POST", "/projects/{project_id}/references/sample", "Not implemented yet: always answers 501 missing_adapter. Do not call it.", True, "reference sampling adapter", OpenRequest, _call("sample_references")),
     Operation("generate_h3_candidate", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/h3-candidates", "Generate an opt-in MiniMax H3 audiovisual candidate", True, "service.minimax_h3", H3GenerateBody, _call("generate_h3_candidate")),
     Operation("list_h3_candidates", "GET", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/h3-candidates", "List immutable H3 candidate receipts", False, "store", None, _call("list_h3_candidates")),
@@ -332,6 +340,7 @@ ASYNC_ADAPTER_OPERATIONS = frozenset({
     "render_master",
     "generate_media",
     "degrade_media",
+    "assemble_cut",
     "generate_h3_candidate",
     "generate_piper_speech",
     "generate_indextts2_speech",

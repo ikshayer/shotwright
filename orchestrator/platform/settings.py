@@ -112,6 +112,8 @@ class BudgetSettings(_Section):
     disk_ceiling_gb: float = Field(40.0, gt=0, description="Project size ceiling.")
     min_free_disk_gb: float = Field(10.0, ge=0, description="Hard threshold below which jobs are refused.")
     per_shot_wall_clock_seconds: float = Field(900.0, gt=0, description="AT-15 final-render wall-clock budget.")
+    # UNMEASURED PLACEHOLDER: no cut encode has been timed on this machine.
+    cut_assembly_wall_clock_seconds: float = Field(900.0, gt=0)
 
 
 class RetentionSettings(_Section):

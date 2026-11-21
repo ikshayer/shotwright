@@ -42,7 +42,7 @@ from orchestrator.jobs.journal import TERMINAL_STATES, read_job as read_job_reco
 from orchestrator.jobs.lease import GpuLease, PynvmlProbe
 from orchestrator.jobs.queue import JobQueue, ProjectQuarantine, SystemHostResources
 from orchestrator.platform.containment import ProjectRoot, validate_upload
-from orchestrator.platform.errors import JobError
+from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.platform.settings import Settings
 from orchestrator.service.assets import (
     AssetRegistrationInvalid,
@@ -61,6 +61,8 @@ from orchestrator.service.perfedit import (
     inspect_take_pauses,
 )
 from orchestrator.service.compose import compose_render_request
+from orchestrator.service.credits import collect_credits_for_shots
+from orchestrator.service.timeline import compose_timeline
 from orchestrator.service.approval import (
     approve_episode,
     approve_framing,
@@ -703,6 +705,39 @@ class OperationContext:
         if operation == "report_jobs":
             queue = self.job_queues.get(data["project_id"])
             return self._read_job_reports(data["project_id"], root=queue.root if queue else None)
+        if operation == "assemble_cut":
+            if self.job_runner is None:
+                raise RuntimeError("default JobRunner was not configured")
+            episode_id = data["episode_id"]
+            store = self._store(data["project_id"])
+            _episode, episode_token = store.load_with_version(Episode, episode_id)
+            # Fail before creating a job id when the current manifest cannot form a cut:
+            # the timeline must compose, and the rights collection assembly runs (each
+            # shot's built scene, licences, publication blockers) must pass as well.
+            cut = compose_timeline(store, episode_id=episode_id)
+            selected = [
+                store.load(Shot, shot_id, episode_id=episode_id)
+                for shot_id in dict.fromkeys(
+                    entry.ref for entry in cut.entries if entry.type == "shot" and entry.ref
+                )
+            ]
+            credits = collect_credits_for_shots(store, selected)
+            if credits["publication_blockers"]:
+                raise JobError(
+                    JobErrorKind.INVALID_MANIFEST,
+                    "episode has publication-blocking rights metadata: "
+                    + "; ".join(credits["publication_blockers"]),
+                )
+            request = AdapterRequest(
+                kind=AdapterKind.ASSEMBLE,
+                payload={"credit_card_duration_sec": data.get("credit_card_duration_sec", 5.0)},
+                record_id=episode_id,
+                record_version=episode_token,
+                episode_id=episode_id,
+                required_disk_gb=data.get("required_disk_gb", 0.0),
+            )
+            job = self.job_runner.submit(data["project_id"], request)
+            return {"job_id": job.job_id, "state": job.state}
         if operation in ASYNC_ADAPTER_OPERATIONS:
             if self.job_runner is None:
                 raise RuntimeError("default JobRunner was not configured")
@@ -1399,6 +1434,9 @@ class _DefaultRuntime:
                 elif kind is AdapterKind.DEGRADE:
                     from orchestrator.adapters.postprofile.runner import PostProfileAdapter
                     adapter = PostProfileAdapter(project_root, self.settings)
+                elif kind is AdapterKind.ASSEMBLE:
+                    from orchestrator.adapters.timeline.job import CutAssemblyAdapter
+                    adapter = CutAssemblyAdapter(project_root, self.settings)
                 else:
                     raise ValueError(f"no adapter is defined for {kind.value}")
                 self._adapters[key] = adapter
