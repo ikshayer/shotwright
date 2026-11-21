@@ -21,6 +21,8 @@ class FrameUnavailable(Exception):
 
 
 _IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"})
+#: Pillow decoders matching _IMAGE_SUFFIXES; nothing else is ever tried.
+_PILLOW_FORMATS = ("PNG", "JPEG", "WEBP", "BMP", "TIFF")
 #: The demuxer named for each accepted video extension. None of these follows
 #: external references: matroska and avi have none, and the mov demuxer ignores data
 #: references unless `enable_drefs` is set, which is never passed.
@@ -126,7 +128,9 @@ def _read_project_bytes(store: ProjectStore, relative_path: str, content_sha256:
 
 def _bounded_png(data: bytes, output_id: str) -> bytes:
     try:
-        with Image.open(io.BytesIO(data)) as image:
+        # Only the formats inspection accepts (_IMAGE_SUFFIXES), so content sniffing can
+        # never pick a decoder such as EPS, which Pillow hands to Ghostscript.
+        with Image.open(io.BytesIO(data), formats=_PILLOW_FORMATS) as image:
             # Image.open reads only the header; refuse oversized images before any
             # pixel data is decoded, so working memory stays bounded.
             width, height = image.size
