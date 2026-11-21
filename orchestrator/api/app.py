@@ -9,7 +9,7 @@ import html
 import math
 import threading
 import uuid
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import quote, urlsplit
 
 from fastapi import Body, FastAPI, File, Form, Query, Request, UploadFile
@@ -38,10 +38,11 @@ from orchestrator.domain.entities import (
     Shot,
 )
 from orchestrator.jobs.gpu_slot import GpuExecutionSlot
-from orchestrator.jobs.journal import read_job_records
+from orchestrator.jobs.journal import TERMINAL_STATES, read_job as read_job_record, read_job_records
 from orchestrator.jobs.lease import GpuLease, PynvmlProbe
 from orchestrator.jobs.queue import JobQueue, ProjectQuarantine, SystemHostResources
 from orchestrator.platform.containment import ProjectRoot, validate_upload
+from orchestrator.platform.errors import JobError
 from orchestrator.platform.settings import Settings
 from orchestrator.service.assets import (
     AssetRegistrationInvalid,
@@ -60,6 +61,13 @@ from orchestrator.service.perfedit import (
     inspect_take_pauses,
 )
 from orchestrator.service.compose import compose_render_request
+from orchestrator.service.approval import (
+    approve_episode,
+    approve_framing,
+    approve_shot,
+    record_review,
+)
+from orchestrator.service.inspect import FrameUnavailable, inspect_output as inspect_project_output
 from orchestrator.service.dependencies import (
     create_camera_profile,
     create_episode,
@@ -68,6 +76,8 @@ from orchestrator.service.dependencies import (
     create_project,
     draft_script,
     propose_shots,
+    resume_invalidations,
+    revise_camera_profile,
     revise_location,
     revise_script,
     revise_shot,
@@ -104,7 +114,9 @@ from orchestrator.store.json_store import ProjectStore, RecordNotFound
 from .errors import (
     MAPPED,
     AdapterRequestInvalid,
+    CreatorOnly,
     MissingAdapter,
+    OutputInspectionInvalid,
     RequestMismatch,
     describe,
     error_body,
@@ -128,6 +140,14 @@ _LOOPBACK_HOSTNAMES = ("127.0.0.1", "localhost", "[::1]")
 _MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
+def _annotate_recorded_review_failure(exc: Exception, review_id: str) -> None:
+    """Keep the original failure type while identifying the persisted opinion."""
+    message = f"{exc} (approving Review {review_id!r} was recorded and remains immutable)"
+    if isinstance(exc, JobError):
+        exc.message = message
+    exc.args = (message,)
+
+
 class OperationContext:
     """Runtime dependencies and the shared dispatcher used by HTTP and CLI."""
 
@@ -138,9 +158,11 @@ class OperationContext:
         *,
         job_queues: dict[str, JobQueue] | None = None,
         job_runner: JobRunner | None = None,
+        actor: Literal["creator", "agent"] = "agent",
     ) -> None:
         self.settings = settings
         self.root = root
+        self.actor = actor
         self.job_queues = job_queues or {}
         self._runtime: _DefaultRuntime | None = None
         if job_runner is None and root is not None:
@@ -169,6 +191,14 @@ class OperationContext:
         return ProjectStore(self._project_root(project_id, create=create))
 
     def invoke(self, operation: str, data: dict[str, Any]) -> Any:
+        declared = next((item for item in OPERATIONS if item.name == operation), None)
+        if (
+            declared is not None
+            and declared.creator_only
+            and self.actor == "agent"
+            and not self.settings.approvals.agent_may_approve
+        ):
+            raise CreatorOnly()
         if operation == "health":
             return {"status": "ok"}
         if operation == "create_project":
@@ -278,6 +308,184 @@ class OperationContext:
         if operation == "score_rubric":
             scores = RubricScores.model_validate(data.get("scores", data))
             return {"scores": scores.model_dump(mode="json"), "passed": scores.passed()}
+        if operation == "record_review":
+            review = record_review(
+                self._store(data["project_id"]),
+                target_kind=data["target_kind"],
+                target_id=data["target_id"],
+                target_version=data["target_version"],
+                episode_id=data.get("episode_id"),
+                actor=self.actor,
+                approval_state=ShotStatus(data["approval_state"]),
+                comment=data.get("comment", ""),
+                rubric_scores=data.get("rubric_scores", ()),
+                waiver_text=data.get("waiver_text"),
+            )
+            return review.model_dump(mode="json")
+        if operation == "list_reviews":
+            reviews = self._store(data["project_id"]).list_reviews()
+            return [
+                review.model_dump(mode="json")
+                for review in reviews
+                if (data.get("target_kind") is None or review.target_kind == data["target_kind"])
+                and (data.get("target_id") is None or review.target_id == data["target_id"])
+                and (data.get("episode_id") is None or review.episode_id == data["episode_id"])
+            ]
+        if operation == "approve_framing":
+            store = self._store(data["project_id"])
+            review_id = data.get("review_id")
+            recorded_review = None
+            if review_id is None:
+                shot = store.load(Shot, data["shot_id"], episode_id=data["episode_id"])
+                recorded_review = record_review(
+                    store,
+                    target_kind="framing",
+                    target_id=data["shot_id"],
+                    target_version=shot.version,
+                    episode_id=data["episode_id"],
+                    actor=self.actor,
+                    approval_state=ShotStatus.APPROVED,
+                    comment=data.get("comment", ""),
+                )
+                review_id = recorded_review.review_id
+            try:
+                shot = approve_framing(
+                    store,
+                    data["shot_id"],
+                    episode_id=data["episode_id"],
+                    review_id=review_id,
+                    expected_version=data["expected_version"],
+                    agent_may_approve=self.settings.approvals.agent_may_approve,
+                )
+            except Exception as exc:
+                if recorded_review is not None:
+                    _annotate_recorded_review_failure(exc, recorded_review.review_id)
+                raise
+            return shot.model_dump(mode="json")
+        if operation == "approve_shot":
+            store = self._store(data["project_id"])
+            review_id = data.get("review_id")
+            recorded_review = None
+            if review_id is None:
+                shot = store.load(Shot, data["shot_id"], episode_id=data["episode_id"])
+                recorded_review = record_review(
+                    store,
+                    target_kind="shot",
+                    target_id=data["shot_id"],
+                    target_version=shot.version,
+                    episode_id=data["episode_id"],
+                    actor=self.actor,
+                    approval_state=ShotStatus.APPROVED,
+                    comment=data.get("comment", ""),
+                )
+                review_id = recorded_review.review_id
+            try:
+                shot = approve_shot(
+                    store,
+                    data["shot_id"],
+                    episode_id=data["episode_id"],
+                    review_id=review_id,
+                    expected_version=data["expected_version"],
+                    agent_may_approve=self.settings.approvals.agent_may_approve,
+                )
+            except Exception as exc:
+                if recorded_review is not None:
+                    _annotate_recorded_review_failure(exc, recorded_review.review_id)
+                raise
+            return shot.model_dump(mode="json")
+        if operation == "approve_cut":
+            store = self._store(data["project_id"])
+            review_id = data.get("review_id")
+            recorded_review = None
+            if review_id is None:
+                episode_id = data["episode_id"]
+                recorded_review = record_review(
+                    store,
+                    target_kind="episode_cut",
+                    target_id=episode_id,
+                    target_version=data["cut_version"],
+                    episode_id=episode_id,
+                    actor=self.actor,
+                    approval_state=ShotStatus.APPROVED,
+                    comment=data.get("comment", ""),
+                )
+                review_id = recorded_review.review_id
+            try:
+                episode = approve_episode(
+                    store,
+                    data["episode_id"],
+                    cut_version=data["cut_version"],
+                    review_id=review_id,
+                    expected_version=data["expected_version"],
+                    agent_may_approve=self.settings.approvals.agent_may_approve,
+                )
+            except Exception as exc:
+                if recorded_review is not None:
+                    _annotate_recorded_review_failure(exc, recorded_review.review_id)
+                raise
+            return episode.model_dump(mode="json")
+        if operation == "resume_invalidations":
+            resumed = resume_invalidations(self._store(data["project_id"]))
+            return {"resumed": list(resumed)}
+        if operation == "revise_camera_profile":
+            camera_profile = CameraProfile.model_validate(data["camera_profile"])
+            _require_path_match(data, "camera_id", camera_profile.camera_id)
+            invalidated = revise_camera_profile(
+                self._store(data["project_id"]),
+                camera_profile,
+                expected_version=data["expected_version"],
+            )
+            return {
+                "camera_profile": camera_profile.model_dump(mode="json"),
+                "invalidated": list(invalidated),
+            }
+        if operation == "cancel_job":
+            if self.job_runner is None:
+                raise RuntimeError("default JobRunner was not configured")
+            store = self._store(data["project_id"])
+            previous = read_job_record(store._root, data["job_id"])
+            job = self.job_runner.cancel(data["project_id"], data["job_id"])
+            requested = (
+                previous is not None
+                and previous.get("state") not in TERMINAL_STATES
+                and job.state == "cancelled"
+            )
+            return {
+                "job_id": job.job_id,
+                "state": job.state,
+                "cancellation_requested": requested,
+            }
+        if operation == "list_shot_outputs":
+            outputs = self._store(data["project_id"]).list_shot_outputs(
+                data["shot_id"],
+                episode_id=data["episode_id"],
+                record_version=data.get("record_version"),
+                kind=data.get("kind"),
+            )
+            return [output.model_dump(mode="json") for output in outputs]
+        if operation == "list_cuts":
+            outputs = self._store(data["project_id"]).list_episode_outputs(data["episode_id"])
+            return [output.model_dump(mode="json") for output in outputs]
+        if operation == "inspect_output":
+            at_sec = data.get("at_sec", 0.0)
+            valid_at_sec = False
+            if not isinstance(at_sec, bool) and isinstance(at_sec, (int, float)):
+                try:
+                    valid_at_sec = math.isfinite(at_sec) and at_sec >= 0
+                except OverflowError:
+                    valid_at_sec = False
+            if not valid_at_sec:
+                raise OutputInspectionInvalid("at_sec must be finite and greater than or equal to zero")
+            try:
+                return inspect_project_output(
+                    self._store(data["project_id"]),
+                    episode_id=data["episode_id"],
+                    output_id=data["output_id"],
+                    ffmpeg_exe=self.settings.binaries.ffmpeg_exe,
+                    at_sec=float(at_sec),
+                )
+            except FrameUnavailable as exc:
+                raise OutputInspectionInvalid(str(exc)) from exc
         if operation == "export":
             from orchestrator.adapters.export.package import export_project
 
@@ -840,7 +1048,9 @@ def create_app(
             queue_for=runtime, adapters=runtime.registry,
         )
     runner = job_runner
-    context = OperationContext(configured, root, job_queues=job_queues, job_runner=runner)
+    context = OperationContext(
+        configured, root, job_queues=job_queues, job_runner=runner, actor="agent"
+    )
     app = FastAPI(title="CCTV Production Pipeline API", version="0.1.0")
     app.state.settings = configured
     app.state.loopback_token = token
@@ -962,8 +1172,18 @@ def _register_operation(app: FastAPI, operation: Operation, context: OperationCo
         if files:
             data["uploads"] = [await _describe_upload(item) for item in files]
         if operation.name == "export":
-            # The request waits for the package, while copies and FFmpeg run off the event loop.
+            # Packaging runs off the event loop.
             return await run_in_threadpool(operation.invoke, context, data)
+        if operation.name == "inspect_output":
+            # Frame decoding runs off the event loop.
+            result = await run_in_threadpool(operation.invoke, context, data)
+            if not isinstance(result, bytes):
+                raise RuntimeError("output inspection service returned non-binary image data")
+            return Response(
+                content=result,
+                media_type="image/png",
+                headers={"X-Content-Type-Options": "nosniff"},
+            )
         result = operation.invoke(context, data)
         if operation.name == "asset_browser":
             return HTMLResponse(content=_asset_browser_html(result), media_type="text/html")
@@ -1008,7 +1228,8 @@ def _register_operation(app: FastAPI, operation: Operation, context: OperationCo
                     annotation=Annotated[model_field.annotation, Form()],
                 ))
     elif operation.name in {"search_assets", "asset_browser", "list_asset_categories",
-                            "asset_preview", "inspect_take_pauses"}:
+                            "asset_preview", "inspect_take_pauses", "list_reviews",
+                            "list_shot_outputs", "inspect_output"}:
         for name, model_field in operation.request_model.model_fields.items():
             default = (
                 Parameter.empty if model_field.is_required()
@@ -1048,6 +1269,15 @@ def _register_operation(app: FastAPI, operation: Operation, context: OperationCo
                       name=operation.name, operation_id=operation.name,
                       summary=operation.summary, response_model=None, include_in_schema=True,
                       status_code=202 if operation.name in ASYNC_ADAPTER_OPERATIONS else 200,
+                      # These two answer with image bytes, not JSON; say so in OpenAPI so a
+                      # generated client picks the right decoder. A plain Response class
+                      # stops FastAPI adding its default application/json entry beside them.
+                      response_class=(Response if operation.name in {"inspect_output", "asset_preview"}
+                                      else JSONResponse),
+                      responses=({200: {"content": {"image/png": {}}}}
+                                 if operation.name == "inspect_output"
+                                 else {200: {"content": {"image/jpeg": {}, "image/png": {}, "image/webp": {}}}}
+                                 if operation.name == "asset_preview" else None),
                       openapi_extra={"parameters": [{
                           "name": "X-Loopback-Token",
                           "in": "header",

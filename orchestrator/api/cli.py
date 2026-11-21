@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Sequence
 from pathlib import Path
@@ -116,8 +117,15 @@ def _command_callback(operation_name: str):
                 if configured.project_root.is_dir()
                 else None
             )
-            operation_context = OperationContext(configured, root)
+            operation_context = OperationContext(configured, root, actor="creator")
             result = operation_context.invoke(operation_name, payload)
+            if operation_name == "inspect_output":
+                if not isinstance(result, bytes):
+                    raise RuntimeError("output inspection service returned non-binary image data")
+                result = {
+                    "media_type": "image/png",
+                    "data_base64": base64.b64encode(result).decode("ascii"),
+                }
             if operation_name in ASYNC_ADAPTER_OPERATIONS and wait_for_job:
                 submitted = result
                 job = operation_context.job_runner.wait(payload["project_id"], result["job_id"])

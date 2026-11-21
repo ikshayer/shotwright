@@ -22,9 +22,11 @@ from orchestrator.domain.entities import (
     Location,
     PostProfile,
     Project,
+    ReviewTargetKind,
     RubricScores,
     Script,
     Shot,
+    ShotOutputKind,
     VoiceConsent,
 )
 from orchestrator.adapters.perfedit import PauseDetection
@@ -87,6 +89,63 @@ class ShotProposal(BaseModel):
 
 class RubricRequest(BaseModel):
     scores: RubricScores
+
+
+class ReviewRecording(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_kind: ReviewTargetKind
+    target_id: str
+    target_version: int = Field(ge=1)
+    episode_id: str | None = None
+    approval_state: Literal["approved", "rejected"]
+    comment: str = ""
+    rubric_scores: list[RubricScores] = Field(default_factory=list)
+    waiver_text: str | None = None
+
+
+class ReviewListQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_kind: ReviewTargetKind | None = None
+    target_id: str | None = None
+    episode_id: str | None = None
+
+
+class ApprovalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=1)
+    review_id: str | None = None
+    comment: str = ""
+
+
+class CutApprovalRequest(ApprovalRequest):
+    cut_version: int = Field(ge=1)
+
+
+class EmptyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class CameraProfileRevision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    camera_profile: CameraProfile
+    expected_version: int = Field(ge=1)
+
+
+class ShotOutputsQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    record_version: int | None = Field(None, ge=1)
+    kind: ShotOutputKind | None = None
+
+
+class InspectOutputQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    at_sec: float = Field(0.0, ge=0, allow_inf_nan=False)
 
 
 class ProjectExportRequest(BaseModel):
@@ -187,6 +246,8 @@ class Operation:
     invoke: Callable[[Any, dict[str, Any]], Any]
     #: Declares a multipart surface carrying uploaded files instead of a JSON body.
     upload: bool = False
+    #: Restricts approvals to creator-authored CLI calls unless explicitly configured.
+    creator_only: bool = False
 
 
 def _call(name: str) -> Callable[[Any, dict[str, Any]], Any]:
@@ -246,6 +307,17 @@ OPERATIONS = (
     Operation("report_jobs", "GET", "/projects/{project_id}/jobs", "List every job record in the project, sorted by job_id, with its state (no filtering). Poll this after an asynchronous tool answers 202 with a job_id.", False, "jobs.queue", None, _call("report_jobs")),
     Operation("apply_typed_feedback", "POST", "/projects/{project_id}/feedback", "Not implemented yet: always answers 501 missing_adapter. Do not call it; revise the script, shot or location directly instead.", True, "service.apply_typed_feedback", OpenRequest, _call("apply_typed_feedback")),
     Operation("score_rubric", "POST", "/projects/{project_id}/rubric/score", "Score one sample against the five yes/no realism criteria and report whether it passes; nothing is stored. payload {scores: {mount_inferable, plausible_place, no_unmotivated_movement, stable_light_and_geometry, integrated_anomaly}}, all booleans. passed is true when at least 4 of 5 hold and no_unmotivated_movement is one of them.", True, "domain.entities.RubricScores", RubricRequest, _call("score_rubric")),
+    Operation("record_review", "POST", "/projects/{project_id}/reviews", "Record an immutable creator or agent opinion about an existing target version. Send target_kind, target_id, target_version, optional episode_id, approval_state, comment, rubric_scores and waiver_text; the target version must already exist. Returns the dated Review and never changes approval state.", True, "service.approval.record_review", ReviewRecording, _call("record_review")),
+    Operation("list_reviews", "GET", "/projects/{project_id}/reviews", "List dated Reviews in a project, including legacy unscoped records. Query target_kind, target_id and episode_id as exact-match filters; the project must exist. Returns matching Review records in creation order.", False, "store", ReviewListQuery, _call("list_reviews")),
+    Operation("approve_framing", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/framing/approve", "Creator-only: approve pending framing for a Shot after its preview exists. Send expected_version and optional review_id/comment; framing must be pending and have a current preview. Without review_id, an approving Review is recorded first. Returns the updated Shot. Agent approval requires approvals.agent_may_approve=true; otherwise use the CLI.", True, "service.approval.approve_framing", ApprovalRequest, _call("approve_framing"), creator_only=True),
+    Operation("approve_shot", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/approve", "Creator-only: approve a Shot after its dependencies are current and framing is approved or not required. Send expected_version and optional review_id/comment; the Shot and its exact Review must exist. Without review_id, an approving Review is recorded first. Returns the updated Shot. Agent approval requires approvals.agent_may_approve=true; otherwise use the CLI.", True, "service.approval.approve_shot", ApprovalRequest, _call("approve_shot"), creator_only=True),
+    Operation("approve_cut", "POST", "/projects/{project_id}/episodes/{episode_id}/cut/approve", "Creator-only: approve an Episode cut after its Timeline exists and every Shot is in an approvable state. Send expected_version, cut_version (the Timeline store version), and optional review_id/comment; without review_id, an approving Review is recorded first. Returns the updated Episode. Agent approval requires approvals.agent_may_approve=true; otherwise use the CLI.", True, "service.approval.approve_episode", CutApprovalRequest, _call("approve_cut"), creator_only=True),
+    Operation("resume_invalidations", "POST", "/projects/{project_id}/invalidations/resume", "Resume pending dependency invalidation cascades after a partial upstream revision. Send an empty object; pending cascade plans must be valid. Returns the cascade ids resumed (or an empty list when none are pending).", True, "service.dependencies.resume_invalidations", EmptyRequest, _call("resume_invalidations")),
+    Operation("revise_camera_profile", "POST", "/projects/{project_id}/camera-profiles/{camera_id}/revise", "Revise a CameraProfile and check every episode for affected Shots. Send camera_profile and expected_version; camera_id must match the path and expected_version is the current mutation token. Returns the revised profile and invalidated shot ids.", True, "service.dependencies.revise_camera_profile", CameraProfileRevision, _call("revise_camera_profile")),
+    Operation("cancel_job", "POST", "/projects/{project_id}/jobs/{job_id}/cancel", "Request cancellation of any existing project job. Send an empty object; the JobRunner must know the job id. Returns job_id, state and whether cancellation was requested (false when the job is already terminal).", True, "service.runner.JobRunner.cancel", EmptyRequest, _call("cancel_job")),
+    Operation("list_shot_outputs", "GET", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/outputs", "List verified output receipts for a Shot across its versions. Query optional record_version and kind filters; the Episode must exist. Returns matching ShotOutput records in append order.", False, "store", ShotOutputsQuery, _call("list_shot_outputs")),
+    Operation("list_cuts", "GET", "/projects/{project_id}/episodes/{episode_id}/cuts", "List verified rendered cut receipts for an Episode. The Episode must exist. Returns its EpisodeOutput records in append order.", False, "store", None, _call("list_cuts")),
+    Operation("inspect_output", "GET", "/projects/{project_id}/episodes/{episode_id}/outputs/{output_id}/frame", "Inspect one hash-verified output frame. Query at_sec (finite and non-negative; images ignore it); the output id must exist in the Episode. Preview, still, generated images, masters, degraded videos, generated videos and cuts return a PNG; scene outputs require render_preview.", False, "service.inspect.inspect_output", InspectOutputQuery, _call("inspect_output")),
     Operation("export", "POST", "/projects/{project_id}/export", "Export an approved episode cut and its portable project source package: delivery.mp4 plus a project snapshot under exports/{export_id}. payload {episode_id, cut_output_id, expected_version}: cut_output_id is a cut in the Episode's outputs and expected_version is the Episode's mutation token. The cut must match the current Timeline and the episode must carry its cut approval.", True, "adapters.export.package", ProjectExportRequest, _call("export")),
 )
 
