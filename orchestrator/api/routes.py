@@ -155,6 +155,33 @@ class InspectOutputQuery(BaseModel):
     at_sec: float = Field(0.0, ge=0, allow_inf_nan=False)
 
 
+class ContactSheetQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    frames: int = Field(9, ge=2, le=16)
+    times: str | None = None
+    mode: Literal["frames", "difference"] = "frames"
+
+
+class OutputMetricsQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    samples: int = Field(12, ge=1, le=60)
+
+
+class RubricEvaluationEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    index: int = Field(ge=0, strict=True)
+    scores: RubricScores
+
+
+class RubricEvaluationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scores: list[RubricEvaluationEntry]
+
+
 class ProjectExportRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -326,6 +353,11 @@ OPERATIONS = (
     Operation("list_shot_outputs", "GET", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/outputs", "List verified output receipts for a Shot across its versions. Query optional record_version and kind filters; the Episode must exist. Returns matching ShotOutput records in append order.", False, "store", ShotOutputsQuery, _call("list_shot_outputs")),
     Operation("list_cuts", "GET", "/projects/{project_id}/episodes/{episode_id}/cuts", "List verified rendered cut receipts for an Episode. The Episode must exist. Returns its EpisodeOutput records in append order.", False, "store", None, _call("list_cuts")),
     Operation("inspect_output", "GET", "/projects/{project_id}/episodes/{episode_id}/outputs/{output_id}/frame", "Inspect one hash-verified output frame. Query at_sec (finite and non-negative; images ignore it); the output id must exist in the Episode. Preview, still, generated images, masters, degraded videos, generated videos and cuts return a PNG; scene outputs require render_preview.", False, "service.inspect.inspect_output", InspectOutputQuery, _call("inspect_output")),
+    Operation("contact_sheet", "GET", "/projects/{project_id}/episodes/{episode_id}/outputs/{output_id}/contact-sheet", "Return a labelled PNG contact sheet from a hash-verified video output. Send frames (2–16), optional ascending times (2–16 seconds values), and mode=frames or difference; the output receipt must exist and identify a supported video. For rubric review, first call rubric_sample, then pass its sample times here (or inspect_output for each sample); evaluate with evaluate_rubric and record the opinion with record_review.", False, "service.perception.contact_sheet", ContactSheetQuery, _call("contact_sheet")),
+    Operation("rubric_sample", "GET", "/projects/{project_id}/episodes/{episode_id}/cuts/{output_id}/rubric-sample", "Return the deterministic FR-22 sample plan for one verified cut, using its pinned Timeline and Shot versions where available. The cut must exist in list_cuts. Use contact_sheet with the returned times (or inspect_output per sample), submit scores to evaluate_rubric, then record the result with record_review.", False, "service.perception.rubric_sample", None, _call("rubric_sample")),
+    Operation("evaluate_rubric", "POST", "/projects/{project_id}/episodes/{episode_id}/cuts/{output_id}/rubric-evaluate", "Evaluate one RubricScores object for every index in rubric_sample's plan; extra fields are forbidden and missing or extra indices answer 422. The verified cut must still exist. Returns the pass verdict and per-sample results without storing them; record the outcome with record_review (target_kind=episode_cut, rubric_scores, and creator waiver_text for a failing cut).", True, "service.perception.evaluate_rubric", RubricEvaluationRequest, _call("evaluate_rubric")),
+    Operation("measure_output", "GET", "/projects/{project_id}/episodes/{episode_id}/outputs/{output_id}/metrics", "Measure a hash-verified output's container, sampled luma and flicker, saturation, edge energy, active image area, scene changes, and audio loudness (LUFS), range and true peak, or image luma metrics. Send samples (1–60) for video; the output receipt must exist. Returns the metrics. For rubric review, use rubric_sample, then contact_sheet or inspect_output, evaluate_rubric and record_review.", False, "service.perception.measure_output", OutputMetricsQuery, _call("measure_output")),
+    Operation("measure_asset", "GET", "/projects/{project_id}/assets/{asset_id}/metrics", "Measure loudness (LUFS), loudness range, true peak and silence intervals for a registered local audio Asset after verifying its checksum. The Asset must be an audio or voice type with a supported local file. Returns container and audio metrics; use them with rubric_sample, contact_sheet or inspect_output, evaluate_rubric and record_review when reviewing a cut.", False, "service.perception.measure_asset", None, _call("measure_asset")),
     Operation("export", "POST", "/projects/{project_id}/export", "Export an approved episode cut and its portable project source package: delivery.mp4 plus a project snapshot under exports/{export_id}. payload {episode_id, cut_output_id, expected_version}: cut_output_id is a cut in the Episode's outputs and expected_version is the Episode's mutation token. The cut must match the current Timeline and the episode must carry its cut approval.", True, "adapters.export.package", ProjectExportRequest, _call("export")),
 )
 

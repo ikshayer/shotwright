@@ -70,6 +70,14 @@ from orchestrator.service.approval import (
     record_review,
 )
 from orchestrator.service.inspect import FrameUnavailable, inspect_output as inspect_project_output
+from orchestrator.service.perception import (
+    PerceptionInvalid,
+    contact_sheet as build_contact_sheet,
+    evaluate_rubric as evaluate_cut_rubric,
+    measure_asset as measure_audio_asset,
+    measure_output as measure_project_output,
+    rubric_sample as build_rubric_sample,
+)
 from orchestrator.service.dependencies import (
     create_camera_profile,
     create_episode,
@@ -496,6 +504,58 @@ class OperationContext:
                     at_sec=float(at_sec),
                 )
             except FrameUnavailable as exc:
+                raise OutputInspectionInvalid(str(exc)) from exc
+        if operation == "contact_sheet":
+            try:
+                return build_contact_sheet(
+                    self._store(data["project_id"]),
+                    episode_id=data["episode_id"],
+                    output_id=data["output_id"],
+                    ffmpeg_exe=self.settings.binaries.ffmpeg_exe,
+                    frames=data.get("frames", 9),
+                    times=data.get("times"),
+                    mode=data.get("mode", "frames"),
+                )
+            except PerceptionInvalid as exc:
+                raise OutputInspectionInvalid(str(exc)) from exc
+        if operation == "rubric_sample":
+            try:
+                return build_rubric_sample(
+                    self._store(data["project_id"]),
+                    episode_id=data["episode_id"],
+                    output_id=data["output_id"],
+                )
+            except PerceptionInvalid as exc:
+                raise OutputInspectionInvalid(str(exc)) from exc
+        if operation == "evaluate_rubric":
+            try:
+                return evaluate_cut_rubric(
+                    self._store(data["project_id"]),
+                    episode_id=data["episode_id"],
+                    output_id=data["output_id"],
+                    scores=data["scores"],
+                )
+            except PerceptionInvalid as exc:
+                raise OutputInspectionInvalid(str(exc)) from exc
+        if operation == "measure_output":
+            try:
+                return measure_project_output(
+                    self._store(data["project_id"]),
+                    episode_id=data["episode_id"],
+                    output_id=data["output_id"],
+                    ffmpeg_exe=self.settings.binaries.ffmpeg_exe,
+                    samples=data.get("samples", 12),
+                )
+            except PerceptionInvalid as exc:
+                raise OutputInspectionInvalid(str(exc)) from exc
+        if operation == "measure_asset":
+            try:
+                return measure_audio_asset(
+                    self._store(data["project_id"]),
+                    asset_id=data["asset_id"],
+                    ffmpeg_exe=self.settings.binaries.ffmpeg_exe,
+                )
+            except PerceptionInvalid as exc:
                 raise OutputInspectionInvalid(str(exc)) from exc
         if operation == "export":
             from orchestrator.adapters.export.package import export_project
@@ -1218,16 +1278,18 @@ def _register_operation(app: FastAPI, operation: Operation, context: OperationCo
         if operation.name == "export":
             # Packaging runs off the event loop.
             return await run_in_threadpool(operation.invoke, context, data)
-        if operation.name == "inspect_output":
+        if operation.name in {"inspect_output", "contact_sheet", "measure_output", "measure_asset"}:
             # Frame decoding runs off the event loop.
             result = await run_in_threadpool(operation.invoke, context, data)
-            if not isinstance(result, bytes):
-                raise RuntimeError("output inspection service returned non-binary image data")
-            return Response(
-                content=result,
-                media_type="image/png",
-                headers={"X-Content-Type-Options": "nosniff"},
-            )
+            if operation.name in {"inspect_output", "contact_sheet"}:
+                if not isinstance(result, bytes):
+                    raise RuntimeError(f"{operation.name} service returned non-binary image data")
+                return Response(
+                    content=result,
+                    media_type="image/png",
+                    headers={"X-Content-Type-Options": "nosniff"},
+                )
+            return result
         result = operation.invoke(context, data)
         if operation.name == "asset_browser":
             return HTMLResponse(content=_asset_browser_html(result), media_type="text/html")
@@ -1273,7 +1335,8 @@ def _register_operation(app: FastAPI, operation: Operation, context: OperationCo
                 ))
     elif operation.name in {"search_assets", "asset_browser", "list_asset_categories",
                             "asset_preview", "inspect_take_pauses", "list_reviews",
-                            "list_shot_outputs", "inspect_output"}:
+                            "list_shot_outputs", "inspect_output", "contact_sheet",
+                            "measure_output"}:
         for name, model_field in operation.request_model.model_fields.items():
             default = (
                 Parameter.empty if model_field.is_required()
@@ -1316,10 +1379,10 @@ def _register_operation(app: FastAPI, operation: Operation, context: OperationCo
                       # These two answer with image bytes, not JSON; say so in OpenAPI so a
                       # generated client picks the right decoder. A plain Response class
                       # stops FastAPI adding its default application/json entry beside them.
-                      response_class=(Response if operation.name in {"inspect_output", "asset_preview"}
+                      response_class=(Response if operation.name in {"inspect_output", "contact_sheet", "asset_preview"}
                                       else JSONResponse),
                       responses=({200: {"content": {"image/png": {}}}}
-                                 if operation.name == "inspect_output"
+                                 if operation.name in {"inspect_output", "contact_sheet"}
                                  else {200: {"content": {"image/jpeg": {}, "image/png": {}, "image/webp": {}}}}
                                  if operation.name == "asset_preview" else None),
                       openapi_extra={"parameters": [{

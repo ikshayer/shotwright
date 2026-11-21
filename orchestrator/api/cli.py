@@ -120,9 +120,9 @@ def _command_callback(operation_name: str):
             )
             operation_context = OperationContext(configured, root, actor="creator")
             result = operation_context.invoke(operation_name, payload)
-            if operation_name == "inspect_output":
+            if operation_name in {"inspect_output", "contact_sheet"}:
                 if not isinstance(result, bytes):
-                    raise RuntimeError("output inspection service returned non-binary image data")
+                    raise RuntimeError(f"{operation_name} service returned non-binary image data")
                 result = {
                     "media_type": "image/png",
                     "data_base64": base64.b64encode(result).decode("ascii"),

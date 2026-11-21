@@ -48,6 +48,11 @@ CONTRACT_OPERATIONS = {
     "list shot outputs": r"list.*shot.*output|shot.*output.*list",
     "list cuts": r"list.*cut|cuts",
     "inspect output": r"inspect.*output|output.*inspect",
+    "contact sheet": r"contact.*sheet|sheet.*contact",
+    "rubric sample": r"rubric.*sample|sample.*rubric",
+    "evaluate rubric": r"evaluate.*rubric|rubric.*evaluate",
+    "measure output": r"measure.*output|output.*measure",
+    "measure asset": r"measure.*asset|asset.*measure",
     "export": r"export",
 }
 
