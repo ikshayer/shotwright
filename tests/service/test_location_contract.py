@@ -370,6 +370,9 @@ def test_placement_revision_stales_only_approved_shots_using_that_location(
             review_id=review_id,
             target_id=shot_id,
             target_version=shot.version,
+            target_kind="shot",
+            episode_id="ep1",
+            actor="creator",
             created_at=datetime.now(UTC),
             approval_state=ShotStatus.APPROVED,
         )
@@ -407,7 +410,6 @@ def test_placement_revision_stales_only_approved_shots_using_that_location(
         store,
         revised,
         expected_version=token,
-        episode_ids=["ep1"],
     )
     dependent = store.load(Shot, "approved-dependent", episode_id="ep1")
     unrelated = store.load(Shot, "approved-unrelated", episode_id="ep1")

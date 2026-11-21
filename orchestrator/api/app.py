@@ -233,7 +233,6 @@ class OperationContext:
                 self._store(data["project_id"]),
                 location,
                 expected_version=data["expected_version"],
-                episode_ids=data["episode_ids"],
             )
             return {"location": location.model_dump(mode="json"), "invalidated": list(changed)}
         if operation == "draft_script":
@@ -433,6 +432,7 @@ class OperationContext:
             output = promote_h3_candidate(
                 store, candidate_id=data["candidate_id"], review_id=body.review_id,
                 expected_version=body.expected_version,
+                agent_may_approve=self.settings.approvals.agent_may_approve,
             )
             return output.model_dump(mode="json")
         if operation == "cancel_h3_candidate":

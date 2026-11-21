@@ -43,6 +43,7 @@ def setup_shot(root: ProjectRoot) -> tuple[ProjectStore, Shot, int]:
     store.save(
         Review(
             review_id="r1", target_id=shot.shot_id, target_version=shot.version,
+            target_kind="shot", episode_id=shot.episode_id, actor="creator",
             created_at=datetime(2026, 11, 4, tzinfo=UTC), approval_state=ShotStatus.APPROVED,
         ),
         expected_version=0,

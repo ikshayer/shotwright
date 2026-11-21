@@ -125,12 +125,29 @@ class _Snapshot:
             if episode.episode_id != episode_id or episode.project_id != project.project_id:
                 raise _invalid(f"Episode {episode_id!r} does not match its project and folder")
             timeline_path = f"{directory}/edits/timeline.json"
+            head_token = 0
             if self.resolve(timeline_path)[1].exists():
-                timeline = self.store.load(Timeline, episode_id)
+                timeline, head_token = self.store.load_with_version(Timeline, episode_id)
                 if timeline.episode_id != episode_id:
                     raise _invalid(f"Timeline {timeline_path!r} does not match its Episode")
                 self.capture_json(timeline_path)
                 stems.extend(timeline.audio_tracks)
+            for snapshot_path in self.json_paths(f"{directory}/edits/timelines"):
+                name = snapshot_path.rsplit("/", 1)[-1]
+                if not re.fullmatch(r"\d{6}\.json", name):
+                    raise _invalid(f"unexpected file {snapshot_path!r} in Timeline history")
+                token = int(name[:6])
+                if not head_token:
+                    raise _invalid(f"Timeline history {snapshot_path!r} exists without a Timeline head")
+                if token > head_token:
+                    # An orphan from a save whose head write failed: never a committed
+                    # cut, so it is not part of the project's history.
+                    continue
+                historical = self.store.load_timeline_at(episode_id, token)
+                self.capture_json(snapshot_path)
+                # A historical cut's audio belongs to the package even when the current
+                # Timeline no longer references it.
+                stems.extend(historical.audio_tracks)
             for script in self.directories(f"{directory}/scripts"):
                 self.history(Script, script, script.rsplit("/", 1)[-1], episode_id=episode_id)
             for path in self.directories(f"{directory}/shots"):

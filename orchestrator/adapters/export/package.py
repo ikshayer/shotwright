@@ -42,7 +42,10 @@ def export_project(
     root = store._root
     with store.command():
         project = store.load(Project)
-        selected = _bind_cut(store, episode_id, cut_output_id, expected_version)
+        selected = _bind_cut(
+            store, episode_id, cut_output_id, expected_version,
+            agent_may_approve=settings.approvals.agent_may_approve,
+        )
         if project.project_id != selected.episode.project_id:
             raise _invalid("the selected Episode belongs to a different Project")
         files = plan_snapshot(store)
@@ -61,7 +64,10 @@ def export_project(
     try:
         staged_root = ProjectRoot(root.make_dir(f"{stage}/project"))
         copied = [_copy_file(root, staged_root, item) for item in files]
-        _verify_reopen(staged_root, project, selected, expected_version)
+        _verify_reopen(
+            staged_root, project, selected, expected_version,
+            agent_may_approve=settings.approvals.agent_may_approve,
+        )
 
         temporary = root.make_dir(f"{stage}/.media-tmp")
         output_path = staged_root.write_with(_DELIVERY, lambda path: None)
@@ -110,7 +116,10 @@ def export_project(
         root.write_bytes(f"{stage}/export.json", _json_bytes(record))
 
         with store.command():
-            current = _bind_cut(store, episode_id, cut_output_id, expected_version)
+            current = _bind_cut(
+                store, episode_id, cut_output_id, expected_version,
+                agent_may_approve=settings.approvals.agent_may_approve,
+            )
             if current != selected:
                 raise _invalid("the Episode, Timeline, cut receipt, or approval changed during export")
             _canonical_path(root, package)
@@ -140,6 +149,7 @@ def export_project(
 
 def _bind_cut(
     store: ProjectStore, episode_id: str, cut_output_id: str, expected_version: int,
+    *, agent_may_approve: bool,
 ) -> BoundCut:
     episode, token = store.load_with_version(Episode, episode_id)
     if token != expected_version:
@@ -167,7 +177,14 @@ def _bind_cut(
     if review.review_id != episode.approval_review_id:
         raise _invalid("gate-C approval Review identity disagrees with the Episode")
     try:
-        check_review_approval(review, target_id=episode_id, target_version=timeline_version)
+        check_review_approval(
+            review,
+            target_kind="episode_cut",
+            target_id=episode_id,
+            target_version=timeline_version,
+            episode_id=episode_id,
+            agent_may_approve=agent_may_approve,
+        )
     except ReviewApprovalError as exc:
         raise _invalid(f"gate-C approval Review does not match the selected cut: {exc}") from exc
     return BoundCut(episode, timeline, timeline_version, selected, review)
@@ -228,12 +245,22 @@ def _file_evidence(root: ProjectRoot, relative: str) -> dict[str, object]:
     return {"path": relative, "sha256": digest, "size_bytes": size}
 
 
-def _verify_reopen(destination: ProjectRoot, expected: Project, cut: BoundCut, expected_version: int) -> None:
+def _verify_reopen(
+    destination: ProjectRoot,
+    expected: Project,
+    cut: BoundCut,
+    expected_version: int,
+    *,
+    agent_may_approve: bool,
+) -> None:
     reopened = ProjectStore(destination)
     if reopened.load(Project) != expected:
         raise JobError(JobErrorKind.CORRUPT_ARTIFACT,
                        "the packaged project does not reopen as the snapshotted Project")
-    rebound = _bind_cut(reopened, cut.episode.episode_id, cut.output.output_id, expected_version)
+    rebound = _bind_cut(
+        reopened, cut.episode.episode_id, cut.output.output_id, expected_version,
+        agent_may_approve=agent_may_approve,
+    )
     if rebound != cut:
         raise JobError(JobErrorKind.CORRUPT_ARTIFACT,
                        "the packaged Episode, Timeline, cut receipt, or approval is inconsistent")

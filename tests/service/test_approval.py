@@ -17,9 +17,13 @@ def store(tmp_path):
     return ProjectStore(ProjectRoot(tmp_path))
 
 
-def review(review_id="r1", *, target="s1", version=1, state=ShotStatus.APPROVED):
+def review(
+    review_id="r1", *, target="s1", version=1, state=ShotStatus.APPROVED,
+    target_kind="shot", episode_id="ep1",
+):
     return Review(
         review_id=review_id, target_id=target, target_version=version,
+        target_kind=target_kind, episode_id=episode_id, actor="creator",
         created_at=datetime.now(UTC), approval_state=state,
     )
 
@@ -68,7 +72,8 @@ def test_approval_rejects_invalid_review(store, record):
 def test_approve_episode_review_targets_cut_version(store):
     episode = Episode(episode_id="ep1", project_id="p1", number=1, duration_target_sec=30)
     store.save(episode, expected_version=0)
-    store.save(review("gate", target="ep1", version=3), expected_version=0)
+    store.save(review("gate", target="ep1", version=3,
+                      target_kind="episode_cut", episode_id="ep1"), expected_version=0)
 
     result = approve_episode(store, "ep1", cut_version=3, review_id="gate", expected_version=1)
 
@@ -78,7 +83,7 @@ def test_approve_episode_review_targets_cut_version(store):
 def test_approve_style_bible_review_targets_its_version(store):
     bible = StyleBible(project_id="p1")
     store.create(bible)
-    store.save(review("style", target="p1"), expected_version=0)
+    store.save(review("style", target="p1", target_kind="style_bible", episode_id=None), expected_version=0)
 
     result = approve_style_bible(store, "p1", review_id="style", expected_version=1)
 

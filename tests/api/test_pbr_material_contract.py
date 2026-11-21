@@ -35,7 +35,7 @@ def test_location_api_accepts_nested_material_overrides_and_rejects_stale_revisi
         "maps": {"base_color": "wall-albedo"}, "uv_scale": [1.0, 1.0],
         "normal_strength": 1.0, "ao_strength": 0.0,
     }}}
-    body = {"location": revised, "expected_version": 1, "episode_ids": ["ep1"]}
+    body = {"location": revised, "expected_version": 1}
     ok = client.post("/projects/p1/locations/api-pbr-room/revise", headers=headers, json=body)
     assert ok.status_code == 200, f"nested Location revision failed: {ok.status_code} {ok.text}"
     stale = client.post("/projects/p1/locations/api-pbr-room/revise", headers=headers, json=body)

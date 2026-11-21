@@ -22,8 +22,16 @@ from orchestrator.domain.entities import (
     ShotOutputKind,
 )
 from orchestrator.domain.state import ReviewApprovalError, check_review_approval
+from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.platform.settings import Settings
 from orchestrator.store.json_store import ProjectStore, RecordNotFound, VersionConflict
+
+
+class _H3ApprovalJobError(JobError, H3RequestError):
+    """Review binding failure as INVALID_MANIFEST and the existing H3 request error."""
+
+    def __init__(self, cause: ReviewApprovalError) -> None:
+        super().__init__(JobErrorKind.INVALID_MANIFEST, str(cause), cause=cause)
 
 
 class H3GenerateBody(BaseModel):
@@ -280,8 +288,14 @@ def _h3_engine_build(report: dict) -> str:
     return f"comfyui {version}+{commit}"
 
 
-def promote_h3_candidate(store: ProjectStore, *, candidate_id: str, review_id: str,
-                         expected_version: int) -> ShotOutput:
+def promote_h3_candidate(
+    store: ProjectStore,
+    *,
+    candidate_id: str,
+    review_id: str,
+    expected_version: int,
+    agent_may_approve: bool = False,
+) -> ShotOutput:
     """Append a GENERATED ShotOutput for an approved, hash-verified H3 candidate.
 
     The candidate is never mutated: promotion creates a new record that references it.
@@ -300,10 +314,16 @@ def promote_h3_candidate(store: ProjectStore, *, candidate_id: str, review_id: s
         except RecordNotFound as exc:
             raise H3RequestError(f"promotion Review {review_id!r} does not exist") from exc
         try:
-            check_review_approval(review, target_id=candidate_id,
-                                  target_version=candidate.shot_version)
+            check_review_approval(
+                review,
+                target_kind="h3_candidate",
+                target_id=candidate_id,
+                target_version=candidate.shot_version,
+                episode_id=candidate.episode_id,
+                agent_may_approve=agent_may_approve,
+            )
         except ReviewApprovalError as exc:
-            raise H3RequestError(str(exc)) from exc
+            raise _H3ApprovalJobError(exc) from exc
 
         # D2 widened `_BASELINE_SHAPES` so a production shape needs no flag. A candidate
         # still carrying one is therefore an off-spec probe, and `experimental` keeps

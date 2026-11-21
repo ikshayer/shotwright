@@ -176,6 +176,7 @@ def test_reference_end_must_follow_start():
 def make_review(state) -> Review:
     return Review(
         review_id="rev-1", target_id="S1", target_version=1,
+        target_kind="shot", episode_id="ep1", actor="creator",
         created_at=NOW, approval_state=state,
     )
 

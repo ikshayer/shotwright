@@ -375,6 +375,9 @@ def test_dropped_frames_flow_from_delivery_receipt_into_assembled_timeline(env) 
             review_id=review_id,
             target_id=shot.shot_id,
             target_version=shot.version,
+            target_kind="shot",
+            episode_id=shot.episode_id,
+            actor="creator",
             created_at=datetime.now(UTC),
             approval_state=ShotStatus.APPROVED,
         ),
@@ -536,6 +539,7 @@ def test_rebuild_revision_during_run_keeps_artifact_and_does_not_approve_success
     original = _shot(env.store)
     env.store.save(Review(
         review_id="review-v1", target_id="s1", target_version=1,
+        target_kind="shot", episode_id="ep1", actor="creator",
         created_at=datetime(2026, 11, 5, tzinfo=UTC), approval_state=ShotStatus.APPROVED,
     ), expected_version=0)
     env.runner.submit("p1", env.request())

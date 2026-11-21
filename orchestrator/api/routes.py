@@ -63,9 +63,10 @@ class LocationCreation(BaseModel):
 
 
 class LocationRevision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     location: Location
     expected_version: int = Field(ge=1)
-    episode_ids: list[str]
 
 
 class CameraProfileCreation(BaseModel):
@@ -210,7 +211,7 @@ OPERATIONS = (
     Operation("create_audio_post_profile", "POST", "/projects/{project_id}/audio-post-profiles/{profile_name}", "Create an audio post profile: a versioned, seeded voice degradation chain, pinned to the installed FFmpeg", True, "service.audiopost", AudioPostProfileCreation, _call("create_audio_post_profile")),
     Operation("create_episode", "POST", "/projects/{project_id}/episodes", "Create an episode in an existing project. payload {episode: Episode}: episode_id, project_id (must match the path), number (1 or more) and duration_target_sec (the authoritative runtime). Shots are added later by propose_shots or derive_script_scene_plan. An existing episode_id answers 409.", True, "service.dependencies.create_episode", EpisodeCreation, _call("create_episode")),
     Operation("create_location", "POST", "/projects/{project_id}/locations/{location_id}", "Create a project Location (version 1): the room a shot is set in, with its base shell and asset placements. payload {location: Location}: location_id must match the path; base_shell is american_living_room, scene_look is bright or low_key, and placements position assets by asset_id. An existing location_id answers 409. derive_script_scene_plan creates Locations from Script.scenes itself, so use this only for a standalone room.", True, "service.dependencies.create_location", LocationCreation, _call("create_location")),
-    Operation("revise_location", "POST", "/projects/{project_id}/locations/{location_id}/revise", "Revise a Location and invalidate the shots built on it. payload {location, expected_version, episode_ids}: location is the full successor (version + 1, supersedes = the current version, no approval), expected_version is the current mutation token (a 409 version_conflict reports it as actual), and episode_ids are the episodes whose shots to check; shots in unlisted episodes are not invalidated. A rebuild-relevant change marks affected approved shots stale and clears the episode's approved cut. Returns the location and the shot_ids invalidated.", True, "service.dependencies.revise_location", LocationRevision, _call("revise_location")),
+    Operation("revise_location", "POST", "/projects/{project_id}/locations/{location_id}/revise", "Revise a Location and invalidate the shots built on it. payload {location, expected_version}: location is the full successor (version + 1, supersedes = the current version, no approval), expected_version is the current mutation token (a 409 version_conflict reports it as actual), and every episode in the project is checked. A rebuild-relevant change marks affected approved shots stale and clears the episode's approved cut. Returns the location and the shot_ids invalidated.", True, "service.dependencies.revise_location", LocationRevision, _call("revise_location")),
     Operation("list_projects", "GET", "/projects", "List every project as its full Project record (read-only). Start here to find a project_id.", False, "store", None, _call("list_projects")),
     Operation("load_project", "GET", "/projects/{project_id}", "Load one project's Project record (read-only); answers 404 if it does not exist.", False, "store", None, _call("load_project")),
     Operation("draft_script", "POST", "/projects/{project_id}/episodes/{episode_id}/scripts/draft", "Save an agent-written Script as version 1; it generates and invalidates nothing. payload {script: Script}: script_id, episode_id (must match the path), logline, beats (beat_id, target_sec, subtlety 1-5, optional narration_text, caption_text and scene_direction), beat_to_shot and scenes (embedded Location blueprints). The episode must exist. An existing script_id answers 409; use revise_script after the first draft.", True, "service.dependencies.draft_script", ScriptDraft, _call("draft_script")),

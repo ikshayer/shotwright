@@ -78,6 +78,7 @@ def _setup(tmp_path, *, experimental=False, report=None, av=AV_BYTES):
 
 def _review(review_id, target_id, state, *, target_version=1):
     return Review(review_id=review_id, target_id=target_id, target_version=target_version,
+                  target_kind="h3_candidate", episode_id="ep1", actor="creator",
                   created_at=datetime.now(UTC), approval_state=state)
 
 

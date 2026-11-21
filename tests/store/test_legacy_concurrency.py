@@ -73,6 +73,9 @@ def _persist_review(root: ProjectRoot, kind: str, entity: LegacyEntity) -> Revie
     review = Review(
         review_id=_review_id(kind, entity.version),
         target_id=target_id, target_version=entity.version,
+        target_kind="shot" if isinstance(entity, Shot) else "style_bible",
+        episode_id=entity.episode_id if isinstance(entity, Shot) else None,
+        actor="creator",
         created_at=datetime(2026, 11, 4, tzinfo=UTC),
         approval_state=ShotStatus.APPROVED,
     )

@@ -162,7 +162,7 @@ def revision_setup(store, kind):
         store.create(before)
         after = before.model_copy(update=before.next_version())
         call = lambda entity, expected: revise_location(
-            store, entity, expected_version=expected, episode_ids=["ep1"])
+            store, entity, expected_version=expected)
         expected = token(store, Location, "hall")
     else:
         before, expected = store.load_with_version(Shot, "s1", episode_id="ep1")
@@ -487,7 +487,7 @@ def test_nonimpacting_revisions_preserve_gate_and_allow_review_content_approval(
         if kind == "profile-post-only":
             updates["bitrate_kbps"] = 900
         after = before.model_copy(update=updates)
-        changed = revise_camera_profile(store, after, expected_version=1, episode_ids=["ep1"])
+        changed = revise_camera_profile(store, after, expected_version=1)
     assert changed == ()
     reopened = ProjectStore(root)
     assert reopened.load_with_version(Episode, "ep1") == gate_before
@@ -520,12 +520,12 @@ def test_changed_ids_name_only_actual_approved_to_stale_transitions(project, kin
         before = Location(location_id="hall")
         store.create(before)
         changed = revise_location(store, before.model_copy(update={**before.next_version(), "geometry_provenance": "new"}),
-                                  expected_version=1, episode_ids=["ep1"])
+                                  expected_version=1)
     elif kind == "CameraProfile":
         before = CameraProfile(camera_id="cam", profile_name="CCTV")
         store.create(before)
         changed = revise_camera_profile(store, before.model_copy(update={**before.next_version(), "exposure_ev": 2}),
-                                        expected_version=1, episode_ids=["ep1"])
+                                        expected_version=1)
     else:
         before = Script(script_id="sc", episode_id="ep1", logline="night",
                         beats=[Beat(beat_id="b", target_sec=5, subtlety=2)])

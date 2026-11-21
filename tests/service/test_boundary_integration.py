@@ -17,8 +17,12 @@ def store(tmp_path):
     return ProjectStore(ProjectRoot(tmp_path))
 
 
-def persist_review(store, review_id, target_id, *, version=1, state=ShotStatus.APPROVED):
+def persist_review(
+    store, review_id, target_id, *, version=1, state=ShotStatus.APPROVED,
+    target_kind="shot", episode_id="ep1",
+):
     record = Review(review_id=review_id, target_id=target_id, target_version=version,
+                    target_kind=target_kind, episode_id=episode_id, actor="creator",
                     created_at=datetime(2026, 11, 4, tzinfo=UTC), approval_state=state)
     store.save(record, expected_version=0)
     return record
@@ -38,7 +42,8 @@ def reviewable_shot(store, shot_id="s1", **overrides):
 
 def approve_record(store, record):
     review_id = f"r-{record.shot_id}"
-    persist_review(store, review_id, record.shot_id, version=record.version)
+    persist_review(store, review_id, record.shot_id, version=record.version,
+                   episode_id=record.episode_id)
     return approve_shot(store, record.shot_id, episode_id=record.episode_id,
                         review_id=review_id, expected_version=store.load_with_version(Shot, record.shot_id, episode_id=record.episode_id)[1])
 
@@ -61,7 +66,8 @@ def test_shot_approval_roundtrips_real_review_and_exact_binding(store, tmp_path)
 
 def test_episode_cut_approval_roundtrips_persisted_review(store, tmp_path):
     add_episode(store)
-    persist_review(store, "gate", "ep1", version=3)
+    persist_review(store, "gate", "ep1", version=3,
+                   target_kind="episode_cut", episode_id="ep1")
     approve_episode(store, "ep1", cut_version=3, review_id="gate", expected_version=1)
     reopened = ProjectStore(ProjectRoot(tmp_path))
     loaded = reopened.load(Episode, "ep1")
@@ -71,7 +77,7 @@ def test_episode_cut_approval_roundtrips_persisted_review(store, tmp_path):
 
 def test_style_approval_roundtrips_persisted_review(store, tmp_path):
     store.create(StyleBible(project_id="p1"))
-    persist_review(store, "style", "p1")
+    persist_review(store, "style", "p1", target_kind="style_bible", episode_id=None)
     approve_style_bible(store, "p1", review_id="style", expected_version=1)
     reopened = ProjectStore(ProjectRoot(tmp_path))
     assert reopened.load(StyleBible, "p1").approval_review_id == "style"
@@ -103,14 +109,15 @@ def test_approval_expected_version_conflict_preserves_record(store, target):
     elif target == "episode":
         add_episode(store)
         before = store.load(Episode, "ep1")
-        persist_review(store, "approval", "ep1", version=3)
+        persist_review(store, "approval", "ep1", version=3,
+                       target_kind="episode_cut", episode_id="ep1")
         operation = lambda: approve_episode(store, "ep1", cut_version=3, review_id="approval",
                                            expected_version=99)
         load = lambda: store.load(Episode, "ep1")
     else:
         before = StyleBible(project_id="p1")
         store.create(before)
-        persist_review(store, "approval", "p1")
+        persist_review(store, "approval", "p1", target_kind="style_bible", episode_id=None)
         operation = lambda: approve_style_bible(store, "p1", review_id="approval",
                                                expected_version=99)
         load = lambda: store.load(StyleBible, "p1")
@@ -127,7 +134,8 @@ def test_mapping_only_revision_retains_artifacts_history_and_revokes_gate_on_reo
     new = approve_record(store, reviewable_shot(store, "new"))
     unrelated = approve_record(store, reviewable_shot(store, "unrelated", beat_id="b2"))
     pending = reviewable_shot(store, "pending", beat_id="b1")
-    persist_review(store, "gate", "ep1", version=4)
+    persist_review(store, "gate", "ep1", version=4,
+                   target_kind="episode_cut", episode_id="ep1")
     approve_episode(store, "ep1", cut_version=4, review_id="gate", expected_version=1)
     before = Script(script_id="script1", episode_id="ep1", logline="Night shift",
                     beats=[Beat(beat_id="b1", target_sec=5, subtlety=2),
@@ -160,7 +168,8 @@ def test_mapping_only_revision_retains_artifacts_history_and_revokes_gate_on_reo
 def test_metadata_only_script_revision_is_persisted_without_staling_or_revoking(store):
     add_episode(store)
     approved = approve_record(store, reviewable_shot(store, dependencies=["b1"]))
-    persist_review(store, "gate", "ep1", version=4)
+    persist_review(store, "gate", "ep1", version=4,
+                   target_kind="episode_cut", episode_id="ep1")
     approve_episode(store, "ep1", cut_version=4, review_id="gate", expected_version=1)
     before = Script(script_id="script1", episode_id="ep1", logline="Night shift",
                     beats=[Beat(beat_id="b1", target_sec=5, subtlety=2)])

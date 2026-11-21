@@ -19,7 +19,15 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from .base import FramingStatus, ShotStatus, VersionedEntity
-from .entities import CameraProfile, Location, Review, Script, Shot, StyleBible
+from .entities import (
+    CameraProfile,
+    Location,
+    Review,
+    ReviewTargetKind,
+    Script,
+    Shot,
+    StyleBible,
+)
 
 S = ShotStatus
 
@@ -122,13 +130,25 @@ class ReviewApprovalError(ValueError):
 def check_review_approval(
     review: Review,
     *,
+    target_kind: ReviewTargetKind,
     target_id: str,
     target_version: int,
+    episode_id: str | None,
+    agent_may_approve: bool,
 ) -> None:
-    """Require a Review to approve exactly ``target_id@target_version``.
+    """Require a Review to approve exactly the scoped requested target version.
 
-    The guard is pure and shared by Shots, StyleBibles, and Episode cut versions.
+    The guard is pure and shared by all approval callers.
     """
+    if review.target_kind is None:
+        raise ReviewApprovalError(
+            f"unscoped legacy Review {review.review_id!r}; record a new Review"
+        )
+    if review.target_kind != target_kind:
+        raise ReviewApprovalError(
+            f"Review {review.review_id!r} targets kind {review.target_kind!r}, "
+            f"not {target_kind!r}"
+        )
     if review.target_id != target_id:
         raise ReviewApprovalError(
             f"Review {review.review_id!r} targets {review.target_id!r}, "
@@ -139,10 +159,20 @@ def check_review_approval(
             f"Review {review.review_id!r} targets version {review.target_version}, "
             f"not version {target_version} of {target_id!r}"
         )
+    if review.episode_id != episode_id:
+        raise ReviewApprovalError(
+            f"Review {review.review_id!r} targets episode {review.episode_id!r}, "
+            f"not episode {episode_id!r}"
+        )
     if review.approval_state is not ShotStatus.APPROVED:
         raise ReviewApprovalError(
             f"Review {review.review_id!r} records {review.approval_state.value}, "
             "not approval"
+        )
+    if review.actor == "agent" and not agent_may_approve:
+        raise ReviewApprovalError(
+            f"Review {review.review_id!r} is an agent-authored opinion; agent Reviews are "
+            "opinions unless approvals.agent_may_approve is enabled"
         )
 
 
