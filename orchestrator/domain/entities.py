@@ -1168,12 +1168,18 @@ class RubricScores(Entity):
         ) >= 4
 
 
+ReviewTargetKind = Literal["shot", "framing", "episode_cut", "style_bible", "h3_candidate", "location"]
+
+
 class Review(Entity):
     """The only writer of approval state (10.1)."""
 
     review_id: str
     target_id: str
     target_version: int = Field(ge=1)
+    target_kind: ReviewTargetKind | None = None
+    episode_id: str | None = Field(None, min_length=1)
+    actor: Literal["creator", "agent"] | None = None
     created_at: datetime
     comment: str = ""
     approval_state: ShotStatus
@@ -1183,6 +1189,20 @@ class Review(Entity):
 
     @model_validator(mode="after")
     def _only_terminal_opinions(self) -> Review:
+        scoped = self.target_kind is not None and self.actor is not None
+        legacy = self.target_kind is None and self.actor is None and self.episode_id is None
+        if not scoped and not legacy:
+            raise ValueError(
+                "a Review must be fully scoped with target_kind and actor, or be a legacy record"
+            )
+        if scoped:
+            if self.target_kind in {"shot", "framing", "episode_cut", "h3_candidate"}:
+                if self.episode_id is None:
+                    raise ValueError(f"a {self.target_kind} Review requires episode_id")
+            elif self.target_kind in {"style_bible", "location"} and self.episode_id is not None:
+                raise ValueError(f"a {self.target_kind} Review must not have episode_id")
+            if self.target_kind == "episode_cut" and self.episode_id != self.target_id:
+                raise ValueError("an episode_cut Review requires episode_id to equal target_id")
         allowed = {ShotStatus.APPROVED, ShotStatus.REJECTED}
         if self.approval_state not in allowed:
             raise ValueError(

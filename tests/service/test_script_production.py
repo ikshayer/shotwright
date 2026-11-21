@@ -206,6 +206,7 @@ def _approve_derived_shot(store, shot, *, review_id="review-shot1"):
         current, token = store.load_with_version(Shot, shot.shot_id, episode_id=shot.episode_id)
     store.save(Review(review_id=review_id, target_id=shot.shot_id,
                       target_version=current.version, created_at=datetime.now(UTC),
+                      target_kind="shot", episode_id=shot.episode_id, actor="creator",
                       approval_state=ShotStatus.APPROVED), expected_version=0)
     return approve_shot(store, shot.shot_id, episode_id=shot.episode_id,
                         review_id=review_id, expected_version=token)

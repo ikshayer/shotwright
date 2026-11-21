@@ -174,6 +174,7 @@ def _approve_fixture_shot(store: ProjectStore, shot_id: str) -> Shot:
         shot, token = store.load_with_version(Shot, shot_id, episode_id=_EPISODE_ID)
     review = Review(
         review_id=f"review-{shot_id}", target_id=shot_id, target_version=shot.version,
+        target_kind="shot", episode_id=_EPISODE_ID, actor="creator",
         created_at=datetime.now(UTC), approval_state=ShotStatus.APPROVED,
     )
     store.save(review, expected_version=0)
@@ -202,7 +203,7 @@ def test_episode_reuses_the_hashed_room_and_rig_then_invalidates_both_shots(
     camera, camera_token = pipeline.store.load_with_version(CameraProfile, _RIG_ID)
     post_only = camera.model_copy(update={**camera.next_version(), "bitrate_kbps": camera.bitrate_kbps + 100})
     assert revise_camera_profile(
-        pipeline.store, post_only, expected_version=camera_token, episode_ids=[_EPISODE_ID],
+        pipeline.store, post_only, expected_version=camera_token,
     ) == ()
 
     second = pipeline.render("second")
@@ -235,7 +236,6 @@ def test_episode_reuses_the_hashed_room_and_rig_then_invalidates_both_shots(
     revision = pipeline.client.post(f"/projects/p1/locations/{_ROOM_ID}/revise", json={
         "location": revised.model_dump(mode="json"),
         "expected_version": token,
-        "episode_ids": [_EPISODE_ID],
     })
     assert revision.status_code == 200, revision.text
     assert set(revision.json()["invalidated"]) == {"first", "second"}

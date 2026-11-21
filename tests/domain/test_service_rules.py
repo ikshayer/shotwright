@@ -11,6 +11,7 @@ from orchestrator.domain.state import ReviewApprovalError, check_review_approval
 
 def opinion(**overrides):
     values = {"review_id": "r1", "target_id": "s1", "target_version": 2,
+              "target_kind": "shot", "episode_id": "ep1", "actor": "creator",
               "created_at": datetime(2026, 11, 4, tzinfo=UTC),
               "approval_state": ShotStatus.APPROVED}
     return Review(**(values | overrides))
@@ -35,7 +36,10 @@ def approved(shot_id, **overrides):
 def test_domain_approval_accepts_exact_target_and_version_without_mutation():
     record = opinion()
     snapshot = record.model_dump()
-    assert check_review_approval(record, target_id="s1", target_version=2) is None
+    assert check_review_approval(
+        record, target_kind="shot", target_id="s1", target_version=2,
+        episode_id="ep1", agent_may_approve=False,
+    ) is None
     assert record.model_dump() == snapshot
 
 
@@ -47,7 +51,10 @@ def test_domain_approval_refuses_wrong_binding_or_opinion(overrides):
     record = opinion(**overrides)
     snapshot = record.model_dump()
     with pytest.raises(ReviewApprovalError) as caught:
-        check_review_approval(record, target_id="s1", target_version=2)
+        check_review_approval(
+            record, target_kind="shot", target_id="s1", target_version=2,
+            episode_id="ep1", agent_may_approve=False,
+        )
     assert str(caught.value)
     assert record.model_dump() == snapshot
 

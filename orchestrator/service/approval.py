@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import uuid
+from collections.abc import Sequence
+from datetime import datetime, timezone
+from typing import Literal
+
 from orchestrator.domain.base import FramingStatus, Invalidation, ShotStatus
 from orchestrator.domain.entities import (
     CameraProfile,
     Episode,
+    H3Candidate,
+    Location,
     Review,
+    ReviewTargetKind,
+    RubricScores,
     Shot,
     ShotOutputKind,
     StyleBible,
@@ -37,17 +46,99 @@ def _blocked_pending(store: ProjectStore) -> tuple[dict, ...]:
     return pending
 
 
-def _review(store: ProjectStore, review_id: str, target_id: str, target_version: int) -> Review:
+def _review(
+    store: ProjectStore,
+    review_id: str,
+    *,
+    target_kind: ReviewTargetKind,
+    target_id: str,
+    target_version: int,
+    episode_id: str | None,
+    agent_may_approve: bool,
+) -> Review:
     try:
         review = store.load(Review, review_id)
     except RecordNotFound as exc:
         raise JobError(JobErrorKind.INVALID_MANIFEST,
                        f"approval Review {review_id!r} does not exist", cause=exc) from exc
     try:
-        check_review_approval(review, target_id=target_id, target_version=target_version)
+        check_review_approval(
+            review,
+            target_kind=target_kind,
+            target_id=target_id,
+            target_version=target_version,
+            episode_id=episode_id,
+            agent_may_approve=agent_may_approve,
+        )
     except ReviewApprovalError as exc:
         raise JobError(JobErrorKind.INVALID_MANIFEST, str(exc), cause=exc) from exc
     return review
+
+
+def record_review(
+    store: ProjectStore,
+    *,
+    target_kind: ReviewTargetKind,
+    target_id: str,
+    target_version: int,
+    episode_id: str | None,
+    actor: Literal["creator", "agent"],
+    approval_state: ShotStatus,
+    comment: str = "",
+    rubric_scores: Sequence[RubricScores] = (),
+    waiver_text: str | None = None,
+    review_id: str | None = None,
+    now: datetime | None = None,
+) -> Review:
+    """Record an immutable opinion about one exact, existing target version."""
+    with store.command():
+        review = Review(
+            review_id=review_id if review_id is not None else uuid.uuid4().hex,
+            target_kind=target_kind,
+            target_id=target_id,
+            target_version=target_version,
+            episode_id=episode_id,
+            actor=actor,
+            created_at=now if now is not None else datetime.now(timezone.utc),
+            comment=comment,
+            approval_state=approval_state,
+            rubric_scores=list(rubric_scores),
+            waiver_text=waiver_text,
+        )
+
+        def missing_target() -> JobError:
+            return JobError(
+                JobErrorKind.INVALID_MANIFEST,
+                f"Review target {target_kind!r} {target_id!r} in Episode "
+                f"{episode_id!r} at version {target_version} does not exist",
+            )
+
+        try:
+            if target_kind in {"shot", "framing"}:
+                shot = store.load(Shot, target_id, episode_id=episode_id, version=target_version)
+                if shot.shot_id != target_id or shot.episode_id != episode_id:
+                    raise missing_target()
+            elif target_kind == "episode_cut":
+                store.load_timeline_at(target_id, target_version)
+            elif target_kind == "style_bible":
+                bible = store.load(StyleBible, target_id, version=target_version)
+                if bible.project_id != target_id:
+                    raise missing_target()
+            elif target_kind == "location":
+                location = store.load(Location, target_id, version=target_version)
+                if location.location_id != target_id:
+                    raise missing_target()
+            else:
+                candidate = store.load(H3Candidate, target_id)
+                if (candidate.episode_id != episode_id
+                        or candidate.shot_version != target_version):
+                    raise missing_target()
+        except RecordNotFound as exc:
+            error = missing_target()
+            error.__cause__ = exc
+            raise error from exc
+        store.save(review, expected_version=0)
+        return review
 
 
 def _fences(store: ProjectStore) -> tuple[tuple[str, str, int], ...]:
@@ -65,7 +156,7 @@ def _domain_error(exc: ReviewApprovalError | TransitionError) -> JobError:
 
 
 def approve_shot(store: ProjectStore, shot_id: str, *, episode_id: str, review_id: str,
-                 expected_version: int) -> Shot:
+                 expected_version: int, agent_may_approve: bool = False) -> Shot:
     """Approve a Shot only after a serialized, commit-adjacent freshness recheck."""
     with store.command():
         _blocked_pending(store)
@@ -73,7 +164,11 @@ def approve_shot(store: ProjectStore, shot_id: str, *, episode_id: str, review_i
         if token != expected_version:
             raise VersionConflict(f"episodes/{episode_id}/shots/{shot_id}", expected_version, token, shot)
         fences = _fences(store)
-        _review(store, review_id, shot_id, shot.version)
+        _review(
+            store, review_id, target_kind="shot", target_id=shot_id,
+            target_version=shot.version, episode_id=episode_id,
+            agent_may_approve=agent_may_approve,
+        )
         try:
             check_dependency_freshness(shot, invalidated=fences)
             check_transition(shot.status, ShotStatus.APPROVED,
@@ -86,7 +181,11 @@ def approve_shot(store: ProjectStore, shot_id: str, *, episode_id: str, review_i
             raise VersionConflict(f"episodes/{episode_id}/shots/{shot_id}", expected_version,
                                   current_token, current)
         _blocked_pending(store)
-        _review(store, review_id, shot_id, current.version)
+        _review(
+            store, review_id, target_kind="shot", target_id=shot_id,
+            target_version=current.version, episode_id=episode_id,
+            agent_may_approve=agent_may_approve,
+        )
         updated = current.model_copy(update={"status": ShotStatus.APPROVED,
                                              "approval_review_id": review_id})
         final_fences = _fences(store)
@@ -104,7 +203,9 @@ def approve_framing(
     shot_id: str,
     *,
     episode_id: str,
+    review_id: str,
     expected_version: int,
+    agent_may_approve: bool = False,
 ) -> Shot:
     """Accept pending FR-29 framing and pin its rebuild-triggering camera values."""
     with store.command():
@@ -119,6 +220,11 @@ def approve_framing(
             and "camera_profile_version" in shot.creator_authored
         ):
             return shot
+        _review(
+            store, review_id, target_kind="framing", target_id=shot_id,
+            target_version=shot.version, episode_id=episode_id,
+            agent_may_approve=agent_may_approve,
+        )
         if shot.framing_status is not FramingStatus.PENDING or not shot.framing_panel_ref:
             raise JobError(
                 JobErrorKind.INVALID_MANIFEST,
@@ -213,12 +319,24 @@ def approve_framing(
             )
         except TransitionError as exc:
             raise _domain_error(exc) from exc
+        current, current_token = store.load_with_version(Shot, shot_id, episode_id=episode_id)
+        if current_token != token or current != shot:
+            raise VersionConflict(
+                f"episodes/{episode_id}/shots/{shot_id}", expected_version,
+                current_token, current,
+            )
+        _review(
+            store, review_id, target_kind="framing", target_id=shot_id,
+            target_version=current.version, episode_id=episode_id,
+            agent_may_approve=agent_may_approve,
+        )
         store.update(updated, expected_version=expected_version)
         return updated
 
 
 def approve_episode(store: ProjectStore, episode_id: str, *, cut_version: int,
-                    review_id: str, expected_version: int) -> Episode:
+                    review_id: str, expected_version: int,
+                    agent_may_approve: bool = False) -> Episode:
     """Approve gate C only when no current Shot or pending cascade makes it stale."""
     with store.command():
         _blocked_pending(store)
@@ -226,7 +344,11 @@ def approve_episode(store: ProjectStore, episode_id: str, *, cut_version: int,
         if token != expected_version:
             raise VersionConflict(f"episodes/{episode_id}/episode.json", expected_version, token, episode)
         shots = _shot_snapshot(store, episode_id)
-        _review(store, review_id, episode_id, cut_version)
+        _review(
+            store, review_id, target_kind="episode_cut", target_id=episode_id,
+            target_version=cut_version, episode_id=episode_id,
+            agent_may_approve=agent_may_approve,
+        )
         try:
             check_cut_approval(pending=False, shots=shots)
         except ReviewApprovalError as exc:
@@ -237,7 +359,11 @@ def approve_episode(store: ProjectStore, episode_id: str, *, cut_version: int,
             raise VersionConflict(f"episodes/{episode_id}/episode.json", expected_version,
                                   current_token, current)
         _blocked_pending(store)
-        _review(store, review_id, episode_id, cut_version)
+        _review(
+            store, review_id, target_kind="episode_cut", target_id=episode_id,
+            target_version=cut_version, episode_id=episode_id,
+            agent_may_approve=agent_may_approve,
+        )
         try:
             check_cut_approval(pending=False, shots=current_shots)
         except ReviewApprovalError as exc:
@@ -255,20 +381,29 @@ def approve_episode(store: ProjectStore, episode_id: str, *, cut_version: int,
 
 
 def approve_style_bible(store: ProjectStore, project_id: str, *, review_id: str,
-                        expected_version: int) -> StyleBible:
+                        expected_version: int,
+                        agent_may_approve: bool = False) -> StyleBible:
     """Bind the current StyleBible content version to its approving Review."""
     with store.command():
         _blocked_pending(store)
         bible, token = store.load_with_version(StyleBible, project_id)
         if token != expected_version:
             raise VersionConflict(f"references/style_bible/{project_id}", expected_version, token, bible)
-        _review(store, review_id, project_id, bible.version)
+        _review(
+            store, review_id, target_kind="style_bible", target_id=project_id,
+            target_version=bible.version, episode_id=None,
+            agent_may_approve=agent_may_approve,
+        )
         current, current_token = store.load_with_version(StyleBible, project_id)
         if current_token != token or current != bible:
             raise VersionConflict(f"references/style_bible/{project_id}", expected_version,
                                   current_token, current)
         _blocked_pending(store)
-        _review(store, review_id, project_id, current.version)
+        _review(
+            store, review_id, target_kind="style_bible", target_id=project_id,
+            target_version=current.version, episode_id=None,
+            agent_may_approve=agent_may_approve,
+        )
         _blocked_pending(store)
         updated = current.model_copy(update={"approval_review_id": review_id})
         store.update(updated, expected_version=expected_version)

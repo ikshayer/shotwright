@@ -403,6 +403,9 @@ def test_revision_rejects_approval_pointer_on_every_type_that_has_one(store, ent
             review_id=review_id,
             target_id=entity.shot_id,
             target_version=entity.version,
+            target_kind="shot",
+            episode_id=entity.episode_id,
+            actor="creator",
             created_at=datetime.now(UTC),
             approval_state=ShotStatus.APPROVED,
         ), expected_version=0)
@@ -420,6 +423,8 @@ def test_revision_rejects_approval_pointer_on_every_type_that_has_one(store, ent
             review_id=review_id,
             target_id=entity.project_id,
             target_version=entity.version,
+            target_kind="style_bible",
+            actor="creator",
             created_at=datetime.now(UTC),
             approval_state=ShotStatus.APPROVED,
         ), expected_version=0)

@@ -274,16 +274,16 @@ def revise_script(store: ProjectStore, revised: Script, *, expected_version: int
         return _revise(store, revised, expected_version)
 
 
-def revise_location(store: ProjectStore, revised: Location, *, expected_version: int,
-                    episode_ids: Iterable[str]) -> tuple[str, ...]:
+def revise_location(store: ProjectStore, revised: Location, *, expected_version: int) -> tuple[str, ...]:
     with store.command():
-        return _revise(store, revised, expected_version, episode_ids)
+        return _revise(store, revised, expected_version, store.episode_directories())
 
 
-def revise_camera_profile(store: ProjectStore, revised: CameraProfile, *, expected_version: int,
-                           episode_ids: Iterable[str]) -> tuple[str, ...]:
+def revise_camera_profile(
+    store: ProjectStore, revised: CameraProfile, *, expected_version: int,
+) -> tuple[str, ...]:
     with store.command():
-        return _revise(store, revised, expected_version, episode_ids)
+        return _revise(store, revised, expected_version, store.episode_directories())
 
 
 def revise_shot(store: ProjectStore, revised: Shot, *, expected_version: int) -> Shot:
@@ -648,7 +648,11 @@ def propose_shots(store: ProjectStore, shots: list[Shot]) -> tuple[Shot, ...]:
                         shot_ids.append(shot_id)
                         known_ids.add(shot_id)
                 if shot_ids != episode.shot_ids:
-                    updated = episode.model_copy(update={"shot_ids": shot_ids})
+                    updated = episode.model_copy(update={
+                        "shot_ids": shot_ids,
+                        "approved_cut_version": None,
+                        "approval_review_id": None,
+                    })
                     store.save(updated, expected_version=token)
 
         written: list[Shot] = []

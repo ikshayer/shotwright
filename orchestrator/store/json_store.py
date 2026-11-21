@@ -286,6 +286,47 @@ class ProjectStore:
                 raise RecordNotFound(f"{cls.__name__} {record_id!r} version {selected} does not exist")
             return self._read_version_snapshot(cls, place, selected)
 
+    def load_timeline_at(self, episode_id: str, store_version: int) -> Timeline:
+        """Load one immutable Timeline snapshot, with a legacy-head fallback."""
+        if type(store_version) is not int or store_version < 1:
+            raise RecordNotFound(
+                f"Timeline for Episode {episode_id!r} store version {store_version!r} does not exist"
+            )
+        with self._lock:
+            current, current_version = self.load_with_version(Timeline, episode_id)
+            # A snapshot above the head token is an orphan from a save whose head write
+            # failed. It was never a committed cut and the next save replaces it, so a
+            # Review must never be able to bind to it.
+            if store_version > current_version:
+                raise RecordNotFound(
+                    f"Timeline for Episode {episode_id!r} store version {store_version} "
+                    f"is not committed (head is {current_version})"
+                )
+            relative = f"episodes/{episode_id}/edits/timelines/{store_version:06d}.json"
+            if store_version == current_version:
+                if current.episode_id != episode_id:
+                    raise _invalid(f"episodes/{episode_id}/edits/timeline.json Episode identity does not match its path")
+                # The head's own snapshot (absent for a legacy head) must agree with it,
+                # or history and head would describe different cuts at the same version.
+                if self._resolve(relative).exists():
+                    snapshot, found_version = self._read_record(Timeline, relative)
+                    if found_version != store_version or snapshot != current:
+                        raise _invalid(f"{relative} disagrees with the Timeline head at the same version")
+                return current
+            try:
+                timeline, found_version = self._read_record(Timeline, relative)
+            except RecordNotFound as exc:
+                raise RecordNotFound(
+                    f"Timeline for Episode {episode_id!r} store version {store_version} does not exist"
+                ) from exc
+            if found_version != store_version:
+                raise _invalid(
+                    f"{relative} _store_version does not match its filename"
+                )
+            if timeline.episode_id != episode_id:
+                raise _invalid(f"{relative} Episode identity does not match its path")
+            return timeline
+
     def versions(
         self, cls: type[Entity], record_id: str | None, *, episode_id: str | None = None
     ) -> list[int]:
@@ -308,6 +349,39 @@ class ProjectStore:
             if not parent.is_dir():
                 return []
             return sorted(p.name for p in parent.iterdir() if self._versions_in_path(p))
+
+    def episode_ids(self) -> list[str]:
+        """Sorted ids for Episodes with a project-local episode.json manifest."""
+        with self._lock:
+            episodes = self._resolve("episodes")
+            if not episodes.is_dir():
+                return []
+            try:
+                directories = tuple(episodes.iterdir())
+            except OSError as exc:
+                raise JobError.from_exception(exc) from exc
+            found = []
+            for directory in directories:
+                episode_path = self._resolve(f"episodes/{directory.name}/episode.json")
+                if episode_path.is_file():
+                    found.append(directory.name)
+            return sorted(found)
+
+    def episode_directories(self) -> list[str]:
+        """Sorted names of every directory under episodes/, with or without episode.json.
+
+        Invalidation scans these rather than episode_ids(): a Shot stored in a folder
+        whose episode.json is missing must still be found, so that the revision is
+        refused when the plan loads that Episode, instead of the Shot being skipped.
+        """
+        with self._lock:
+            episodes = self._resolve("episodes")
+            if not episodes.is_dir():
+                return []
+            try:
+                return sorted(entry.name for entry in episodes.iterdir() if entry.is_dir())
+            except OSError as exc:
+                raise JobError.from_exception(exc) from exc
 
     def list_h3_candidates(self, shot_id: str, *, episode_id: str) -> tuple[H3Candidate, ...]:
         """List immutable candidate receipts for a Shot in stable filename order."""
@@ -491,8 +565,12 @@ class ProjectStore:
         relative = layout.place(self._id_of(entity, layout), None)
         if isinstance(entity, H3Candidate) and expected_version != 0:
             raise _invalid("H3Candidate receipts are immutable; only expected_version=0 creation is allowed")
+        if isinstance(entity, Review) and expected_version != 0:
+            raise _invalid("Review records are immutable; record a new Review")
         if isinstance(entity, AudioPostProfile) and expected_version != 0:
             raise _invalid("AudioPostProfile records are immutable; a changed chain needs a new name")
+        if isinstance(entity, PostProfile) and expected_version != 0:
+            raise _invalid("PostProfile records are immutable; a changed chain needs a new name")
         if isinstance(entity, Export) and expected_version != 0:
             raise _invalid("Export receipts are immutable; only expected_version=0 creation is allowed")
         with self._lock:
@@ -509,8 +587,28 @@ class ProjectStore:
                     raise VersionConflict(relative, expected_version, actual, current)
             if creating:
                 _check_creation_approval_fields(entity)
-            self._write(relative, entity, store_version=actual + 1)
-            return actual + 1
+            next_version = actual + 1
+            if isinstance(entity, Timeline):
+                history = f"episodes/{entity.episode_id}/edits/timelines"
+                if actual:
+                    # A head saved before history existed has no snapshot of its own.
+                    # Preserve its exact bytes before replacing it, so earlier cut
+                    # receipts keep their source edit.
+                    current_snapshot = f"{history}/{actual:06d}.json"
+                    if not self._resolve(current_snapshot).exists():
+                        self._atomic_write(
+                            current_snapshot,
+                            self._root.read_bytes(relative).decode("utf-8"),
+                        )
+                # Snapshot first, then head. Snapshots at or below the head token are
+                # never written here, so they are immutable; one at next_version can only
+                # be an orphan from a save whose head write failed, and is replaced.
+                snapshot_text = self._serialized_text(entity, store_version=next_version)
+                self._atomic_write(f"{history}/{next_version:06d}.json", snapshot_text)
+                self._atomic_write(relative, snapshot_text)
+            else:
+                self._write(relative, entity, store_version=next_version)
+            return next_version
 
     def create(self, entity: VersionedEntity) -> None:
         """Create content version 1 with mutation token 1."""
@@ -1186,6 +1284,20 @@ class ProjectStore:
         self, relative: str, entity: Entity, *, store_version: int | None = None,
         mutation_token: int | None = None, predecessor_token: int | None = None,
     ) -> None:
+        self._atomic_write(
+            relative,
+            self._serialized_text(
+                entity,
+                store_version=store_version,
+                mutation_token=mutation_token,
+                predecessor_token=predecessor_token,
+            ),
+        )
+
+    def _serialized_text(
+        self, entity: Entity, *, store_version: int | None = None,
+        mutation_token: int | None = None, predecessor_token: int | None = None,
+    ) -> str:
         data = entity.model_dump(mode="json")
         if store_version is not None:
             data["_store_version"] = store_version
@@ -1193,8 +1305,7 @@ class ProjectStore:
             data["_mutation_token"] = mutation_token
             data["_predecessor_token"] = predecessor_token
         self._check_path_fields(data, type(entity))
-        text = json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
-        self._atomic_write(relative, text)
+        return json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
 
     @staticmethod
     def _identity_of(entity: Entity) -> tuple[Any, ...]:

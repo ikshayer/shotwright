@@ -40,6 +40,7 @@ def approved_shot(store, shot_id, *, episode_id="ep1", camera_id="cam1", depende
         store.update(shot, expected_version=store.load_with_version(Shot, shot.shot_id, episode_id=shot.episode_id)[1])
     review = Review(
         review_id=f"review-{shot_id}", target_id=shot_id, target_version=1,
+        target_kind="shot", episode_id=episode_id, actor="creator",
         created_at=datetime.now(UTC), approval_state=ShotStatus.APPROVED,
     )
     store.save(review, expected_version=0)
@@ -54,7 +55,7 @@ def test_post_only_profile_change_invalidates_nothing(tmp_path):
     before = store.load(CameraProfile, "cam1")
     revised = before.model_copy(update={**before.next_version(), "bitrate_kbps": 900})
 
-    changed = revise_camera_profile(store, revised, expected_version=1, episode_ids=["ep1"])
+    changed = revise_camera_profile(store, revised, expected_version=1)
 
     assert changed == ()
     assert store.load(Shot, "s1", episode_id="ep1").status is ShotStatus.APPROVED
@@ -69,7 +70,7 @@ def test_rebuild_profile_stales_only_approved_shots_on_that_camera(tmp_path):
     before = store.load(CameraProfile, "cam1")
     revised = before.model_copy(update={**before.next_version(), "field_of_view_mm": 16})
 
-    changed = revise_camera_profile(store, revised, expected_version=1, episode_ids=["ep1"])
+    changed = revise_camera_profile(store, revised, expected_version=1)
 
     assert changed == ("cam-hit",)
     assert store.load(Shot, "cam-hit", episode_id="ep1").status is ShotStatus.STALE
@@ -131,7 +132,7 @@ def test_location_change_stales_only_dependent_approved_shot(tmp_path):
     store.create(location)
     revised = location.model_copy(update={**location.next_version(), "geometry_provenance": "revised"})
 
-    changed = revise_location(store, revised, expected_version=1, episode_ids=["ep1"])
+    changed = revise_location(store, revised, expected_version=1)
 
     assert changed == ("dependent",)
     assert store.load(Shot, "dependent", episode_id="ep1").status is ShotStatus.STALE

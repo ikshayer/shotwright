@@ -223,6 +223,7 @@ def _setup(tmp_path: Path, cut_bytes: bytes, *, intended_audio: bool = True) -> 
     _legacy_json(root, _CUT_LEDGER, json.loads(root.read_text(_CUT_LEDGER)))
     store.save(Review(
         review_id="gate-c", target_id=_EPISODE, target_version=timeline_token,
+        target_kind="episode_cut", episode_id=_EPISODE, actor="creator",
         created_at=datetime(2026, 11, 16, tzinfo=UTC), approval_state=ShotStatus.APPROVED,
     ), expected_version=0)
     approve_episode(store, _EPISODE, cut_version=timeline_token,

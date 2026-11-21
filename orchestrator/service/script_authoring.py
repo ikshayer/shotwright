@@ -94,7 +94,9 @@ def derive_script_scene_plan(
         # Validate project identity and revision readiness before the first command writes.
         store.load(Project)
         _pending_error(store)
-        project_episode_ids = _project_episode_ids(store)
+        # Parse every Episode manifest now: revise_location scans all episodes, and a
+        # corrupt manifest must fail here rather than after the first Location commit.
+        _project_episode_ids(store)
         fenced_shot_versions = {
             (row["episode_id"], row["shot_id"], row["version"])
             for plan in validated_cascades(store) for row in plan["affected"]
@@ -234,7 +236,7 @@ def derive_script_scene_plan(
                 committed.append(f"location:{location.location_id}:v{location.version}")
                 _journal_event(store, journal_relative, "committed", committed)
             for location, token in revised_locations:
-                revise_location(store, location, expected_version=token, episode_ids=project_episode_ids)
+                revise_location(store, location, expected_version=token)
                 committed.append(f"location:{location.location_id}:v{location.version}")
                 _journal_event(store, journal_relative, "committed", committed)
             for shot, initially_checked_token in revised_shots:
@@ -290,7 +292,17 @@ def _project_episode_ids(store: ProjectStore) -> list[str]:
     if not root.exists():
         return ids
     for child in sorted(root.iterdir()):
-        if not child.is_dir() or not (child / "episode.json").is_file():
+        if not child.is_dir():
+            continue
+        if not (child / "episode.json").is_file():
+            # revise_location scans every episode folder, so a folder holding Shots
+            # without its manifest would refuse the revision after earlier Location
+            # commits. Refuse here, before the derivation writes anything.
+            if store.ids(Shot, episode_id=child.name):
+                raise _invalid(
+                    f"episodes/{child.name} holds Shots but has no episode.json; "
+                    "restore the Episode manifest before deriving"
+                )
             continue
         episode, _token = store.load_with_version(Episode, child.name)
         if episode.project_id == project_id:

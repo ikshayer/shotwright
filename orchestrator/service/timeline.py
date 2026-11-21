@@ -29,7 +29,7 @@ from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.platform.ffmpeg_identity import normalize_ffmpeg_identity
 from orchestrator.service.compose import compose_post_profile_spec
 from orchestrator.service.credits import collect_credits_for_shots
-from orchestrator.store.json_store import ProjectStore, RecordNotFound
+from orchestrator.store.json_store import ProjectStore, RecordNotFound, VersionConflict
 
 
 class TimelineEncoder(Protocol):
@@ -91,7 +91,7 @@ def assemble_episode(
     credit_card_duration_sec: float = 5.0,
 ) -> EpisodeOutput:
     """Persist the narrative cut and rights snapshot, encode appended credit cards, then receipt."""
-    episode = store.load(Episode, episode_id)
+    episode, episode_token = store.load_with_version(Episode, episode_id)
     cut = timeline or compose_timeline(store, episode_id=episode_id)
     cut = Timeline.model_validate(cut.model_dump(mode="python"))
     if cut.episode_id != episode_id:
@@ -184,12 +184,35 @@ def assemble_episode(
         store._root.write_text(plain_text_path, credits["plain_text"])
         credit_manifest_sha256 = hashlib.sha256(snapshot_bytes).hexdigest()
 
-    try:
-        persisted, timeline_token = store.load_with_version(Timeline, episode_id)
-    except RecordNotFound:
-        persisted, timeline_token = None, 0
-    if persisted is None or persisted.model_dump(mode="json") != cut.model_dump(mode="json"):
-        timeline_token = store.save(cut, expected_version=timeline_token)
+    with store.command():
+        current_episode, current_episode_token = store.load_with_version(Episode, episode_id)
+        if current_episode_token != episode_token or current_episode != episode:
+            raise VersionConflict(
+                f"episodes/{episode_id}/episode.json", episode_token,
+                current_episode_token, current_episode,
+            )
+        try:
+            persisted, timeline_token = store.load_with_version(Timeline, episode_id)
+        except RecordNotFound:
+            persisted, timeline_token = None, 0
+        timeline_changed = (
+            persisted is None
+            or persisted.model_dump(mode="json") != cut.model_dump(mode="json")
+        )
+        if timeline_changed:
+            timeline_token = store.save(cut, expected_version=timeline_token)
+        approval_is_stale = (
+            current_episode.approved_cut_version is not None
+            or current_episode.approval_review_id is not None
+        ) and current_episode.approved_cut_version != timeline_token
+        if timeline_changed or approval_is_stale:
+            store.save(
+                current_episode.model_copy(update={
+                    "approved_cut_version": None,
+                    "approval_review_id": None,
+                }),
+                expected_version=current_episode_token,
+            )
 
     encode_kwargs = {
         "timeline": render_cut,

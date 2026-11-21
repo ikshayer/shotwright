@@ -263,6 +263,11 @@ class Indextts2Settings(_Section):
         return self
 
 
+class ApprovalSettings(_Section):
+    #: D1. When false (default), an agent-authored Review is an opinion and approves nothing.
+    agent_may_approve: bool = False
+
+
 class Settings(_Section):
     _runtime_secrets: set[str] = PrivateAttr(default_factory=set)
     project_root: Path = Field(Path("projects"), description="Active project root; all writes are contained here.")
@@ -280,6 +285,7 @@ class Settings(_Section):
     image_models: ImageModelSettings = ImageModelSettings()
     server: ServerSettings = ServerSettings()
     upload: UploadLimits = UploadLimits()
+    approvals: ApprovalSettings = ApprovalSettings()
     budget: BudgetSettings = BudgetSettings()
     retention: RetentionSettings = RetentionSettings()
     resources: ResourceSettings = ResourceSettings()

@@ -49,8 +49,9 @@ def token(store, cls, name, episode_id=None):
     return store.load_with_version(cls, name, episode_id=episode_id)[1]
 
 
-def persist_review(store, name, target, version=1):
+def persist_review(store, name, target, version=1, *, target_kind="shot", episode_id="ep1"):
     store.save(Review(review_id=name, target_id=target, target_version=version,
+                      target_kind=target_kind, episode_id=episode_id, actor="creator",
                       created_at=datetime(2026, 11, 4, tzinfo=UTC),
                       approval_state=ShotStatus.APPROVED), expected_version=0)
 
@@ -66,7 +67,7 @@ def reviewable(store, name="s1", episode_id="ep1", **fields):
     for state in (ShotStatus.PLANNED, ShotStatus.BLOCKING, ShotStatus.BUILDING, ShotStatus.REVIEW):
         shot = shot.model_copy(update={"status": state, "framing_status": FramingStatus.APPROVED})
         store.update(shot, expected_version=token(store, Shot, name, episode_id))
-    persist_review(store, "r-" + episode_id + "-" + name, name)
+    persist_review(store, "r-" + episode_id + "-" + name, name, episode_id=episode_id)
     return shot
 
 
@@ -77,7 +78,8 @@ def approve(store, name="s1", episode_id="ep1"):
 
 
 def gate(store, episode_id="ep1"):
-    persist_review(store, "gate-" + episode_id, episode_id, 3)
+    persist_review(store, "gate-" + episode_id, episode_id, 3,
+                   target_kind="episode_cut", episode_id=episode_id)
     approve_episode(store, episode_id, cut_version=3, review_id="gate-" + episode_id,
                     expected_version=token(store, Episode, episode_id))
 
@@ -89,7 +91,7 @@ def location_successor(store):
 
 def revise_hall(store, episodes=("ep1",)):
     return revise_location(store, location_successor(store),
-                           expected_version=token(store, Location, "hall"), episode_ids=episodes)
+                           expected_version=token(store, Location, "hall"))
 
 
 def setup_cascade(root, store, *, two_episodes=False):
@@ -342,7 +344,7 @@ def test_pending_plan_blocks_every_approval_and_revision_without_writing(project
     setup_cascade(root, store)
     reviewable(store, "unrelated")
     store.create(StyleBible(project_id="p1"))
-    persist_review(store, "style", "p1")
+    persist_review(store, "style", "p1", target_kind="style_bible", episode_id=None)
     script = Script(script_id="sc", episode_id="ep1", logline="night")
     camera = CameraProfile(camera_id="cam", profile_name="CCTV")
     store.create(script)
@@ -359,7 +361,7 @@ def test_pending_plan_blocks_every_approval_and_revision_without_writing(project
         lambda: approve_style_bible(store, "p1", review_id="style", expected_version=token(store, StyleBible, "p1")),
         lambda: revise_hall(store),
         lambda: revise_script(store, script.model_copy(update=script.next_version()), expected_version=1),
-        lambda: revise_camera_profile(store, camera.model_copy(update=camera.next_version()), expected_version=1, episode_ids=["ep1"]),
+        lambda: revise_camera_profile(store, camera.model_copy(update=camera.next_version()), expected_version=1),
         lambda: revise_shot(store, shot.model_copy(update={**shot.next_version(), "status": ShotStatus.DRAFT}), expected_version=token(store, Shot, "unrelated", "ep1")),
     ]
     before = tree_bytes(root)
@@ -390,7 +392,7 @@ def test_completed_plan_fences_review_and_draft_until_successor_rebuild(project)
     for state in (ShotStatus.PLANNED, ShotStatus.BLOCKING, ShotStatus.BUILDING, ShotStatus.REVIEW):
         draft = draft.model_copy(update={"status": state, "framing_status": FramingStatus.APPROVED})
         reopened.update(draft, expected_version=token(reopened, Shot, "draft", "ep1"))
-    persist_review(reopened, "r-ep1-draft", "draft")
+    persist_review(reopened, "r-ep1-draft", "draft", episode_id="ep1")
     with pytest.raises(JobError):
         approve(reopened, "draft")
     old = reopened.load(Shot, "s1", episode_id="ep1")
@@ -399,7 +401,7 @@ def test_completed_plan_fences_review_and_draft_until_successor_rebuild(project)
     for state in (ShotStatus.PLANNED, ShotStatus.BLOCKING, ShotStatus.BUILDING, ShotStatus.REVIEW):
         successor = successor.model_copy(update={"status": state, "framing_status": FramingStatus.APPROVED})
         reopened.update(successor, expected_version=token(reopened, Shot, "s1", "ep1"))
-    persist_review(reopened, "fresh-review", "s1", 2)
+    persist_review(reopened, "fresh-review", "s1", 2, episode_id="ep1")
     approved = approve_shot(reopened, "s1", episode_id="ep1", review_id="fresh-review", expected_version=token(reopened, Shot, "s1", "ep1"))
     assert (approved.version, approved.status) == (2, ShotStatus.APPROVED)
 
@@ -414,7 +416,7 @@ def test_cut_approval_uses_all_current_episode_shots(project, state):
         reviewable(store)
         approved = approve(store)
         store.update(approved.model_copy(update={"status": ShotStatus.STALE}), expected_version=token(store, Shot, "s1", "ep1"))
-    persist_review(store, "gate", "ep1", 3)
+    persist_review(store, "gate", "ep1", 3, target_kind="episode_cut", episode_id="ep1")
     before = store.load_with_version(Episode, "ep1")
     with pytest.raises(JobError) as caught:
         approve_episode(store, "ep1", cut_version=3, review_id="gate", expected_version=before[1])
@@ -452,11 +454,11 @@ def test_revision_validation_happens_before_plan_or_gate_write(project):
     setup_cascade(root, store)
     before = tree_bytes(root)
     with pytest.raises(VersionConflict):
-        revise_location(store, location_successor(store), expected_version=999, episode_ids=["ep1"])
+        revise_location(store, location_successor(store), expected_version=999)
     assert tree_bytes(root) == before
     malformed = location_successor(store).model_copy(update={"version": 4})
     with pytest.raises(JobError):
-        revise_location(store, malformed, expected_version=1, episode_ids=["ep1"])
+        revise_location(store, malformed, expected_version=1)
     assert tree_bytes(root) == before
 
 
@@ -479,7 +481,7 @@ def test_post_only_profile_has_no_fence_or_gate_revocation(project):
     camera = CameraProfile(camera_id="cam", profile_name="CCTV")
     store.create(camera)
     after = camera.model_copy(update={**camera.next_version(), "bitrate_kbps": 900})
-    assert revise_camera_profile(store, after, expected_version=1, episode_ids=["ep1"]) == ()
+    assert revise_camera_profile(store, after, expected_version=1) == ()
     assert all(not p["affected"] for p in store.cascades())
     assert store.load(Episode, "ep1").approved_cut_version == 3
     assert approve(store).status is ShotStatus.APPROVED
@@ -763,8 +765,8 @@ def test_revision_commands_use_mutation_token_separately_from_content_version(pr
     revised = record.model_copy(update=record.next_version())
     calls = {
         "Script": lambda expected: revise_script(store, revised, expected_version=expected),
-        "Location": lambda expected: revise_location(store, revised, expected_version=expected, episode_ids=["ep1"]),
-        "CameraProfile": lambda expected: revise_camera_profile(store, revised, expected_version=expected, episode_ids=["ep1"]),
+        "Location": lambda expected: revise_location(store, revised, expected_version=expected),
+        "CameraProfile": lambda expected: revise_camera_profile(store, revised, expected_version=expected),
         "Shot": lambda expected: revise_shot(store, revised, expected_version=expected),
     }
     before = tree_bytes(root)
@@ -784,7 +786,7 @@ def test_style_approval_binds_content_version_after_noop_token_advances(project)
     bible = StyleBible(project_id="p1")
     store.create(bible)
     store.update(bible, expected_version=1)
-    persist_review(store, "style", "p1", 1)
+    persist_review(store, "style", "p1", 1, target_kind="style_bible", episode_id=None)
     with pytest.raises(VersionConflict):
         approve_style_bible(store, "p1", review_id="style", expected_version=1)
     result = approve_style_bible(store, "p1", review_id="style", expected_version=2)

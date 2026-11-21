@@ -134,6 +134,7 @@ def test_texture_override_rebuild_tag_and_scoped_invalidation(tmp_path: Path):
             shot = shot.model_copy(update=values)
             store.update(shot, expected_version=store.load_with_version(Shot, shot_id, episode_id="ep1")[1])
         review = Review(review_id=review_id, target_id=shot_id, target_version=shot.version,
+                        target_kind="shot", episode_id="ep1", actor="creator",
                         created_at=datetime.now(UTC), approval_state=ShotStatus.APPROVED)
         store.save(review, expected_version=0)
         approve_shot(store, shot_id, episode_id="ep1", review_id=review_id,
@@ -145,7 +146,7 @@ def test_texture_override_rebuild_tag_and_scoped_invalidation(tmp_path: Path):
     revised = current.model_copy(update={**current.next_version(), "material_overrides": {
         _material_name(): _texture_set(maps={"base_color": "wall-albedo", "roughness": "wall-r"})
     }})
-    stale = revise_location(store, revised, expected_version=token, episode_ids=["ep1"])
+    stale = revise_location(store, revised, expected_version=token)
     assert stale == ("dependent",), f"location edit did not stale only the approved dependent: {stale!r}"
     assert store.load(Shot, "dependent", episode_id="ep1").status is ShotStatus.STALE, (
         "approved dependent shot was not marked stale"
