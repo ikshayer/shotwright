@@ -238,6 +238,23 @@ def save_review(store: ProjectStore, kind: str, *, actor: str = "creator",
     return review
 
 
+def add_cut_output(store: ProjectStore, *, output_id: str = "cut-1") -> EpisodeOutput:
+    timeline = store.load(Timeline, EP)
+    timeline_token = store.load_with_version(Timeline, EP)[1]
+    artifact = f"test cut {output_id}".encode()
+    relative_path = f"episodes/{EP}/outputs/cuts/{output_id}.mp4"
+    store._root.write_bytes(relative_path, artifact)
+    receipt = EpisodeOutput(
+        output_id=output_id, episode_id=EP, timeline_store_version=timeline_token,
+        timeline_sha256=timeline.content_sha256, relative_path=relative_path,
+        content_sha256=hashlib.sha256(artifact).hexdigest(), delivery_profile="test",
+        storage_resolution=(64, 48), output_fps=12, sample_aspect_ratio="1/1",
+        ffmpeg_identity="test",
+    )
+    store.append_episode_output(receipt, expected_version=0)
+    return receipt
+
+
 def prepare(world: World, kind: str, *, review_id: str | None = None,
             comment: str | None = None, draft_blocker: bool = False) -> tuple[str, dict[str, Any]]:
     """Build the project state an approval of ``kind`` needs; return (url, valid body)."""
@@ -253,7 +270,8 @@ def prepare(world: World, kind: str, *, review_id: str | None = None,
         store.save(timeline(), expected_version=0)
         if draft_blocker:
             add_shot(store, "blocker")
-        body = {"expected_version": episode_token(store), "cut_version": 1}
+        cut = add_cut_output(store)
+        body = {"expected_version": episode_token(store), "cut_output_id": cut.output_id}
     if review_id is not None:
         body["review_id"] = review_id
     if comment is not None:
@@ -278,6 +296,7 @@ def assert_approved(store: ProjectStore, kind: str, review_id: str, cut_version:
     else:
         episode = store.load(Episode, EP)
         assert episode.approved_cut_version == cut_version
+        assert episode.approved_cut_output_id is not None
         assert episode.approval_review_id == review_id
 
 
@@ -287,7 +306,9 @@ def assert_not_approved(store: ProjectStore, kind: str) -> None:
     elif kind == "shot":
         assert store.load(Shot, "s1", episode_id=EP).status is not ShotStatus.APPROVED
     else:
-        assert store.load(Episode, EP).approved_cut_version is None
+        episode = store.load(Episode, EP)
+        assert episode.approved_cut_version is None
+        assert episode.approved_cut_output_id is None
 
 
 def review_body(**overrides: Any) -> dict[str, Any]:
@@ -412,7 +433,7 @@ def test_r2_the_refusal_happens_before_anything_is_read(client: TestClient, kind
     """The project does not exist: a 403 (not 404) proves the check ran first."""
     body: dict[str, Any] = {"expected_version": 1}
     if kind == "cut":
-        body["cut_version"] = 1
+        body["cut_output_id"] = "cut-1"
     response = post(client, APPROVE_URL[kind].replace(f"/projects/{PID}/", "/projects/no-such-project/"), body)
     assert response.status_code == 403, response.text
     assert response.json()["error"] == "creator_only"
@@ -474,7 +495,10 @@ def prepare_body_only(world: World, kind: str, **extra: Any) -> tuple[str, dict[
     """The body for an approval whose project state already exists."""
     store = world.store
     if kind == "cut":
-        body: dict[str, Any] = {"expected_version": episode_token(store), "cut_version": 1}
+        body: dict[str, Any] = {
+            "expected_version": episode_token(store),
+            "cut_output_id": store.list_episode_outputs(EP)[-1].output_id,
+        }
     else:
         body = {"expected_version": shot_token(store)}
     body.update(extra)
@@ -765,8 +789,10 @@ def test_r4_the_returned_entity_is_the_shot_or_the_episode(
     ensure_episode(cut_world.store)
     cut_world.store.save(timeline(), expected_version=0)
     episode = post(permissive_client, CUT_URL, {
-        "expected_version": episode_token(cut_world.store), "cut_version": 1}).json()
+        "expected_version": episode_token(cut_world.store),
+        "cut_output_id": add_cut_output(cut_world.store).output_id}).json()
     assert episode["episode_id"] == EP and episode["approved_cut_version"] == 1
+    assert episode["approved_cut_output_id"] == "cut-1"
 
 
 def test_r4_framing_approval_returns_the_shot(permissive_client: TestClient,
@@ -776,11 +802,12 @@ def test_r4_framing_approval_returns_the_shot(permissive_client: TestClient,
     assert shot["shot_id"] == "s1" and shot["framing_status"] == "approved"
 
 
-def test_r4_approve_cut_uses_cut_version(permissive_client: TestClient, world: World) -> None:
+def test_r4_approve_cut_uses_the_cut_output_id(permissive_client: TestClient, world: World) -> None:
     ensure_episode(world.store)
     world.store.save(timeline(3.0), expected_version=0)
     world.store.save(timeline(4.0), expected_version=1)
-    body = {"expected_version": episode_token(world.store), "cut_version": 2}
+    cut = add_cut_output(world.store, output_id="cut-v2")
+    body = {"expected_version": episode_token(world.store), "cut_output_id": cut.output_id}
     response = post(permissive_client, CUT_URL, body)
     assert response.status_code == 200, response.text
     (review,) = reviews_of(world.store)
@@ -788,13 +815,13 @@ def test_r4_approve_cut_uses_cut_version(permissive_client: TestClient, world: W
     assert_approved(world.store, "cut", review.review_id, cut_version=2)
 
 
-def test_r4_approve_cut_for_a_cut_version_that_does_not_exist_fails(
+def test_r4_approve_cut_for_an_unknown_cut_output_fails(
     permissive_client: TestClient, world: World,
 ) -> None:
     ensure_episode(world.store)
     world.store.save(timeline(), expected_version=0)
     response = post(permissive_client, CUT_URL, {
-        "expected_version": episode_token(world.store), "cut_version": 5})
+        "expected_version": episode_token(world.store), "cut_output_id": "missing-cut"})
     assert response.status_code in (404, 422), response.text
     assert world.store.load(Episode, EP).approved_cut_version is None
 
@@ -874,21 +901,24 @@ def test_r4_request_validation(permissive_client: TestClient, world: World, kind
     assert tree_bytes(world.root) == before
 
 
-@pytest.mark.parametrize("cut_version", [0, -1, "x", ...])
-def test_r4_approve_cut_requires_a_positive_cut_version(
-    permissive_client: TestClient, world: World, cut_version: Any,
+@pytest.mark.parametrize("cut_output_id", ["", "bad/id", 5, ...])
+def test_r4_approve_cut_requires_a_valid_cut_output_id(
+    permissive_client: TestClient, world: World, cut_output_id: Any,
 ) -> None:
     _url, body = prepare(world, "cut")
-    body["cut_version"] = cut_version
+    body["cut_output_id"] = cut_output_id
     body = {k: v for k, v in body.items() if v is not ...}
     assert post(permissive_client, CUT_URL, body).status_code == 422
 
 
-def test_r4_only_approve_cut_takes_a_cut_version(permissive_client: TestClient,
-                                                 world: World) -> None:
+def test_r4_only_approve_cut_takes_a_cut_output_id(permissive_client: TestClient,
+                                                   world: World) -> None:
     url, body = prepare(world, "shot")
-    response = post(permissive_client, url, {**body, "cut_version": 1})
+    response = post(permissive_client, url, {**body, "cut_output_id": "cut-1"})
     assert response.status_code == 422
+    assert post(permissive_client, CUT_URL, {
+        "expected_version": 1, "cut_version": 1,
+    }).status_code == 422
 
 
 # --------------------------------------------------------------------------

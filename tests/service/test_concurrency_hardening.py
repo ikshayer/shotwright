@@ -113,6 +113,7 @@ def test_unchanged_script_mapping_stales_approved_and_fences_review_in_actual_st
     assert reopened.load_with_version(Shot, "mapped", episode_id="ep2") == foreign_shot
     assert reopened.load_with_version(Episode, "ep2") == foreign_gate
     assert reopened.load(Episode, "ep1").approved_cut_version is None
+    assert reopened.load(Episode, "ep1").approved_cut_output_id is None
     plan, = reopened.cascades()
     affected = [(entry["episode_id"], entry["shot_id"], entry["version"]) for entry in plan["affected"]]
     assert set(affected) == {("ep1", "mapped", 1), ("ep1", "review", 1)}
@@ -237,6 +238,7 @@ def test_shot_with_both_links_recovers_its_own_successor_and_reapproves(project,
     assert pending["affected"] == [{"episode_id": "ep1", "shot_id": "s1", "version": 1}]
     assert reopened.load(Shot, "s1", episode_id="ep1") == after
     assert reopened.load(Episode, "ep1").approved_cut_version is None
+    assert reopened.load(Episode, "ep1").approved_cut_output_id is None
     assert resume_invalidations(reopened) == (pending["cascade_id"],)
     assert resume_invalidations(reopened) == ()
     assert reopened.versions(Shot, "s1", episode_id="ep1") == [1, 2]
@@ -447,7 +449,8 @@ def test_all_approvals_validate_completed_plan_domain_payloads_without_writes(pr
     assert reopened.cascades(pending_only=True) == ()
     snapshot = tree_bytes(root)
     approvals = [lambda: approve(reopened),
-                 lambda: approve_episode(reopened, "ep1", cut_version=3, review_id="cut",
+                 lambda: approve_episode(reopened, "ep1", cut_output_id="missing",
+                                         review_id="cut",
                                          expected_version=token(reopened, Episode, "ep1")),
                  lambda: approve_style_bible(reopened, "p1", review_id="style",
                                              expected_version=token(reopened, StyleBible, "p1"))]
@@ -462,6 +465,7 @@ def test_all_approvals_validate_completed_plan_domain_payloads_without_writes(pr
     assert reopened.load(Shot, "s1", episode_id="ep1").status is ShotStatus.REVIEW
     assert reopened.load(StyleBible, "p1").approval_review_id is None
     assert reopened.load(Episode, "ep1").approved_cut_version is None
+    assert reopened.load(Episode, "ep1").approved_cut_output_id is None
 
 
 @pytest.mark.parametrize("kind", ["profile-post-only", "profile-no-op", "script-metadata"])

@@ -90,6 +90,18 @@ def store(tmp_path: Path) -> ProjectStore:
             "create_episode",
             id="episode-approved-cut-version",
         ),
+        pytest.param(
+            Episode(
+                episode_id="ep1",
+                project_id="p1",
+                number=1,
+                duration_target_sec=30,
+                approved_cut_output_id="cut-1",
+            ),
+            "approved_cut_output_id",
+            "create_episode",
+            id="episode-approved-cut-output-id",
+        ),
     ],
 )
 def test_creation_rejects_approval_claim_without_writing(

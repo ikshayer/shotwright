@@ -114,15 +114,10 @@ The Codex review reproduced two HIGH and three MEDIUM defects; the parent fixed 
   assembly, every file in `episodes/{ep}/outputs/cuts/` named `{run_id}.*` or
   `{run_id}-*` is moved to the project quarantine. A quarantine failure is reported
   without hiding the assembly's own error.
-- **A3 — A new cut revokes the cut approval.** Gate C binds to a Timeline version, but
-  credit cards are rendered outside the Timeline, so two cuts of one version can differ.
-  Appending a new cut receipt therefore clears `approved_cut_version` and
-  `approval_review_id`, in the same store command as the append, **unless** the new cut
-  is byte-identical (same `content_sha256`) to a cut already recorded for the approved
-  Timeline version: a deterministic re-assembly keeps the approval, as step 1's
-  `test_r6_reassembling_an_unchanged_timeline_keeps_the_cut_approval` requires. A failed
-  assembly does not revoke an existing approval. *(Open for the creator: binding cut approval to one
-  specific cut, its output id, rather than to a Timeline version.)*
+- **A3 — Superseded by `orchestrator/api/CUT_APPROVAL_BINDING_CONTRACT.md` (2026-11-21).**
+  Appending a new cut receipt no longer changes approval state. Gate C binds to one exact
+  `approved_cut_output_id`; export accepts that receipt or a byte-identical re-assembly.
+  A changed or stale Timeline still revokes the approval before encoding.
 - **A4 — The CLI reports this job's cut.** It returns the cut whose `output_id` equals
   the job's run id, never simply the newest.
 - **A5 — Fail fast on rights.** Submission also runs the rights collection assembly

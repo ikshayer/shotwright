@@ -150,10 +150,15 @@ def _same(entity: VersionedEntity, payload: dict[str, Any]) -> bool:
 def _revoke_gates(store: ProjectStore, plan: dict[str, Any], revoked: list[str]) -> None:
     for episode_id in plan["episode_ids"]:
         episode, token = store.load_with_version(Episode, episode_id)
-        if episode.approved_cut_version is None and episode.approval_review_id is None:
+        if (episode.approved_cut_version is None
+                and episode.approved_cut_output_id is None
+                and episode.approval_review_id is None):
             continue
-        store.save(episode.model_copy(update={"approved_cut_version": None, "approval_review_id": None}),
-                   expected_version=token)
+        store.save(episode.model_copy(update={
+            "approved_cut_version": None,
+            "approved_cut_output_id": None,
+            "approval_review_id": None,
+        }), expected_version=token)
         revoked.append(episode_id)
 
 
@@ -651,6 +656,7 @@ def propose_shots(store: ProjectStore, shots: list[Shot]) -> tuple[Shot, ...]:
                     updated = episode.model_copy(update={
                         "shot_ids": shot_ids,
                         "approved_cut_version": None,
+                        "approved_cut_output_id": None,
                         "approval_review_id": None,
                     })
                     store.save(updated, expected_version=token)

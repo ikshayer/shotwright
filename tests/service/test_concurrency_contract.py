@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -14,11 +15,13 @@ from orchestrator.domain.entities import (
     Beat,
     CameraProfile,
     Episode,
+    EpisodeOutput,
     Location,
     Review,
     Script,
     Shot,
     StyleBible,
+    Timeline,
 )
 from orchestrator.domain.invalidation import revision_impact
 from orchestrator.domain.state import (
@@ -61,6 +64,26 @@ def add_episode(store, name="ep1"):
                        duration_target_sec=30), expected_version=0)
 
 
+def add_cut_output(store, episode_id="ep1", *, timeline_version=3):
+    timeline = Timeline(episode_id=episode_id, entries=[])
+    for expected_token in range(timeline_version):
+        store.save(timeline, expected_version=expected_token)
+    timeline = store.load(Timeline, episode_id)
+    output_id = "cut-" + episode_id
+    artifact = f"test cut {output_id}".encode()
+    relative_path = f"episodes/{episode_id}/outputs/cuts/{output_id}.mp4"
+    store._root.write_bytes(relative_path, artifact)
+    receipt = EpisodeOutput(
+        output_id=output_id, episode_id=episode_id,
+        timeline_store_version=timeline_version, timeline_sha256=timeline.content_sha256,
+        relative_path=relative_path, content_sha256=hashlib.sha256(artifact).hexdigest(),
+        delivery_profile="test", storage_resolution=(64, 48), output_fps=12,
+        sample_aspect_ratio="1/1", ffmpeg_identity="test",
+    )
+    store.append_episode_output(receipt, expected_version=0)
+    return receipt
+
+
 def reviewable(store, name="s1", episode_id="ep1", **fields):
     shot = Shot(shot_id=name, episode_id=episode_id, duration_sec=5, **fields)
     store.create(shot)
@@ -78,9 +101,11 @@ def approve(store, name="s1", episode_id="ep1"):
 
 
 def gate(store, episode_id="ep1"):
+    cut = add_cut_output(store, episode_id)
     persist_review(store, "gate-" + episode_id, episode_id, 3,
                    target_kind="episode_cut", episode_id=episode_id)
-    approve_episode(store, episode_id, cut_version=3, review_id="gate-" + episode_id,
+    approve_episode(store, episode_id, cut_output_id=cut.output_id,
+                    review_id="gate-" + episode_id,
                     expected_version=token(store, Episode, episode_id))
 
 
@@ -112,7 +137,8 @@ def assert_safe(store, episodes):
         shots = [store.load(Shot, name, episode_id=ep) for name in store.ids(Shot, episode_id=ep)]
         if any(s.status in {ShotStatus.STALE, ShotStatus.DRAFT} for s in shots):
             episode = store.load(Episode, ep)
-            assert (episode.approved_cut_version, episode.approval_review_id) == (None, None)
+            assert (episode.approved_cut_version, episode.approved_cut_output_id,
+                    episode.approval_review_id) == (None, None, None)
 
 
 def tree_bytes(root):
@@ -357,7 +383,9 @@ def test_pending_plan_blocks_every_approval_and_revision_without_writing(project
     shot = store.load(Shot, "unrelated", episode_id="ep1")
     calls = [
         lambda: approve(store, "unrelated"),
-        lambda: approve_episode(store, "ep1", cut_version=3, review_id="gate-ep1", expected_version=token(store, Episode, "ep1")),
+        lambda: approve_episode(store, "ep1", cut_output_id="cut-ep1",
+                                review_id="gate-ep1",
+                                expected_version=token(store, Episode, "ep1")),
         lambda: approve_style_bible(store, "p1", review_id="style", expected_version=token(store, StyleBible, "p1")),
         lambda: revise_hall(store),
         lambda: revise_script(store, script.model_copy(update=script.next_version()), expected_version=1),
@@ -416,10 +444,12 @@ def test_cut_approval_uses_all_current_episode_shots(project, state):
         reviewable(store)
         approved = approve(store)
         store.update(approved.model_copy(update={"status": ShotStatus.STALE}), expected_version=token(store, Shot, "s1", "ep1"))
+    cut = add_cut_output(store, timeline_version=3)
     persist_review(store, "gate", "ep1", 3, target_kind="episode_cut", episode_id="ep1")
     before = store.load_with_version(Episode, "ep1")
     with pytest.raises(JobError) as caught:
-        approve_episode(store, "ep1", cut_version=3, review_id="gate", expected_version=before[1])
+        approve_episode(store, "ep1", cut_output_id=cut.output_id,
+                        review_id="gate", expected_version=before[1])
     assert caught.value.kind is JobErrorKind.INVALID_MANIFEST
     assert store.load_with_version(Episode, "ep1") == before
 
@@ -493,7 +523,9 @@ def test_script_mapping_plan_fences_review_and_draft_and_revokes_gate(project):
     reviewable(store, "old")
     store.create(Shot(shot_id="new", episode_id="ep1", duration_sec=5))
     episode, ep_token = store.load_with_version(Episode, "ep1")
-    store.save(episode.model_copy(update={"approved_cut_version": 3, "approval_review_id": "gate"}), expected_version=ep_token)
+    store.save(episode.model_copy(update={"approved_cut_version": 3,
+                                          "approved_cut_output_id": "approved-cut",
+                                          "approval_review_id": "gate"}), expected_version=ep_token)
     script = Script(script_id="sc", episode_id="ep1", logline="night", beat_to_shot={"b": "old"})
     store.create(script)
     after = script.model_copy(update={**script.next_version(), "beat_to_shot": {"b": "new"}})

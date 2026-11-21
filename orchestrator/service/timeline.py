@@ -202,12 +202,14 @@ def assemble_episode(
             timeline_token = store.save(cut, expected_version=timeline_token)
         approval_is_stale = (
             current_episode.approved_cut_version is not None
+            or current_episode.approved_cut_output_id is not None
             or current_episode.approval_review_id is not None
         ) and current_episode.approved_cut_version != timeline_token
         if timeline_changed or approval_is_stale:
             store.save(
                 current_episode.model_copy(update={
                     "approved_cut_version": None,
+                    "approved_cut_output_id": None,
                     "approval_review_id": None,
                 }),
                 expected_version=current_episode_token,
@@ -251,28 +253,6 @@ def assemble_episode(
     with store.command():
         existing = store.list_episode_outputs(episode_id)
         store.append_episode_output(receipt, expected_version=len(existing))
-        # Gate C binds to a Timeline version, but credit cards are rendered outside the
-        # Timeline, so a new cut of the same version can still be different video. A new
-        # cut therefore revokes the cut approval unless it is byte-identical to a cut
-        # already recorded for the approved version (a deterministic re-assembly). This
-        # runs in the same command as the receipt, so no approval can land between the
-        # two, and a failed assembly never reaches here.
-        current, token = store.load_with_version(Episode, episode_id)
-        identical_to_approved = (
-            current.approved_cut_version is not None
-            and receipt.timeline_store_version == current.approved_cut_version
-            and any(
-                prior.timeline_store_version == current.approved_cut_version
-                and prior.content_sha256 == receipt.content_sha256
-                for prior in existing
-            )
-        )
-        if (current.approved_cut_version is not None or current.approval_review_id is not None) \
-                and not identical_to_approved:
-            store.save(
-                current.model_copy(update={"approved_cut_version": None, "approval_review_id": None}),
-                expected_version=token,
-            )
     return receipt
 
 

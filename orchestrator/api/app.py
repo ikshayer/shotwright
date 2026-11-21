@@ -401,11 +401,20 @@ class OperationContext:
             recorded_review = None
             if review_id is None:
                 episode_id = data["episode_id"]
+                cut = next(
+                    (row for row in store.list_episode_outputs(episode_id)
+                     if row.output_id == data["cut_output_id"]),
+                    None,
+                )
+                if cut is None:
+                    raise RecordNotFound(
+                        f"Episode {episode_id!r} has no cut output {data['cut_output_id']!r}"
+                    )
                 recorded_review = record_review(
                     store,
                     target_kind="episode_cut",
                     target_id=episode_id,
-                    target_version=data["cut_version"],
+                    target_version=cut.timeline_store_version,
                     episode_id=episode_id,
                     actor=self.actor,
                     approval_state=ShotStatus.APPROVED,
@@ -416,7 +425,7 @@ class OperationContext:
                 episode = approve_episode(
                     store,
                     data["episode_id"],
-                    cut_version=data["cut_version"],
+                    cut_output_id=data["cut_output_id"],
                     review_id=review_id,
                     expected_version=data["expected_version"],
                     agent_may_approve=self.settings.approvals.agent_may_approve,

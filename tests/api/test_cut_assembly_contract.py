@@ -503,33 +503,32 @@ def test_a1_a_failure_mid_encode_leaves_no_ffmpeg_and_quarantines_partials(
 
 
 # --------------------------------------------------------------------------
-# A3/A4 - approval revocation and the CLI's cut
+# R4/A4 - approval binding and the CLI's cut
 # --------------------------------------------------------------------------
 
 
 def approve_current_cut_through_cli(world: World, capsys: pytest.CaptureFixture[str]) -> None:
-    from orchestrator.domain.entities import Timeline
-
     store = world.store
+    cut = store.list_episode_outputs(EP)[-1]
     body = {"expected_version": episode_token(store),
-            "cut_version": store.load_with_version(Timeline, EP)[1]}
+            "cut_output_id": cut.output_id}
     argv = ["approve-cut", "--project-id", PID, "--episode-id", EP,
             "--data", json.dumps(body), "--json"]
     code = cli_module.main(argv, settings=world.settings)
     captured = capsys.readouterr()
     assert code == 0, captured.err
     episode = store.load(Episode, EP)
-    assert episode.approved_cut_version == body["cut_version"]
+    assert episode.approved_cut_version == cut.timeline_store_version
+    assert episode.approved_cut_output_id == cut.output_id
     assert episode.approval_review_id
 
 
 @needs_media
-def test_a3_a_different_cut_of_the_same_timeline_revokes_the_cut_approval(
+def test_r4_a_different_cut_keeps_approval_and_export_refuses_the_other_cut(
     client: TestClient, world: World, small_clip: bytes, other_clip: bytes,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A newer DEGRADED receipt for s1 at the same version changes the video, not the
-    Timeline (same duration), so the second cut differs byte-wise."""
+    """A same-Timeline cut stays unapproved when it differs from the exact approved cut."""
     store = build_project(world, {"s1": ShotStatus.APPROVED, "s2": ShotStatus.APPROVED},
                           small_clip)
     assert wait_for_job(client, submit(client))["state"] == "completed"
@@ -542,8 +541,16 @@ def test_a3_a_different_cut_of_the_same_timeline_revokes_the_cut_approval(
     assert first.timeline_sha256 == second.timeline_sha256
     assert first.content_sha256 != second.content_sha256
     episode = store.load(Episode, EP)
-    assert episode.approved_cut_version is None
-    assert episode.approval_review_id is None
+    assert episode.approved_cut_version == first.timeline_store_version
+    assert episode.approved_cut_output_id == first.output_id
+    assert episode.approval_review_id
+
+    from orchestrator.adapters.export.package import _bind_cut
+
+    with pytest.raises(JobError) as error:
+        _bind_cut(store, EP, second.output_id, episode_token(store), agent_may_approve=False)
+    assert first.output_id in str(error.value)
+    assert second.output_id in str(error.value)
 
 
 @needs_media
@@ -565,6 +572,7 @@ def test_a3_reassembling_with_nothing_changed_keeps_the_approval(
         f"vs {second.content_sha256}")
     episode = store.load(Episode, EP)
     assert episode.approved_cut_version == approved.approved_cut_version
+    assert episode.approved_cut_output_id == approved.approved_cut_output_id
     assert episode.approval_review_id == approved.approval_review_id
 
 
@@ -588,6 +596,7 @@ def test_a3_a_failed_reassembly_keeps_an_existing_approval(
     assert record["state"] == "failed", record
     episode = store.load(Episode, EP)
     assert episode.approved_cut_version == approved.approved_cut_version
+    assert episode.approved_cut_output_id == approved.approved_cut_output_id
     assert episode.approval_review_id == approved.approval_review_id
     assert len(store.list_episode_outputs(EP)) == 1
     assert files_named_after(world, record["run_id"]) == []

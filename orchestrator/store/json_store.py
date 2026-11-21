@@ -182,7 +182,7 @@ def _invalid(message: str, *, cause: BaseException | None = None) -> JobError:
 
 def _check_creation_approval_fields(entity: Entity) -> None:
     """Approval state can only be attached to an existing record by its service."""
-    for field in ("approval_review_id", "approved_cut_version"):
+    for field in ("approval_review_id", "approved_cut_version", "approved_cut_output_id"):
         if getattr(entity, field, None) is not None:
             raise _invalid(
                 f"`{field}` may not be set on creation; approval is set only by the approval service"
