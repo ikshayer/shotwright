@@ -11,6 +11,7 @@ from orchestrator.domain.base import FramingStatus, Invalidation, ShotStatus
 from orchestrator.domain.entities import (
     CameraProfile,
     Episode,
+    EpisodeOutput,
     H3Candidate,
     Location,
     Review,
@@ -19,6 +20,7 @@ from orchestrator.domain.entities import (
     Shot,
     ShotOutputKind,
     StyleBible,
+    Timeline,
 )
 from orchestrator.domain.invalidation import field_invalidation
 from orchestrator.domain.state import (
@@ -334,15 +336,45 @@ def approve_framing(
         return updated
 
 
-def approve_episode(store: ProjectStore, episode_id: str, *, cut_version: int,
+def _current_cut_output(
+    store: ProjectStore, episode_id: str, cut_output_id: str,
+) -> tuple[EpisodeOutput, int]:
+    cut = next(
+        (row for row in store.list_episode_outputs(episode_id)
+         if row.output_id == cut_output_id),
+        None,
+    )
+    if cut is None:
+        raise RecordNotFound(
+            f"Episode {episode_id!r} has no cut output {cut_output_id!r}"
+        )
+    try:
+        timeline, timeline_token = store.load_with_version(Timeline, episode_id)
+    except RecordNotFound as exc:
+        raise JobError(
+            JobErrorKind.INVALID_MANIFEST,
+            f"cut {cut_output_id!r} is not of the current Timeline",
+            cause=exc,
+        ) from exc
+    if (cut.timeline_store_version != timeline_token
+            or cut.timeline_sha256 != timeline.content_sha256):
+        raise JobError(
+            JobErrorKind.INVALID_MANIFEST,
+            f"cut {cut_output_id!r} is not of the current Timeline",
+        )
+    return cut, timeline_token
+
+
+def approve_episode(store: ProjectStore, episode_id: str, *, cut_output_id: str,
                     review_id: str, expected_version: int,
                     agent_may_approve: bool = False) -> Episode:
-    """Approve gate C only when no current Shot or pending cascade makes it stale."""
+    """Approve one exact current cut when no Shot or pending cascade makes it stale."""
     with store.command():
         _blocked_pending(store)
         episode, token = store.load_with_version(Episode, episode_id)
         if token != expected_version:
             raise VersionConflict(f"episodes/{episode_id}/episode.json", expected_version, token, episode)
+        cut, cut_version = _current_cut_output(store, episode_id, cut_output_id)
         shots = _shot_snapshot(store, episode_id)
         _review(
             store, review_id, target_kind="episode_cut", target_id=episode_id,
@@ -359,9 +391,17 @@ def approve_episode(store: ProjectStore, episode_id: str, *, cut_version: int,
             raise VersionConflict(f"episodes/{episode_id}/episode.json", expected_version,
                                   current_token, current)
         _blocked_pending(store)
+        current_cut, current_cut_version = _current_cut_output(
+            store, episode_id, cut_output_id,
+        )
+        if current_cut != cut or current_cut_version != cut_version:
+            raise JobError(
+                JobErrorKind.INVALID_MANIFEST,
+                f"cut {cut_output_id!r} is not of the current Timeline",
+            )
         _review(
             store, review_id, target_kind="episode_cut", target_id=episode_id,
-            target_version=cut_version, episode_id=episode_id,
+            target_version=cut.timeline_store_version, episode_id=episode_id,
             agent_may_approve=agent_may_approve,
         )
         try:
@@ -370,12 +410,23 @@ def approve_episode(store: ProjectStore, episode_id: str, *, cut_version: int,
             raise _domain_error(exc) from exc
         _blocked_pending(store)
         current_shots = _shot_snapshot(store, episode_id)
+        current_cut, current_cut_version = _current_cut_output(
+            store, episode_id, cut_output_id,
+        )
+        if current_cut != cut or current_cut_version != cut_version:
+            raise JobError(
+                JobErrorKind.INVALID_MANIFEST,
+                f"cut {cut_output_id!r} is not of the current Timeline",
+            )
         try:
             check_cut_approval(pending=False, shots=current_shots)
         except ReviewApprovalError as exc:
             raise _domain_error(exc) from exc
-        updated = current.model_copy(update={"approved_cut_version": cut_version,
-                                             "approval_review_id": review_id})
+        updated = current.model_copy(update={
+            "approved_cut_version": cut.timeline_store_version,
+            "approved_cut_output_id": cut.output_id,
+            "approval_review_id": review_id,
+        })
         store.save(updated, expected_version=expected_version)
         return updated
 

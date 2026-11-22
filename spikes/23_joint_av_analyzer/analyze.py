@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import traceback
+from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -525,7 +526,8 @@ def _gpu_memory_sample() -> dict:
 
 def run_supervised(items: list[dict], mode: str, max_new_tokens: int, duration_limit: float,
                    result_rel: str, stdout_rel: str, stderr_rel: str,
-                   resources_rel: str, analysis_prompt: str | None = None) -> tuple[dict, dict]:
+                   resources_rel: str, analysis_prompt: str | None = None, *,
+                   should_stop: Callable[[], bool] | None = None) -> tuple[dict, dict]:
     """Launch only the isolated runtime worker and enforce the 900s/low-RAM limits."""
     _validate_analysis_prompt(analysis_prompt)
     env_dir = PROJECT.resolve(f"{BASE}/env")
@@ -559,6 +561,29 @@ def run_supervised(items: list[dict], mode: str, max_new_tokens: int, duration_l
     tree = None
     tree_events = []
     try:
+        stop_poll_shutdown = threading.Event()
+        caller_stop_event = threading.Event()
+        stop_poll_errors = []
+        stop_poll_thread = None
+        if should_stop is not None:
+            def poll_for_caller_stop() -> None:
+                while not stop_poll_shutdown.is_set():
+                    try:
+                        if should_stop():
+                            caller_stop_event.set()
+                            return
+                    except BaseException as exc:  # noqa: BLE001 - surface callback failures after owned cleanup.
+                        stop_poll_errors.append(exc)
+                        caller_stop_event.set()
+                        return
+                    if stop_poll_shutdown.wait(0.25):
+                        return
+
+            stop_poll_thread = threading.Thread(
+                target=poll_for_caller_stop, name="qwen-caller-stop-poll", daemon=True,
+            )
+            stop_poll_thread.start()
+
         def drain(stream: object, target: bytearray) -> None:
             while True:
                 chunk = stream.read(65536)
@@ -575,33 +600,47 @@ def run_supervised(items: list[dict], mode: str, max_new_tokens: int, duration_l
         tree_events = []
         identity = {"pid": process.pid, "created_utc": _process_created_utc(process), "image": str(python), "cmd": cmd}
         samples, low_samples, stopped = [], 0, None
+        caller_cancelled = False
         began = time.monotonic()
+        next_resource_sample = began
         snapshot = tree.snapshot()
         identity["process_tree"] = snapshot
         while True:
+            if stop_poll_errors:
+                raise stop_poll_errors[0]
+            if caller_stop_event.is_set():
+                stopped = "caller cancelled"
+                caller_cancelled = True
+                tree_events = tree.stop()
+                break
             tree.refresh()
             live_tree = [row for row in tree.snapshot() if row.get("live_identity_verified") is True]
             if process.poll() is not None and not live_tree:
                 break
-            available = _ram_available()
-            process_memory = tree.sample()
-            rss_rows = process_memory["processes"]
-            worker_rss = process_memory["aggregate_memory_bytes"]["rss"]
-            gpu_now = _gpu_memory_sample()
-            sample = {"elapsed_seconds": time.monotonic() - began, "available_ram_bytes": available,
-                      "owned_worker_rss_bytes": worker_rss, "owned_processes": rss_rows,
-                      "process_tree_identities": process_memory["identity_snapshot"], "gpu_device": gpu_now}
-            samples.append(sample)
-            PROJECT.append_line(resources_rel, json.dumps({"event": "sample", **sample}, separators=(",", ":")))
-            low_samples = low_samples + 1 if available < 2 * 1024**3 else 0
-            if low_samples >= 3:
-                stopped = "available RAM below 2 GiB for three consecutive samples"
-            elif time.monotonic() - began >= 900:
-                stopped = "900 second inference deadline exceeded"
-            if stopped:
-                tree_events = tree.stop()
-                break
-            time.sleep(5)
+            now = time.monotonic() if should_stop is not None else None
+            if should_stop is None or now >= next_resource_sample:
+                available = _ram_available()
+                process_memory = tree.sample()
+                rss_rows = process_memory["processes"]
+                worker_rss = process_memory["aggregate_memory_bytes"]["rss"]
+                gpu_now = _gpu_memory_sample()
+                elapsed = time.monotonic() - began if should_stop is None else now - began
+                sample = {"elapsed_seconds": elapsed, "available_ram_bytes": available,
+                          "owned_worker_rss_bytes": worker_rss, "owned_processes": rss_rows,
+                          "process_tree_identities": process_memory["identity_snapshot"], "gpu_device": gpu_now}
+                samples.append(sample)
+                PROJECT.append_line(resources_rel, json.dumps({"event": "sample", **sample}, separators=(",", ":")))
+                low_samples = low_samples + 1 if available < 2 * 1024**3 else 0
+                if low_samples >= 3:
+                    stopped = "available RAM below 2 GiB for three consecutive samples"
+                elif ((time.monotonic() - began if should_stop is None else now - began) >= 900):
+                    stopped = "900 second inference deadline exceeded"
+                if stopped:
+                    tree_events = tree.stop()
+                    break
+                if should_stop is not None:
+                    next_resource_sample = now + 5
+            time.sleep(0.25 if should_stop is not None else 5)
         if not stopped:
             tree_events = tree.stop()
     except BaseException as supervisor_error:
@@ -628,6 +667,11 @@ def run_supervised(items: list[dict], mode: str, max_new_tokens: int, duration_l
         PROJECT.write_text(stdout_rel, stdout_tail.decode("utf-8", errors="replace"))
         PROJECT.write_text(stderr_rel, stderr_tail.decode("utf-8", errors="replace"))
         raise
+    finally:
+        if "stop_poll_shutdown" in locals():
+            stop_poll_shutdown.set()
+        if "stop_poll_thread" in locals() and stop_poll_thread is not None:
+            stop_poll_thread.join(timeout=1)
     process.wait(timeout=30)
     stdout_thread.join(timeout=5); stderr_thread.join(timeout=5)
     stdout_text = stdout_tail.decode("utf-8", errors="replace")
@@ -648,7 +692,7 @@ def run_supervised(items: list[dict], mode: str, max_new_tokens: int, duration_l
                  "stdout_log_path": stdout_rel, "stderr_log_path": stderr_rel,
                  "resources_path": resources_rel, "resources_sha256": digest(PROJECT.resolve(resources_rel))}
     if stopped:
-        return {"status": "failure", "error_type": "WorkerStopped", "error": stopped,
+        return {"status": "failure", "error_type": "CallerCancelled" if caller_cancelled else "WorkerStopped", "error": stopped,
                 "results": worker_result.get("results", []) if worker_result else []}, telemetry
     if worker_result is None:
         return {"status": "failure", "error_type": "WorkerProtocolError",

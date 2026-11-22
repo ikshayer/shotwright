@@ -17,8 +17,8 @@ from fastapi import FastAPI
 
 from .conftest import Op, operations
 
-# CONTRACT.md operation table, every row. A sanity check that the route table is complete
-# against the contract; the parity tests themselves iterate the route table, not this.
+# Contract operation tables, every row. A sanity check that the route table is complete
+# against the contracts; the parity tests themselves iterate the route table, not this.
 CONTRACT_OPERATIONS = {
     "create project": r"create.*project|project.*create",
     "list projects": r"list.*project|projects",
@@ -32,10 +32,30 @@ CONTRACT_OPERATIONS = {
     "build scene": r"scene",
     "render preview": r"preview",
     "generate media": r"generat",
+    "assemble cut": r"assemble.*cut|cut.*assemble",
     "sample references": r"sample|reference",
     "report jobs": r"job",
     "apply feedback": r"feedback",
     "score rubric": r"rubric|score",
+    "record review": r"record.*review",
+    "list reviews": r"list.*review",
+    "approve framing": r"approve.*framing|framing.*approve",
+    "approve shot": r"approve.*shot|shot.*approve",
+    "approve cut": r"approve.*cut|cut.*approve",
+    "resume invalidations": r"resume.*invalidation",
+    "revise camera profile": r"revise.*camera.*profile|camera.*profile.*revise",
+    "cancel job": r"cancel.*job|job.*cancel",
+    "list shot outputs": r"list.*shot.*output|shot.*output.*list",
+    "list cuts": r"list.*cut|cuts",
+    "inspect output": r"inspect.*output|output.*inspect",
+    "contact sheet": r"contact.*sheet|sheet.*contact",
+    "rubric sample": r"rubric.*sample|sample.*rubric",
+    "evaluate rubric": r"evaluate.*rubric|rubric.*evaluate",
+    "measure output": r"measure.*output|output.*measure",
+    "measure asset": r"measure.*asset|asset.*measure",
+    "review audio": r"review.*audio|audio.*review",
+    "get audio review": r"get.*audio.*review|audio.*review.*get",
+    "list audio reviews": r"list.*audio.*review|audio.*review.*list",
     "export": r"export",
 }
 
@@ -141,8 +161,12 @@ def _manifest(app: FastAPI) -> list[dict[str, Any]]:
 
 def test_manifest_is_derived_from_the_route_table(app: FastAPI, op: Op) -> None:
     names = {str(t.get("name", "")).lower().replace("-", "_") for t in _manifest(app)}
-    assert op.name.lower() in names, (
-        f"{op.key} missing from the tool manifest {sorted(names)}"
+    # Named independently of the production flag, so marking any other operation
+    # creator-only (and so hiding it from MCP) fails here.
+    creator_only = {"approve_framing", "approve_shot", "approve_cut"}
+    expected = op.name not in creator_only or app.state.settings.approvals.agent_may_approve
+    assert (op.name.lower() in names) is expected, (
+        f"{op.key} manifest presence should be {expected}; tools are {sorted(names)}"
     )
 
 

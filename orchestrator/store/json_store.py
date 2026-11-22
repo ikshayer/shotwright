@@ -38,6 +38,7 @@ import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, ClassVar, Literal, TypeVar
 
@@ -181,7 +182,7 @@ def _invalid(message: str, *, cause: BaseException | None = None) -> JobError:
 
 def _check_creation_approval_fields(entity: Entity) -> None:
     """Approval state can only be attached to an existing record by its service."""
-    for field in ("approval_review_id", "approved_cut_version"):
+    for field in ("approval_review_id", "approved_cut_version", "approved_cut_output_id"):
         if getattr(entity, field, None) is not None:
             raise _invalid(
                 f"`{field}` may not be set on creation; approval is set only by the approval service"
@@ -382,6 +383,63 @@ class ProjectStore:
                 return sorted(entry.name for entry in episodes.iterdir() if entry.is_dir())
             except OSError as exc:
                 raise JobError.from_exception(exc) from exc
+
+    def list_reviews(self) -> list[Review]:
+        """Read every project Review, including legacy unscoped opinions."""
+        with self._lock:
+            directory = self._resolve("reviews")
+            try:
+                entries = tuple(directory.iterdir())
+            except FileNotFoundError:
+                return []
+            except NotADirectoryError as exc:
+                raise _invalid("reviews path is not a directory", cause=exc) from exc
+            except OSError as exc:
+                raise JobError.from_exception(exc) from exc
+            relatives = [
+                f"reviews/{entry.name}"
+                for entry in entries
+                if entry.suffix == ".json"
+            ]
+            reviews = [self._read_record(Review, relative)[0] for relative in relatives]
+
+            def created_utc(review: Review) -> datetime:
+                # Legacy Reviews may carry naive timestamps; new ones are UTC-aware.
+                # Read a naive value as UTC so mixed projects still sort.
+                stamp = review.created_at
+                return stamp.replace(tzinfo=timezone.utc) if stamp.tzinfo is None else stamp
+
+            return sorted(reviews, key=lambda review: (created_utc(review), review.review_id))
+
+    def find_output(self, episode_id: str, output_id: str) -> ShotOutput | EpisodeOutput:
+        """Find one Shot or cut output receipt by id, verifying only that receipt.
+
+        Ledger filenames carry the output id, so other receipts are never read: a
+        damaged artifact elsewhere in the episode cannot block this lookup.
+        """
+        with self._lock:
+            self.load(Episode, episode_id)
+            matches: list[ShotOutput | EpisodeOutput] = []
+            for shot_id in self.ids(Shot, episode_id=episode_id):
+                ledger = self._shot_output_directory(episode_id, shot_id)
+                for token, relative in self._shot_output_files(ledger):
+                    match = _SHOT_OUTPUT_FILE.fullmatch(Path(relative).name)
+                    if match is not None and match.group(2) == output_id:
+                        output, _ = self._read_shot_output(
+                            relative, token=token, episode_id=episode_id, shot_id=shot_id,
+                        )
+                        matches.append(output)
+            directory = self._episode_output_directory(episode_id)
+            for token, relative in self._episode_output_files(directory):
+                match = _SHOT_OUTPUT_FILE.fullmatch(Path(relative).name)
+                if match is not None and match.group(2) == output_id:
+                    output, _ = self._read_episode_output(relative, token=token, episode_id=episode_id)
+                    matches.append(output)
+            if not matches:
+                raise RecordNotFound(f"output {output_id!r} does not exist in Episode {episode_id!r}")
+            if len(matches) > 1:
+                raise _invalid(f"output id {output_id!r} is ambiguous in Episode {episode_id!r}")
+            return matches[0]
 
     def list_h3_candidates(self, shot_id: str, *, episode_id: str) -> tuple[H3Candidate, ...]:
         """List immutable candidate receipts for a Shot in stable filename order."""

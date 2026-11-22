@@ -2,7 +2,9 @@
 
 This package provides a standalone, local Qwen analysis helper for reference-media notes and generated-audio review. Its output is advisory text: a creator must review it, and it never grants approval or updates project entities.
 
-The helper uses the repository's existing pinned Qwen model and isolated runtime under `spikes/23_joint_av_analyzer/_work`. It does not install packages or modify that runtime. The helper is deliberately outside the production CLI, HTTP API, job registry, and production GPU lease. It does not stop applications or take over their GPU memory.
+The helper uses the repository's existing pinned Qwen model and isolated runtime under `spikes/23_joint_av_analyzer/_work`. It does not install packages or modify that runtime. It does not stop applications or take over their GPU memory.
+
+There are two ways in. The standalone CLI described below is unchanged. Since 2026-11-21 the same code also runs as the production `qwen_audio_review` GPU job (see [Queued review](#queued-review-production) and `orchestrator/api/AUDIO_REVIEW_CONTRACT.md`).
 
 ## Requirements and paths
 
@@ -11,10 +13,10 @@ Run from the repository root. The default project root is the repository contain
 Use the repository's orchestrator environment, not ComfyUI's embedded Python:
 
 ```powershell
-D:/Work/video_pipeline/.venv/Scripts/python.exe -B -m orchestrator.adapters.qwen inspect
-D:/Work/video_pipeline/.venv/Scripts/python.exe -B -m orchestrator.adapters.qwen analyze --media references/my_clip.mkv --dry-run
-D:/Work/video_pipeline/.venv/Scripts/python.exe -B -m orchestrator.adapters.qwen analyze --media references/my_clip.mkv
-D:/Work/video_pipeline/.venv/Scripts/python.exe -B -m orchestrator.adapters.qwen review --media references/generated_take.wav --mode audio --brief "Intent: restrained, distant security-room speech. Evaluate whether the voice and recording feel appropriately degraded; hiss and distortion may be intentional."
+.venv/Scripts/python.exe -B -m orchestrator.adapters.qwen inspect
+.venv/Scripts/python.exe -B -m orchestrator.adapters.qwen analyze --media references/my_clip.mkv --dry-run
+.venv/Scripts/python.exe -B -m orchestrator.adapters.qwen analyze --media references/my_clip.mkv
+.venv/Scripts/python.exe -B -m orchestrator.adapters.qwen review --media references/generated_take.wav --mode audio --brief "Intent: restrained, distant security-room speech. Evaluate whether the voice and recording feel appropriately degraded; hiss and distortion may be intentional."
 ```
 
 `inspect` reports the pinned model revision and whether the existing analyzer, isolated Python, and model files are present. It does not load CUDA or the model. `--dry-run` probes the media, validates the requested interval, plans windows, and writes a planned report without preparing clips or running inference.
@@ -28,7 +30,7 @@ Defaults are a 25-second window, 2-second overlap, and a maximum of 500 generate
 `--start` and `--duration` select an interval in the media file's timeline. `--source-offset` adds a caller-provided offset to the reported source timestamps; it changes timestamp metadata, not which media samples are decoded. For example, a clip beginning 12 seconds into a larger source can be analyzed with `--source-offset 12`; use `--start` separately to select a position inside the supplied clip.
 
 ```powershell
-D:/Work/video_pipeline/.venv/Scripts/python.exe -B -m orchestrator.adapters.qwen analyze `
+.venv/Scripts/python.exe -B -m orchestrator.adapters.qwen analyze `
   --media references/long_clip.mkv --start 30 --duration 55 `
   --source-offset 120 --window-seconds 25 --overlap-seconds 2 --max-new-tokens 500
 ```
@@ -51,7 +53,13 @@ The spike23 Qwen runs sampled roughly 200 MiB of free GPU memory at the tightest
 
 Cancellation runs the existing worker cleanup and retains a report when possible. Cleanup is verified from the worker's recorded process-tree telemetry; uncertain cleanup is treated as a failure and prevents another batch. The existing cleanup wait can be unbounded, so cancellation is not guaranteed to finish within a fixed time.
 
-This helper remains a local CLI/API adapter with no production scheduler integration. Production use would require the model-slot, budget, and lease registration specified by the pipeline PRD.
+The standalone CLI has no production scheduler integration; the queued review below does.
+
+## Queued review (production)
+
+`review_audio` (HTTP, MCP and CLI) queues a `qwen_audio_review` GPU job for an audio Asset (a TTS take) or for an output's soundtrack, with a required intent brief. The job runs under the production GPU lease, so it waits behind renders, and it is admitted only with 8 GiB free VRAM, 6 GiB free RAM and 8 GiB free disk (`[qwen_review]` settings). It re-verifies the target, copies its bytes to `_work/qwen_review_inputs/<id>/`, checks the copy's hash, runs the helper on that copy with a named demuxer through `QwenAdapter.run_managed`, and removes the copy afterwards. Cancelling the job stops the native worker within about a quarter of a second of the request (the supervisor's `should_stop` hook). A window preparation already running finishes first. There is one attempt and no automatic retry. An interval is at most 120 s.
+
+The full helper run directory stays under `_work/qwen_helper/`. An immutable project copy of the report is written to `audio_reviews/<id>.json`, and `get_audio_review` returns a bounded projection of it: the verbatim responses, coverage, measured window metrics, errors and limitations, always marked advisory. Nothing in this path creates a Review or touches an approval.
 
 
 
@@ -60,12 +68,12 @@ This helper remains a local CLI/API adapter with no production scheduler integra
 The complete stdout JSON includes native telemetry and may be large. Claude/Codex can capture it and print only the saved report links, then read the Markdown report for complete model responses and measurements:
 
 ```powershell
-$qwenResult = & D:/Work/video_pipeline/.venv/Scripts/python.exe -B -m orchestrator.adapters.qwen review --media media/generated.mp4 --brief-file briefs/audio_intent.txt | ConvertFrom-Json
+$qwenResult = & .venv/Scripts/python.exe -B -m orchestrator.adapters.qwen review --media media/generated.mp4 --brief-file briefs/audio_intent.txt | ConvertFrom-Json
 $qwenResult | Select-Object status, report_path, markdown_path | ConvertTo-Json
 if ($LASTEXITCODE -ne 0) { throw "Qwen helper failed; inspect its retained report and errors." }
 ```
 
-Run these commands from `D:/Work/video_pipeline/.claude/worktrees/api-conformance` for this checkout. Examplemedia/brief paths must be replaced with existing contained files.
+Run these commands from the repository root. Example media and brief paths must be replaced with existing contained files.
 
 
 ## Verified status

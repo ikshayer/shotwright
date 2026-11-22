@@ -159,17 +159,38 @@ def _bind_cut(
     timeline, timeline_version = store.load_with_version(Timeline, episode_id)
     if episode.episode_id != episode_id or timeline.episode_id != episode_id:
         raise _invalid("the persisted Episode or Timeline identity disagrees with the requested Episode")
-    selected = next(
-        (row for row in store.list_episode_outputs(episode_id) if row.output_id == cut_output_id),
-        None,
-    )
+    cuts = store.list_episode_outputs(episode_id)
+    selected = next((row for row in cuts if row.output_id == cut_output_id), None)
     if selected is None:
         raise RecordNotFound(f"Episode {episode_id!r} has no cut output {cut_output_id!r}")
     if (selected.timeline_store_version != timeline_version
             or selected.timeline_sha256 != timeline.content_sha256):
         raise _invalid("the selected cut does not match the current persisted Timeline version and SHA-256")
+    if episode.approved_cut_output_id is None:
+        raise _invalid(
+            "this Episode has no cut-specific approval; re-approve the cut with approve_cut"
+        )
     if episode.approved_cut_version != timeline_version or episode.approval_review_id is None:
         raise _invalid("the selected Timeline version needs gate-C approval before export")
+    approved = next(
+        (row for row in cuts if row.output_id == episode.approved_cut_output_id),
+        None,
+    )
+    if approved is None:
+        raise _invalid(
+            f"approved cut receipt {episode.approved_cut_output_id!r} is missing"
+        )
+    if (approved.timeline_store_version != timeline_version
+            or approved.timeline_sha256 != timeline.content_sha256):
+        raise _invalid(
+            f"approved cut {approved.output_id!r} does not match the current Timeline"
+        )
+    if (selected.output_id != approved.output_id
+            and selected.content_sha256 != approved.content_sha256):
+        raise _invalid(
+            f"selected cut {selected.output_id!r} is not the approved cut "
+            f"{approved.output_id!r} and is not byte-identical"
+        )
     try:
         review = store.load(Review, episode.approval_review_id)
     except RecordNotFound as exc:

@@ -64,6 +64,20 @@ class AdapterRequestInvalid(Exception):
     """A routed job request lacks a valid Shot binding or resource declaration."""
 
 
+class CreatorOnly(Exception):
+    """An agent attempted a creator-only approval while the override is disabled."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Approvals are made by the creator through the CLI. To allow agent approvals, "
+            "set approvals.agent_may_approve=true."
+        )
+
+
+class OutputInspectionInvalid(Exception):
+    """The requested output or frame position cannot produce a preview frame."""
+
+
 #: Keys promoted to the top level of every body when the exception supplies them, so a
 #: client can read them without knowing which exception it is looking at (Amendment 1).
 _PROMOTED = ("expected", "actual", "current", "limit", "observed", "remediation")
@@ -75,7 +89,7 @@ MAPPED: tuple[type[BaseException], ...] = (
     H3RequestError, H3SetupError, TtsRequestError, TtsSetupError, AudioPostRequestError,
     PerformanceEditRequestError,
     TransitionError, ReviewApprovalError, JobError, MissingAdapter, RequestMismatch,
-    AdapterRequestInvalid,
+    AdapterRequestInvalid, CreatorOnly, OutputInspectionInvalid,
     AssetRegistrationInvalid,
     ProviderConfigurationError,
     ShotProposalWriteFailure,
@@ -134,6 +148,10 @@ def describe(exc: BaseException) -> tuple[int, dict[str, Any]] | None:
             "version_conflict", str(exc), expected=exc.expected, actual=exc.actual,
             current=current, record=exc.record,
         )
+    if isinstance(exc, CreatorOnly):
+        return 403, error_body("creator_only", str(exc), field="approval")
+    if isinstance(exc, OutputInspectionInvalid):
+        return 422, error_body("validation_error", str(exc), field="output")
     if isinstance(exc, RecordNotFound):
         return 404, error_body("not_found", str(exc))
     if isinstance(exc, ContainmentError):

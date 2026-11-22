@@ -81,7 +81,9 @@ def test_rejected_shot_successor_draft_revokes_gate_c(tmp_path):
     store = ProjectStore(ProjectRoot(tmp_path))
     add_episode(store)
     episode, token = store.load_with_version(Episode, "ep1")
-    gate = episode.model_copy(update={"approved_cut_version": 4, "approval_review_id": "gate-c"})
+    gate = episode.model_copy(update={"approved_cut_version": 4,
+                                      "approved_cut_output_id": "approved-cut",
+                                      "approval_review_id": "gate-c"})
     store.save(gate, expected_version=token)
     rejected = Shot(shot_id="s1", episode_id="ep1", duration_sec=5)
     store.create(rejected)
@@ -97,6 +99,7 @@ def test_rejected_shot_successor_draft_revokes_gate_c(tmp_path):
 
     after = store.load(Episode, "ep1")
     assert after.approved_cut_version is None
+    assert after.approved_cut_output_id is None
     assert after.approval_review_id is None
     assert store.load(Shot, "s1", episode_id="ep1", version=1).status is ShotStatus.REJECTED
     assert store.load(Shot, "s1", episode_id="ep1", version=2).status is ShotStatus.DRAFT

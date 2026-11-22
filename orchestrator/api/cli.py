@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Sequence
 from pathlib import Path
@@ -69,11 +70,13 @@ _SPEECH_OPERATIONS = frozenset({
     "apply_performance_edit",
 })
 _LOCALLY_OWNED_JOBS = {
+    "assemble_cut": "Cut assembly",
     "generate_h3_candidate": "H3",
     "generate_piper_speech": "Piper",
     "generate_indextts2_speech": "IndexTTS-2",
     "apply_audio_post_profile": "Audio post",
     "apply_performance_edit": "Performance edit",
+    "review_audio": "Audio review",
 }
 
 
@@ -116,8 +119,15 @@ def _command_callback(operation_name: str):
                 if configured.project_root.is_dir()
                 else None
             )
-            operation_context = OperationContext(configured, root)
+            operation_context = OperationContext(configured, root, actor="creator")
             result = operation_context.invoke(operation_name, payload)
+            if operation_name in {"inspect_output", "contact_sheet"}:
+                if not isinstance(result, bytes):
+                    raise RuntimeError(f"{operation_name} service returned non-binary image data")
+                result = {
+                    "media_type": "image/png",
+                    "data_base64": base64.b64encode(result).decode("ascii"),
+                }
             if operation_name in ASYNC_ADAPTER_OPERATIONS and wait_for_job:
                 submitted = result
                 job = operation_context.job_runner.wait(payload["project_id"], result["job_id"])
@@ -139,6 +149,22 @@ def _command_callback(operation_name: str):
                         raise RuntimeError("completed H3 job has no immutable candidate receipt")
                     result.update({"run_id": candidate.run_id, "av_path": candidate.av_path,
                                    "wav_path": candidate.wav_path, "report_path": candidate.report_path})
+                if operation_name == "assemble_cut":
+                    if operation_context is None:
+                        raise RuntimeError("cut assembly operation context is unavailable")
+                    # The job names its cut after its own run id, so this is exactly this
+                    # job's cut even if another assembly appended one meanwhile.
+                    cuts = operation_context._store(payload["project_id"]).list_episode_outputs(
+                        payload["episode_id"]
+                    )
+                    mine = [cut for cut in cuts if cut.output_id == job.run_id]
+                    if len(mine) != 1:
+                        raise RuntimeError(
+                            f"completed cut assembly job {job.job_id} has no EpisodeOutput named {job.run_id!r}"
+                        )
+                    result["output_id"] = mine[0].output_id
+                if operation_name == "review_audio":
+                    result["audio_review_id"] = job.run_id
         except KeyboardInterrupt:
             cleanup_error = None
             if operation_name in _LOCALLY_OWNED_JOBS and submitted and operation_context is not None and operation_context.job_runner is not None:
@@ -150,7 +176,7 @@ def _command_callback(operation_name: str):
                     cleanup_error = f"{type(exc).__name__}: {exc}"
             click.echo(json.dumps(error_body(
                 "cancelled", ("H3 candidate generation interrupted" if operation_name == "generate_h3_candidate"
-                 else f"{_LOCALLY_OWNED_JOBS.get(operation_name, 'job')} speech generation interrupted"),
+                 else f"{_LOCALLY_OWNED_JOBS.get(operation_name, 'job')} interrupted"),
                 cleanup_error=cleanup_error,
             )), err=True)
             raise click.exceptions.Exit(130)

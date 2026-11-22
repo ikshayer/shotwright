@@ -21,12 +21,22 @@ def build_manifest(app: FastAPI) -> dict[str, Any]:
     schema = get_openapi(title=app.title, version=app.version, routes=app.routes)
     paths = schema.get("paths", {})
     tools: list[dict[str, Any]] = []
+    settings = getattr(app.state, "settings", None)
+    approval_settings = getattr(settings, "approvals", None)
+    agent_may_approve = bool(getattr(approval_settings, "agent_may_approve", False))
+    creator_only = {
+        operation.name
+        for operation in getattr(app.state, "operations", ())
+        if getattr(operation, "creator_only", False)
+    }
     # Walked as routes rather than as schema entries so a tool is named after its route
     # function. An operationId is only reliable for a route that was given one
     # explicitly; FastAPI derives the rest from name, path and method together, which
     # would publish a tool called "brand_new_operation_brand_new_operation_get".
     for route in app.routes:
         if not isinstance(route, APIRoute) or not route.include_in_schema:
+            continue
+        if route.name in creator_only and not agent_may_approve:
             continue
         path_item = paths.get(route.path, {})
         for method in sorted(route.methods - {"HEAD", "OPTIONS"}):

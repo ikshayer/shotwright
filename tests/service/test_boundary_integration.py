@@ -1,10 +1,13 @@
 """Service contract exercised against real JSON storage and persisted Reviews."""
+import hashlib
 from datetime import UTC, datetime
 
 import pytest
 
 from orchestrator.domain.base import FramingStatus, ShotStatus
-from orchestrator.domain.entities import Beat, Episode, Review, Script, Shot, StyleBible
+from orchestrator.domain.entities import (
+    Beat, Episode, EpisodeOutput, Review, Script, Shot, StyleBible, Timeline,
+)
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.service.approval import approve_episode, approve_shot, approve_style_bible
@@ -53,6 +56,25 @@ def add_episode(store):
                expected_version=0)
 
 
+def add_cut_output(store, *, timeline_version: int, output_id: str = "cut-1") -> EpisodeOutput:
+    timeline = Timeline(episode_id="ep1", entries=[])
+    for token in range(timeline_version):
+        store.save(timeline, expected_version=token)
+    timeline = store.load(Timeline, "ep1")
+    artifact = f"test cut {output_id}".encode()
+    relative_path = f"episodes/ep1/outputs/cuts/{output_id}.mp4"
+    store._root.write_bytes(relative_path, artifact)
+    receipt = EpisodeOutput(
+        output_id=output_id, episode_id="ep1", timeline_store_version=timeline_version,
+        timeline_sha256=timeline.content_sha256, relative_path=relative_path,
+        content_sha256=hashlib.sha256(artifact).hexdigest(), delivery_profile="test",
+        storage_resolution=(64, 48), output_fps=12, sample_aspect_ratio="1/1",
+        ffmpeg_identity="test",
+    )
+    store.append_episode_output(receipt, expected_version=0)
+    return receipt
+
+
 def test_shot_approval_roundtrips_real_review_and_exact_binding(store, tmp_path):
     record = reviewable_shot(store)
     approved = approve_record(store, record)
@@ -66,12 +88,15 @@ def test_shot_approval_roundtrips_real_review_and_exact_binding(store, tmp_path)
 
 def test_episode_cut_approval_roundtrips_persisted_review(store, tmp_path):
     add_episode(store)
+    cut = add_cut_output(store, timeline_version=3)
     persist_review(store, "gate", "ep1", version=3,
                    target_kind="episode_cut", episode_id="ep1")
-    approve_episode(store, "ep1", cut_version=3, review_id="gate", expected_version=1)
+    approve_episode(store, "ep1", cut_output_id=cut.output_id,
+                    review_id="gate", expected_version=1)
     reopened = ProjectStore(ProjectRoot(tmp_path))
     loaded = reopened.load(Episode, "ep1")
-    assert (loaded.approved_cut_version, loaded.approval_review_id) == (3, "gate")
+    assert (loaded.approved_cut_version, loaded.approved_cut_output_id,
+            loaded.approval_review_id) == (3, cut.output_id, "gate")
     assert reopened.load(Review, "gate").target_version == 3
 
 
@@ -111,7 +136,8 @@ def test_approval_expected_version_conflict_preserves_record(store, target):
         before = store.load(Episode, "ep1")
         persist_review(store, "approval", "ep1", version=3,
                        target_kind="episode_cut", episode_id="ep1")
-        operation = lambda: approve_episode(store, "ep1", cut_version=3, review_id="approval",
+        operation = lambda: approve_episode(store, "ep1", cut_output_id="cut",
+                                           review_id="approval",
                                            expected_version=99)
         load = lambda: store.load(Episode, "ep1")
     else:
@@ -134,9 +160,11 @@ def test_mapping_only_revision_retains_artifacts_history_and_revokes_gate_on_reo
     new = approve_record(store, reviewable_shot(store, "new"))
     unrelated = approve_record(store, reviewable_shot(store, "unrelated", beat_id="b2"))
     pending = reviewable_shot(store, "pending", beat_id="b1")
+    cut = add_cut_output(store, timeline_version=4)
     persist_review(store, "gate", "ep1", version=4,
                    target_kind="episode_cut", episode_id="ep1")
-    approve_episode(store, "ep1", cut_version=4, review_id="gate", expected_version=1)
+    approve_episode(store, "ep1", cut_output_id=cut.output_id,
+                    review_id="gate", expected_version=1)
     before = Script(script_id="script1", episode_id="ep1", logline="Night shift",
                     beats=[Beat(beat_id="b1", target_sec=5, subtlety=2),
                            Beat(beat_id="b2", target_sec=5, subtlety=2)],
@@ -161,6 +189,7 @@ def test_mapping_only_revision_retains_artifacts_history_and_revokes_gate_on_reo
     assert artifact_root.resolve("audio/old.wav").read_bytes() == b"retained master audio"
     episode = reopened.load(Episode, "ep1")
     assert episode.approved_cut_version is None
+    assert episode.approved_cut_output_id is None
     assert episode.approval_review_id is None
     assert reopened.load(Review, "gate").target_version == 4
 
@@ -168,9 +197,11 @@ def test_mapping_only_revision_retains_artifacts_history_and_revokes_gate_on_reo
 def test_metadata_only_script_revision_is_persisted_without_staling_or_revoking(store):
     add_episode(store)
     approved = approve_record(store, reviewable_shot(store, dependencies=["b1"]))
+    cut = add_cut_output(store, timeline_version=4)
     persist_review(store, "gate", "ep1", version=4,
                    target_kind="episode_cut", episode_id="ep1")
-    approve_episode(store, "ep1", cut_version=4, review_id="gate", expected_version=1)
+    approve_episode(store, "ep1", cut_output_id=cut.output_id,
+                    review_id="gate", expected_version=1)
     before = Script(script_id="script1", episode_id="ep1", logline="Night shift",
                     beats=[Beat(beat_id="b1", target_sec=5, subtlety=2)])
     store.create(before)

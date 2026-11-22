@@ -84,7 +84,14 @@ def test_mutation_with_correct_token_passes_auth(client: TestClient, app, op: Op
     resp = client.request(
         op.method, op.url(), headers={TOKEN_HEADER: TOKEN}, **valid_request_kwargs(app, op)
     )
-    assert resp.status_code not in (401, 403)
+    assert resp.status_code != 401
+    # A valid token passes authentication. The creator-only approvals then refuse an
+    # HTTP (agent) caller by design (FINISHING_STEPS_CONTRACT R2); that 403 is a
+    # permission decision with its own error code, never an auth failure.
+    creator_only = {"approve_framing", "approve_shot", "approve_cut"}
+    if resp.status_code == 403:
+        assert op.name in creator_only, f"{op.key} answered 403 with a valid token"
+        assert resp.json()["error"] == "creator_only"
     assert TOKEN not in resp.text
 
 

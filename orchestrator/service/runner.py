@@ -21,6 +21,8 @@ from orchestrator.adapters.postprofile.runner import DegradeRequest
 from orchestrator.domain.base import Invalidation, ShotStatus
 from orchestrator.domain.entities import (
     CameraProfile,
+    Episode,
+    EpisodeOutput,
     Job,
     Shot,
     ShotOutput,
@@ -34,7 +36,7 @@ from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.errors import JobError, JobErrorKind, failure_diagnostics
 from orchestrator.platform.settings import Settings
 from orchestrator.service.compose import camera_profile_for_render, compose_degrade_request
-from orchestrator.store.json_store import ProjectStore, RecordNotFound
+from orchestrator.store.json_store import ProjectStore, RecordNotFound, VersionConflict
 
 
 class AdapterKind(StrEnum):
@@ -47,16 +49,19 @@ class AdapterKind(StrEnum):
     TTS_INDEXTTS2 = "tts_indextts2"
     AUDIO_POST = "audio_post"
     PERFORMANCE_EDIT = "performance_edit"
+    ASSEMBLE = "cut_assembly"
+    AUDIO_REVIEW = "qwen_audio_review"
 
 
 #: Kinds that never take the GPU lease: they pass CPU admission and run outside the GPU lock.
 _CPU_KINDS = frozenset({
     AdapterKind.SCENE, AdapterKind.DEGRADE, AdapterKind.TTS_PIPER, AdapterKind.AUDIO_POST,
-    AdapterKind.PERFORMANCE_EDIT,
+    AdapterKind.PERFORMANCE_EDIT, AdapterKind.ASSEMBLE,
 })
 #: Kinds that run under the GPU lease, the budget ledger and the watchdog.
 _GPU_KINDS = frozenset({
-    AdapterKind.RENDER, AdapterKind.GENERATE, AdapterKind.H3_CANDIDATE, AdapterKind.TTS_INDEXTTS2,
+    AdapterKind.RENDER, AdapterKind.GENERATE, AdapterKind.H3_CANDIDATE,
+    AdapterKind.TTS_INDEXTTS2, AdapterKind.AUDIO_REVIEW,
 })
 #: Kinds whose output is a candidate/take beside the Shot: payload `{"request": ..., "expected_version": ...}`,
 #: a `run_id` of their own, and no change to the Shot, its status or its ShotOutputs.
@@ -137,6 +142,22 @@ class _AdapterShim:
             return AdapterResult(artifact_path=result.av_path, value=result)
         if self.kind in _TAKE_KINDS:
             return self.adapter.invoke(request, job, queue=queue, cancel=self.cancel_check)
+        if self.kind is AdapterKind.ASSEMBLE:
+            receipt = self.adapter.invoke(
+                request,
+                job,
+                queue=queue,
+                cancel=self.cancel_check or _cancel_callback(request.payload),
+            )
+            if not isinstance(receipt, EpisodeOutput):
+                raise JobError(JobErrorKind.CORRUPT_ARTIFACT,
+                               "cut assembly adapter returned no EpisodeOutput receipt")
+            return AdapterResult(artifact_path=receipt.relative_path, value=receipt)
+        if self.kind is AdapterKind.AUDIO_REVIEW:
+            return self.adapter.invoke(
+                request, job, queue=queue,
+                cancel=self.cancel_check or _cancel_callback(request.payload),
+            )
         if isinstance(payload, dict):
             payload = payload.get("request", payload)
         if self.kind is AdapterKind.SCENE:
@@ -214,6 +235,32 @@ class JobRunner:
             required_ram_gb=request.required_ram_gb, required_disk_gb=request.required_disk_gb,
         )
         store = self.store_for(project_id)
+        if request.kind is AdapterKind.ASSEMBLE:
+            episode_id = request.episode_id or request.record_id
+            if request.record_id != episode_id:
+                raise ValueError("assembly record_id must match its episode_id")
+            request = AdapterRequest(
+                kind=request.kind,
+                payload=request.payload,
+                record_id=episode_id,
+                record_version=request.record_version,
+                episode_id=episode_id,
+                required_vram_gb=request.required_vram_gb,
+                required_ram_gb=request.required_ram_gb,
+                required_disk_gb=request.required_disk_gb,
+            )
+        if request.kind is AdapterKind.AUDIO_REVIEW:
+            payload = request.payload
+            if not isinstance(payload, dict) or not isinstance(payload.get("snapshot"), dict):
+                raise ValueError("audio review request must contain a validated snapshot")
+            audio_review_id = payload.get("audio_review_id")
+            if (not isinstance(audio_review_id, str) or not audio_review_id
+                    or request.record_id != audio_review_id or request.record_version != 0):
+                raise ValueError("audio review record_id/run_id token must match its new audio_review_id")
+            target = payload["snapshot"].get("target", {})
+            expected_episode = target.get("episode_id") if target.get("kind") == "output" else None
+            if request.episode_id != expected_episode:
+                raise ValueError("audio review episode_id must match an output target, or be absent for an Asset")
         if request.kind is AdapterKind.DEGRADE:
             raw_payload = _payload_body(request.payload)
             raw_shot_id = _payload_value(raw_payload, "shot_id")
@@ -249,41 +296,75 @@ class JobRunner:
                 required_disk_gb=request.required_disk_gb,
             )
         with store.command():
-            try:
-                shot = store.load(Shot, request.record_id, episode_id=request.episode_id)
-            except RecordNotFound as exc:
-                raise RecordNotFound(f"bound Shot {request.record_id!r} does not exist") from exc
-            episode_id = shot.episode_id
-            if request.kind in _SIDECAR_KINDS:
-                expected = request.payload.get("expected_version") if isinstance(request.payload, dict) else None
-                _, current_token = store.load_with_version(Shot, request.record_id, episode_id=episode_id)
-                if type(expected) is not int or expected != current_token:
-                    from orchestrator.store.json_store import VersionConflict
-                    raise VersionConflict(f"episodes/{episode_id}/shots/{request.record_id}",
-                                          expected if type(expected) is int else -1,
-                                          current_token, shot)
-            adapter_payload = _payload_body(request.payload)
-            payload_shot_id = _payload_value(adapter_payload, "shot_id")
-            payload_version = _payload_value(adapter_payload, "shot_version")
-            if payload_shot_id is not None and payload_shot_id != request.record_id:
-                raise ValueError("adapter payload shot_id must match AdapterRequest.record_id")
-            if payload_version is not None and payload_version != request.record_version:
-                raise ValueError("adapter payload shot_version must match AdapterRequest.record_version")
-            if not 1 <= request.record_version <= shot.version:
-                raise RecordNotFound(
-                    f"Shot {request.record_id!r} has no content version {request.record_version}"
+            if request.kind is AdapterKind.AUDIO_REVIEW:
+                payload = request.payload
+                audio_review_id = payload["audio_review_id"]
+                job = Job(
+                    job_id=uuid.uuid4().hex, type=request.kind.value,
+                    required_vram_gb=request.required_vram_gb,
+                    required_ram_gb=request.required_ram_gb,
+                    required_disk_gb=request.required_disk_gb,
+                    shot_id=None, episode_id=request.episode_id,
+                    run_id=audio_review_id,
                 )
-            # Historical content must exist, independently of the mutation token.
-            store.load(Shot, request.record_id, episode_id=episode_id,
-                       version=request.record_version)
-            job = Job(
-                job_id=uuid.uuid4().hex, type=request.kind.value,
-                required_vram_gb=request.required_vram_gb,
-                required_ram_gb=request.required_ram_gb,
-                required_disk_gb=request.required_disk_gb,
-                shot_id=request.record_id, episode_id=episode_id,
-                run_id=_job_run_id(request),
-            )
+            elif request.kind is AdapterKind.ASSEMBLE:
+                # AdapterRequest.record_id identifies the Episode and record_version binds
+                # its current mutation token; this kind has no Shot binding.
+                episode_id = request.record_id
+                try:
+                    episode, current_token = store.load_with_version(Episode, episode_id)
+                except RecordNotFound as exc:
+                    raise RecordNotFound(f"bound Episode {episode_id!r} does not exist") from exc
+                if request.record_version != current_token:
+                    raise VersionConflict(
+                        f"episodes/{episode_id}/episode.json",
+                        request.record_version,
+                        current_token,
+                        episode,
+                    )
+                job = Job(
+                    job_id=uuid.uuid4().hex, type=request.kind.value,
+                    required_vram_gb=request.required_vram_gb,
+                    required_ram_gb=request.required_ram_gb,
+                    required_disk_gb=request.required_disk_gb,
+                    shot_id=None, episode_id=episode_id,
+                    run_id=_job_run_id(request),
+                )
+            else:
+                try:
+                    shot = store.load(Shot, request.record_id, episode_id=request.episode_id)
+                except RecordNotFound as exc:
+                    raise RecordNotFound(f"bound Shot {request.record_id!r} does not exist") from exc
+                episode_id = shot.episode_id
+                if request.kind in _SIDECAR_KINDS:
+                    expected = request.payload.get("expected_version") if isinstance(request.payload, dict) else None
+                    _, current_token = store.load_with_version(Shot, request.record_id, episode_id=episode_id)
+                    if type(expected) is not int or expected != current_token:
+                        raise VersionConflict(f"episodes/{episode_id}/shots/{request.record_id}",
+                                              expected if type(expected) is int else -1,
+                                              current_token, shot)
+                adapter_payload = _payload_body(request.payload)
+                payload_shot_id = _payload_value(adapter_payload, "shot_id")
+                payload_version = _payload_value(adapter_payload, "shot_version")
+                if payload_shot_id is not None and payload_shot_id != request.record_id:
+                    raise ValueError("adapter payload shot_id must match AdapterRequest.record_id")
+                if payload_version is not None and payload_version != request.record_version:
+                    raise ValueError("adapter payload shot_version must match AdapterRequest.record_version")
+                if not 1 <= request.record_version <= shot.version:
+                    raise RecordNotFound(
+                        f"Shot {request.record_id!r} has no content version {request.record_version}"
+                    )
+                # Historical content must exist, independently of the mutation token.
+                store.load(Shot, request.record_id, episode_id=episode_id,
+                           version=request.record_version)
+                job = Job(
+                    job_id=uuid.uuid4().hex, type=request.kind.value,
+                    required_vram_gb=request.required_vram_gb,
+                    required_ram_gb=request.required_ram_gb,
+                    required_disk_gb=request.required_disk_gb,
+                    shot_id=request.record_id, episode_id=episode_id,
+                    run_id=_job_run_id(request),
+                )
             # Admission refusal is part of submit's synchronous contract. The id is
             # not persisted or returned until preflight succeeds.
             queue = _kind_queue(self.queue_for, project_id, request.kind)
@@ -300,6 +381,7 @@ class JobRunner:
     def cancel(self, project_id: str, job_id: str) -> Job:
         store = self.store_for(project_id)
         root = store._root
+        wait_for_assembly_stop = False
         # The record is read under the same lock a speech job holds while it decides between
         # "completed with an Asset" and "cancelled", so a cancel either lands first (and the
         # job is cancelled) or finds the job already completed (and changes nothing).
@@ -313,10 +395,23 @@ class JobRunner:
                 return job
             if job.state not in {"completed", "failed", "cancelled"}:
                 self._cancelled.add((project_id, job_id))
-                job.state = "cancelled"
-                job.error_kind = JobErrorKind.CANCELLED.value
-                append_job(root, job)
+                if job.type == AdapterKind.ASSEMBLE.value and (project_id, job_id) in self._active:
+                    # This worker owns a supervised FFmpeg child. Leave the journal
+                    # nonterminal until the adapter's watcher has stopped and joined it.
+                    wait_for_assembly_stop = True
+                else:
+                    job.state = "cancelled"
+                    job.error_kind = JobErrorKind.CANCELLED.value
+                    append_job(root, job)
                 self._condition.notify_all()
+        if wait_for_assembly_stop:
+            with self._condition:
+                while (project_id, job_id) in self._active:
+                    self._condition.wait()
+            record = read_job(root, job_id)
+            if record is None:
+                raise RecordNotFound(f"job {job_id!r} does not exist")
+            return Job.model_validate(record)
         return job
 
     def drain(self) -> None:
@@ -358,6 +453,11 @@ class JobRunner:
                 project_id, request, job = self._pending.popleft()
                 key = (project_id, job.job_id)
                 if key in self._cancelled:
+                    if request.kind is AdapterKind.AUDIO_REVIEW:
+                        self._persist_audio_review_terminal(
+                            self.store_for(project_id), request, job,
+                            JobError(JobErrorKind.CANCELLED, "audio review cancelled before adapter start"),
+                        )
                     self._condition.notify_all()
                     continue
                 self._active.add(key)
@@ -386,7 +486,8 @@ class JobRunner:
                         JobErrorKind.CANCELLED, "job cancelled before adapter start", active
                     )
                 try:
-                    if request.kind not in _SIDECAR_KINDS:
+                    if (request.kind not in _SIDECAR_KINDS
+                            and request.kind not in {AdapterKind.ASSEMBLE, AdapterKind.AUDIO_REVIEW}):
                         _begin_shot_work(store, request, active)
                     if callable(set_cancel_check):
                         # Installed here, on the thread that is about to call the adapter
@@ -452,9 +553,11 @@ class JobRunner:
                 finally:
                     with self._condition:
                         self._finalizing.discard(key)
-            else:
+            elif request.kind is not AdapterKind.AUDIO_REVIEW:
                 self._record_result(store, root, request, job, result)
         except JobError as exc:
+            if request.kind is AdapterKind.AUDIO_REVIEW:
+                self._persist_audio_review_terminal(store, request, job, exc)
             if request.kind is AdapterKind.H3_CANDIDATE:
                 try:
                     from orchestrator.service.minimax_h3 import persist_h3_terminal
@@ -466,7 +569,9 @@ class JobRunner:
                 store, job, request,
                 status="cancelled" if exc.kind is JobErrorKind.CANCELLED else "failed", error=exc,
             )
-            if exc.kind is not JobErrorKind.CANCELLED and request.kind not in _SIDECAR_KINDS:
+            if (exc.kind is not JobErrorKind.CANCELLED
+                    and request.kind not in _SIDECAR_KINDS
+                    and request.kind not in {AdapterKind.ASSEMBLE, AdapterKind.AUDIO_REVIEW}):
                 lifecycle_error = _fail_shot_after_job_error(store, request)
                 if lifecycle_error is not None:
                     exc.message = (
@@ -485,6 +590,11 @@ class JobRunner:
                         origin="runner",
                     ), self.settings)
         except Exception as exc:  # noqa: BLE001 - adapter failures are classified at the job boundary.
+            error = JobError.from_exception(
+                exc, job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id, origin="runner"
+            )
+            if request.kind is AdapterKind.AUDIO_REVIEW:
+                self._persist_audio_review_terminal(store, request, job, error)
             if request.kind is AdapterKind.H3_CANDIDATE:
                 try:
                     from orchestrator.service.minimax_h3 import persist_h3_terminal
@@ -492,10 +602,8 @@ class JobRunner:
                 except Exception as receipt_error:  # noqa: BLE001 - a receipt failure annotates the primary job error.
                     exc.add_note(f"H3 terminal GenerationRun persistence failed: {type(receipt_error).__name__}: {receipt_error}")
             self._persist_take_terminal(store, job, request, status="failed", error=exc)
-            error = JobError.from_exception(
-                exc, job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id, origin="runner"
-            )
             lifecycle_error = (None if request.kind in _SIDECAR_KINDS
+                               or request.kind in {AdapterKind.ASSEMBLE, AdapterKind.AUDIO_REVIEW}
                                else _fail_shot_after_job_error(store, request))
             if lifecycle_error is not None:
                 error.message = (
@@ -516,7 +624,40 @@ class JobRunner:
     def _startup_allowance(self, kind: AdapterKind) -> float:
         if kind is AdapterKind.TTS_INDEXTTS2:
             return self.settings.indextts2.startup_allowance_seconds
+        if kind is AdapterKind.AUDIO_REVIEW:
+            return self.settings.qwen_review.startup_allowance_seconds
         return self.settings.resources.startup_allowance_seconds
+
+    @staticmethod
+    def _persist_audio_review_terminal(
+        store: ProjectStore, request: AdapterRequest, job: Job, error: JobError,
+    ) -> None:
+        """Ensure a pre-helper failure still has a project-visible immutable report."""
+        try:
+            from orchestrator.service.audio_review import persist_minimal_audio_review_if_missing
+
+            persist_minimal_audio_review_if_missing(
+                store,
+                audio_review_id=job.run_id or request.record_id,
+                job_id=job.job_id,
+                snapshot=request.payload["snapshot"],
+                status="cancelled" if error.kind is JobErrorKind.CANCELLED else "failed",
+                errors=[{
+                    "family": "job", "kind": error.kind.value, "message": error.message,
+                    "retryable": error.retryable, "remediation": error.remediation,
+                }],
+            )
+        except Exception as report_error:  # noqa: BLE001 - keep the primary failure and annotate the record.
+            message = (
+                f"audio review terminal report persistence failed: "
+                f"{type(report_error).__name__}: {report_error}"
+            )
+            error.message = f"{error.message}; {message}"
+            error.args = (error.message,)
+            if job.state in {"failed", "cancelled"}:
+                job.error_kind = error.kind.value
+                job.error_message = error.message
+                append_job(store._root, job)
 
     @staticmethod
     def _persist_take_terminal(store: ProjectStore, job: Job, request: AdapterRequest, *,
@@ -538,6 +679,24 @@ class JobRunner:
             raise JobError(JobErrorKind.CORRUPT_ARTIFACT,
                            f"adapter output is missing: {result.artifact_path}",
                            job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
+        if request.kind is AdapterKind.ASSEMBLE:
+            receipt = result.value
+            if (not isinstance(receipt, EpisodeOutput)
+                    or receipt.episode_id != request.episode_id
+                    or receipt.relative_path != result.artifact_path):
+                raise _job_error(
+                    JobErrorKind.CORRUPT_ARTIFACT,
+                    "cut assembly result does not match its EpisodeOutput receipt",
+                    job,
+                )
+            outputs = store.list_episode_outputs(request.episode_id or "")
+            if not any(output.output_id == receipt.output_id for output in outputs):
+                raise _job_error(
+                    JobErrorKind.CORRUPT_ARTIFACT,
+                    "cut assembly receipt was not persisted to the Episode output ledger",
+                    job,
+                )
+            return
         hasher = hashlib.sha256()
         with artifact.open("rb") as stream:
             for block in iter(lambda: stream.read(1024 * 1024), b""):
@@ -649,6 +808,8 @@ def _job_run_id(request: AdapterRequest) -> str:
         return payload.run_id
     if request.kind in _SIDECAR_KINDS and isinstance(payload, dict):
         return payload["request"].run_id
+    if request.kind is AdapterKind.AUDIO_REVIEW and isinstance(payload, dict):
+        return payload["audio_review_id"]
     if request.kind is AdapterKind.GENERATE:
         run_id = _payload_value(_payload_body(payload), "run_id")
         if isinstance(run_id, str) and run_id.strip():
@@ -701,6 +862,8 @@ def _camera_profile_binding(
 
 def _begin_shot_work(store: ProjectStore, request: AdapterRequest, job: Job) -> None:
     """Advance a current Shot into the state required by the submitted stage."""
+    if request.kind is AdapterKind.ASSEMBLE:
+        return
     with store.command():
         try:
             shot, token = store.load_with_version(
@@ -831,6 +994,8 @@ def _fail_shot_after_job_error(
     request: AdapterRequest,
 ) -> BaseException | None:
     """Move only the bound current version from building to failed."""
+    if request.kind is AdapterKind.ASSEMBLE:
+        return None
     try:
         with store.command():
             try:

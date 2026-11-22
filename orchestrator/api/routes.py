@@ -6,9 +6,10 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, BinaryIO, Literal
+import math
+from typing import Annotated, Any, BinaryIO, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from orchestrator.adapters.assets.models import (
     AssetAcquireRequest,
@@ -22,9 +23,11 @@ from orchestrator.domain.entities import (
     Location,
     PostProfile,
     Project,
+    ReviewTargetKind,
     RubricScores,
     Script,
     Shot,
+    ShotOutputKind,
     VoiceConsent,
 )
 from orchestrator.adapters.perfedit import PauseDetection
@@ -87,6 +90,157 @@ class ShotProposal(BaseModel):
 
 class RubricRequest(BaseModel):
     scores: RubricScores
+
+
+class ReviewRecording(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_kind: ReviewTargetKind
+    target_id: str
+    target_version: int = Field(ge=1)
+    episode_id: str | None = None
+    approval_state: Literal["approved", "rejected"]
+    comment: str = ""
+    rubric_scores: list[RubricScores] = Field(default_factory=list)
+    waiver_text: str | None = None
+
+
+class ReviewListQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_kind: ReviewTargetKind | None = None
+    target_id: str | None = None
+    episode_id: str | None = None
+
+
+class ApprovalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=1)
+    review_id: str | None = None
+    comment: str = ""
+
+
+class CutApprovalRequest(ApprovalRequest):
+    cut_output_id: str = Field(pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class EmptyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class CutAssemblyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    credit_card_duration_sec: float = Field(5.0, gt=0, allow_inf_nan=False)
+    required_disk_gb: float = Field(0.0, ge=0, allow_inf_nan=False)
+
+
+class CameraProfileRevision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    camera_profile: CameraProfile
+    expected_version: int = Field(ge=1)
+
+
+class ShotOutputsQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    record_version: int | None = Field(None, ge=1)
+    kind: ShotOutputKind | None = None
+
+
+class InspectOutputQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    at_sec: float = Field(0.0, ge=0, allow_inf_nan=False)
+
+
+class ContactSheetQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    frames: int = Field(9, ge=2, le=16)
+    times: str | None = None
+    mode: Literal["frames", "difference"] = "frames"
+
+
+class OutputMetricsQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    samples: int = Field(12, ge=1, le=60)
+
+
+class AudioReviewOutputTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["output"]
+    episode_id: str = Field(min_length=1)
+    output_id: str = Field(min_length=1)
+
+
+class AudioReviewAssetTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["asset"]
+    asset_id: str = Field(min_length=1)
+
+
+AudioReviewTarget = Annotated[
+    AudioReviewOutputTarget | AudioReviewAssetTarget,
+    Field(discriminator="kind"),
+]
+
+
+class AudioReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target: AudioReviewTarget
+    brief: str
+    mode: Literal["audio", "joint"] = "audio"
+    start_sec: float = Field(0.0, ge=0, allow_inf_nan=False, strict=True)
+    duration_sec: float | None = Field(None, gt=0, allow_inf_nan=False, strict=True)
+
+    @field_validator("brief")
+    @classmethod
+    def _valid_intent_brief(cls, value: str) -> str:
+        if "\x00" in value or not 1 <= len(value.strip()) <= 4000:
+            raise ValueError("brief must contain 1 through 4000 non-whitespace characters and no NUL")
+        return value
+
+    @field_validator("start_sec", "duration_sec", mode="before")
+    @classmethod
+    def _strict_interval_numbers(cls, value: object) -> object:
+        if value is None:
+            return value
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError("audio review interval values must be finite numbers")
+        return value
+
+
+class AudioReviewListQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_kind: Literal["output", "asset"] | None = None
+    target_id: str | None = None
+
+    @model_validator(mode="after")
+    def _target_id_requires_kind(self) -> AudioReviewListQuery:
+        if self.target_id is not None and self.target_kind is None:
+            raise ValueError("target_id requires target_kind")
+        return self
+
+
+class RubricEvaluationEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    index: int = Field(ge=0, strict=True)
+    scores: RubricScores
+
+
+class RubricEvaluationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scores: list[RubricEvaluationEntry]
 
 
 class ProjectExportRequest(BaseModel):
@@ -187,6 +341,8 @@ class Operation:
     invoke: Callable[[Any, dict[str, Any]], Any]
     #: Declares a multipart surface carrying uploaded files instead of a JSON body.
     upload: bool = False
+    #: Restricts approvals to creator-authored CLI calls unless explicitly configured.
+    creator_only: bool = False
 
 
 def _call(name: str) -> Callable[[Any, dict[str, Any]], Any]:
@@ -231,6 +387,7 @@ OPERATIONS = (
     Operation("render_master", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/master", "Render the shot's full master with Blender from the built scene. payload {}. Requires shot status blocking (or building, or failed for a retry), a build_scene output that still matches the shot's Location version, and framing approved or not required; moves the shot to building. A shot already in review needs a revise_shot successor and a new build before it can be rendered again. Follow it with degrade_media.", True, "master renderer adapter", OpenRequest, _call("render_master")),
     Operation("generate_media", "POST", "/projects/{project_id}/media/generate", "Generate still media. Omitting request.models uses the pinned default profile (Z-Image Base + RealGen V2 at 0.6); profile may be z_image_realgen, z_image, or flux2_klein (FLUX.2 klein 4B), and request.prompt is required.", True, "media generation adapter", OpenRequest, _call("generate_media")),
     Operation("degrade_media", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/degrade", "Apply the CCTV degradation (an FFmpeg PostProfile composed from the shot and its CameraProfile) to the shot's latest master. payload {}; the request is rebuilt from stored state. Requires a render_master output for the current shot version, shot status building, and, for profiles with a timestamp overlay such as the default dvr-2005, a font at assets/fonts/overlay.ttf (projects are created without one). Success moves the shot to review.", True, "PostProfile adapter", OpenRequest, _call("degrade_media")),
+    Operation("assemble_cut", "POST", "/projects/{project_id}/episodes/{episode_id}/cut/assemble", "Assemble an Episode cut as a queued CPU FFmpeg job; assembly does not approve the cut. Send credit_card_duration_sec (positive, default 5.0) and required_disk_gb (default 0). Every Shot must be in review or approved and have a degraded output for its current version. Returns job_id and state; after completion the newest cut is in list_cuts and can be viewed with inspect_output. The creator approves it afterward with approve_cut.", True, "episode cut assembly adapter", CutAssemblyRequest, _call("assemble_cut")),
     Operation("sample_references", "POST", "/projects/{project_id}/references/sample", "Not implemented yet: always answers 501 missing_adapter. Do not call it.", True, "reference sampling adapter", OpenRequest, _call("sample_references")),
     Operation("generate_h3_candidate", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/h3-candidates", "Generate an opt-in MiniMax H3 audiovisual candidate", True, "service.minimax_h3", H3GenerateBody, _call("generate_h3_candidate")),
     Operation("list_h3_candidates", "GET", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/h3-candidates", "List immutable H3 candidate receipts", False, "store", None, _call("list_h3_candidates")),
@@ -246,6 +403,25 @@ OPERATIONS = (
     Operation("report_jobs", "GET", "/projects/{project_id}/jobs", "List every job record in the project, sorted by job_id, with its state (no filtering). Poll this after an asynchronous tool answers 202 with a job_id.", False, "jobs.queue", None, _call("report_jobs")),
     Operation("apply_typed_feedback", "POST", "/projects/{project_id}/feedback", "Not implemented yet: always answers 501 missing_adapter. Do not call it; revise the script, shot or location directly instead.", True, "service.apply_typed_feedback", OpenRequest, _call("apply_typed_feedback")),
     Operation("score_rubric", "POST", "/projects/{project_id}/rubric/score", "Score one sample against the five yes/no realism criteria and report whether it passes; nothing is stored. payload {scores: {mount_inferable, plausible_place, no_unmotivated_movement, stable_light_and_geometry, integrated_anomaly}}, all booleans. passed is true when at least 4 of 5 hold and no_unmotivated_movement is one of them.", True, "domain.entities.RubricScores", RubricRequest, _call("score_rubric")),
+    Operation("record_review", "POST", "/projects/{project_id}/reviews", "Record an immutable creator or agent opinion about an existing target version. Send target_kind, target_id, target_version, optional episode_id, approval_state, comment, rubric_scores and waiver_text; the target version must already exist. Returns the dated Review and never changes approval state.", True, "service.approval.record_review", ReviewRecording, _call("record_review")),
+    Operation("list_reviews", "GET", "/projects/{project_id}/reviews", "List dated Reviews in a project, including legacy unscoped records. Query target_kind, target_id and episode_id as exact-match filters; the project must exist. Returns matching Review records in creation order.", False, "store", ReviewListQuery, _call("list_reviews")),
+    Operation("approve_framing", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/framing/approve", "Creator-only: approve pending framing for a Shot after its preview exists. Send expected_version and optional review_id/comment; framing must be pending and have a current preview. Without review_id, an approving Review is recorded first. Returns the updated Shot. Agent approval requires approvals.agent_may_approve=true; otherwise use the CLI.", True, "service.approval.approve_framing", ApprovalRequest, _call("approve_framing"), creator_only=True),
+    Operation("approve_shot", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/approve", "Creator-only: approve a Shot after its dependencies are current and framing is approved or not required. Send expected_version and optional review_id/comment; the Shot and its exact Review must exist. Without review_id, an approving Review is recorded first. Returns the updated Shot. Agent approval requires approvals.agent_may_approve=true; otherwise use the CLI.", True, "service.approval.approve_shot", ApprovalRequest, _call("approve_shot"), creator_only=True),
+    Operation("approve_cut", "POST", "/projects/{project_id}/episodes/{episode_id}/cut/approve", "Creator-only: approve one exact cut from list_cuts after its Timeline is current and every Shot is in an approvable state. Send expected_version, cut_output_id and optional review_id/comment; without review_id, an approving Review is recorded first. Returns the updated Episode. Export can ship only this cut or a byte-identical cut. Agent approval requires approvals.agent_may_approve=true; otherwise use the CLI.", True, "service.approval.approve_episode", CutApprovalRequest, _call("approve_cut"), creator_only=True),
+    Operation("resume_invalidations", "POST", "/projects/{project_id}/invalidations/resume", "Resume pending dependency invalidation cascades after a partial upstream revision. Send an empty object; pending cascade plans must be valid. Returns the cascade ids resumed (or an empty list when none are pending).", True, "service.dependencies.resume_invalidations", EmptyRequest, _call("resume_invalidations")),
+    Operation("revise_camera_profile", "POST", "/projects/{project_id}/camera-profiles/{camera_id}/revise", "Revise a CameraProfile and check every episode for affected Shots. Send camera_profile and expected_version; camera_id must match the path and expected_version is the current mutation token. Returns the revised profile and invalidated shot ids.", True, "service.dependencies.revise_camera_profile", CameraProfileRevision, _call("revise_camera_profile")),
+    Operation("cancel_job", "POST", "/projects/{project_id}/jobs/{job_id}/cancel", "Request cancellation of any existing project job. Send an empty object; the JobRunner must know the job id. Returns job_id, state and whether cancellation was requested (false when the job is already terminal).", True, "service.runner.JobRunner.cancel", EmptyRequest, _call("cancel_job")),
+    Operation("list_shot_outputs", "GET", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/outputs", "List verified output receipts for a Shot across its versions. Query optional record_version and kind filters; the Episode must exist. Returns matching ShotOutput records in append order.", False, "store", ShotOutputsQuery, _call("list_shot_outputs")),
+    Operation("list_cuts", "GET", "/projects/{project_id}/episodes/{episode_id}/cuts", "List verified rendered cut receipts for an Episode. The Episode must exist. Returns its EpisodeOutput records in append order.", False, "store", None, _call("list_cuts")),
+    Operation("inspect_output", "GET", "/projects/{project_id}/episodes/{episode_id}/outputs/{output_id}/frame", "Inspect one hash-verified output frame. Query at_sec (finite and non-negative; images ignore it); the output id must exist in the Episode. Preview, still, generated images, masters, degraded videos, generated videos and cuts return a PNG; scene outputs require render_preview.", False, "service.inspect.inspect_output", InspectOutputQuery, _call("inspect_output")),
+    Operation("contact_sheet", "GET", "/projects/{project_id}/episodes/{episode_id}/outputs/{output_id}/contact-sheet", "Return a labelled PNG contact sheet from a hash-verified video output. Send frames (2–16), optional ascending times (2–16 seconds values), and mode=frames or difference; the output receipt must exist and identify a supported video. For rubric review, first call rubric_sample, then pass its sample times here (or inspect_output for each sample); evaluate with evaluate_rubric and record the opinion with record_review.", False, "service.perception.contact_sheet", ContactSheetQuery, _call("contact_sheet")),
+    Operation("rubric_sample", "GET", "/projects/{project_id}/episodes/{episode_id}/cuts/{output_id}/rubric-sample", "Return the deterministic FR-22 sample plan for one verified cut, using its pinned Timeline and Shot versions where available. The cut must exist in list_cuts. Use contact_sheet with the returned times (or inspect_output per sample), submit scores to evaluate_rubric, then record the result with record_review.", False, "service.perception.rubric_sample", None, _call("rubric_sample")),
+    Operation("evaluate_rubric", "POST", "/projects/{project_id}/episodes/{episode_id}/cuts/{output_id}/rubric-evaluate", "Evaluate one RubricScores object for every index in rubric_sample's plan; extra fields are forbidden and missing or extra indices answer 422. The verified cut must still exist. Returns the pass verdict and per-sample results without storing them; record the outcome with record_review (target_kind=episode_cut, rubric_scores, and creator waiver_text for a failing cut).", True, "service.perception.evaluate_rubric", RubricEvaluationRequest, _call("evaluate_rubric")),
+    Operation("measure_output", "GET", "/projects/{project_id}/episodes/{episode_id}/outputs/{output_id}/metrics", "Measure a hash-verified output's container, sampled luma and flicker, saturation, edge energy, active image area, scene changes, and audio loudness (LUFS), range and true peak, or image luma metrics. Send samples (1–60) for video; the output receipt must exist. Returns the metrics. For rubric review, use rubric_sample, then contact_sheet or inspect_output, evaluate_rubric and record_review.", False, "service.perception.measure_output", OutputMetricsQuery, _call("measure_output")),
+    Operation("measure_asset", "GET", "/projects/{project_id}/assets/{asset_id}/metrics", "Measure loudness (LUFS), loudness range, true peak and silence intervals for a registered local audio Asset after verifying its checksum. The Asset must be an audio or voice type with a supported local file. Returns container and audio metrics; use them with rubric_sample, contact_sheet or inspect_output, evaluate_rubric and record_review when reviewing a cut.", False, "service.perception.measure_asset", None, _call("measure_asset")),
+    Operation("review_audio", "POST", "/projects/{project_id}/audio-reviews", "After measure_asset or measure_output for the numbers, submit a required intent brief for advisory Qwen audio or joint audio/video review. The request is validated and then queued behind GPU work under the production lease; it takes minutes (about 2 minutes for 8 seconds, about 5 minutes for 35 seconds). Wait for the job, then call get_audio_review and form your own opinion with record_review. The result is unverified model output and never an approval.", True, "service.audio_review", AudioReviewRequest, _call("review_audio")),
+    Operation("get_audio_review", "GET", "/projects/{project_id}/audio-reviews/{audio_review_id}", "After measure_asset or measure_output for numbers, submit review_audio with an intent brief and wait for its GPU queued job (about 2 minutes for 8 seconds or 5 minutes for 35 seconds). Read this bounded report, check its unverified responses against the measurements and your own listening, then record your own record_review opinion. It never approves a target.", False, "service.audio_review", None, _call("get_audio_review")),
+    Operation("list_audio_reviews", "GET", "/projects/{project_id}/audio-reviews", "After measure_asset or measure_output for numbers, submit review_audio with an intent brief and wait for its job, which queues behind GPU work and takes minutes (about 2 minutes for 8 seconds or 5 minutes for 35 seconds). List reports newest first, optionally filter by target_kind=output or asset and target_id (target_id requires target_kind), then use get_audio_review to check unverified responses against the measurements and your own listening before recording your own record_review opinion. It never approves a target.", False, "service.audio_review", AudioReviewListQuery, _call("list_audio_reviews")),
     Operation("export", "POST", "/projects/{project_id}/export", "Export an approved episode cut and its portable project source package: delivery.mp4 plus a project snapshot under exports/{export_id}. payload {episode_id, cut_output_id, expected_version}: cut_output_id is a cut in the Episode's outputs and expected_version is the Episode's mutation token. The cut must match the current Timeline and the episode must carry its cut approval.", True, "adapters.export.package", ProjectExportRequest, _call("export")),
 )
 
@@ -260,9 +436,11 @@ ASYNC_ADAPTER_OPERATIONS = frozenset({
     "render_master",
     "generate_media",
     "degrade_media",
+    "assemble_cut",
     "generate_h3_candidate",
     "generate_piper_speech",
     "generate_indextts2_speech",
     "apply_audio_post_profile",
     "apply_performance_edit",
+    "review_audio",
 })

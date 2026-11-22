@@ -226,7 +226,7 @@ def _setup(tmp_path: Path, cut_bytes: bytes, *, intended_audio: bool = True) -> 
         target_kind="episode_cut", episode_id=_EPISODE, actor="creator",
         created_at=datetime(2026, 11, 16, tzinfo=UTC), approval_state=ShotStatus.APPROVED,
     ), expected_version=0)
-    approve_episode(store, _EPISODE, cut_version=timeline_token,
+    approve_episode(store, _EPISODE, cut_output_id=cut.output_id,
                     review_id="gate-c", expected_version=1)
     _, token = store.load_with_version(Episode, _EPISODE)
     return _Fixture(root, Settings(project_root=tmp_path), store, cut, token)
@@ -319,7 +319,9 @@ def test_api_exports_a_project_that_reopens_after_relocation(tmp_path: Path) -> 
     assert retained_cut.content_sha256 == _digest(package_files[_CUT])
     episode, episode_token = reopened.load_with_version(Episode, _EPISODE)
     assert episode_token == fixture.episode_token
-    assert episode.approval_review_id == "gate-c" and episode.approved_cut_version == token
+    assert (episode.approval_review_id == "gate-c"
+            and episode.approved_cut_version == token
+            and episode.approved_cut_output_id == fixture.cut.output_id)
     assert reopened.load(Review, "gate-c").target_version == token
     assert reopened.versions(Location, "room") == [1, 2]
     assert reopened.load(Script, "script", episode_id=_EPISODE).logline == "Two room angles"

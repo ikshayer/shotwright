@@ -10,6 +10,7 @@ record is enough to carry ``approval_review_id`` on a shot that is merely "appro
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -25,6 +26,7 @@ from orchestrator.domain.base import FramingStatus, ShotStatus
 from orchestrator.domain.entities import (
     CameraProfile,
     Episode,
+    EpisodeOutput,
     Location,
     PostProfile,
     Project,
@@ -106,9 +108,30 @@ def add_episode(store: ProjectStore, episode_id: str = "ep1", *, approved_cut_ve
     episode = store.load(Episode, episode_id)
     return store.save(
         episode.model_copy(update={"approved_cut_version": approved_cut_version,
+                                   "approved_cut_output_id": f"approved-{episode_id}",
                                    "approval_review_id": approval_review_id}),
         expected_version=created,
     )
+
+
+def add_cut_output(store: ProjectStore, episode_id: str = "ep1", *,
+                   timeline_version: int, output_id: str = "cut-1") -> EpisodeOutput:
+    timeline = Timeline(episode_id=episode_id, entries=[])
+    for token in range(timeline_version):
+        store.save(timeline, expected_version=token)
+    timeline = store.load(Timeline, episode_id)
+    artifact = f"test cut {output_id}".encode()
+    relative_path = f"episodes/{episode_id}/outputs/cuts/{output_id}.mp4"
+    store._root.write_bytes(relative_path, artifact)
+    receipt = EpisodeOutput(
+        output_id=output_id, episode_id=episode_id, timeline_store_version=timeline_version,
+        timeline_sha256=timeline.content_sha256, relative_path=relative_path,
+        content_sha256=hashlib.sha256(artifact).hexdigest(), delivery_profile="test",
+        storage_resolution=(64, 48), output_fps=12, sample_aspect_ratio="1/1",
+        ffmpeg_identity="test",
+    )
+    store.append_episode_output(receipt, expected_version=0)
+    return receipt
 
 
 def token(store: ProjectStore, shot_id: str, episode_id: str = "ep1") -> int:
@@ -151,7 +174,11 @@ def approved_shot(store: ProjectStore, shot_id: str, *, episode_id: str = "ep1",
 def approve_cut_directly(store: ProjectStore, episode_id: str = "ep1") -> None:
     episode, tok = store.load_with_version(Episode, episode_id)
     store.save(
-        episode.model_copy(update={"approved_cut_version": 1, "approval_review_id": "gate"}),
+        episode.model_copy(update={
+            "approved_cut_version": 1,
+            "approved_cut_output_id": f"approved-{episode_id}",
+            "approval_review_id": "gate",
+        }),
         expected_version=tok,
     )
 
@@ -159,6 +186,7 @@ def approve_cut_directly(store: ProjectStore, episode_id: str = "ep1") -> None:
 def assert_cut_revoked(store: ProjectStore, episode_id: str = "ep1") -> None:
     episode = store.load(Episode, episode_id)
     assert episode.approved_cut_version is None
+    assert episode.approved_cut_output_id is None
     assert episode.approval_review_id is None
 
 
@@ -370,10 +398,13 @@ def test_r2_approve_episode_binds_episode_cut_kind_id_version_and_episode(
     store: ProjectStore,
 ) -> None:
     add_episode(store)
+    cut = add_cut_output(store, timeline_version=3)
     store.save(scoped("gate", kind="episode_cut", target="ep1", version=3, episode="ep1"),
                expected_version=0)
-    result = approve_episode(store, "ep1", cut_version=3, review_id="gate", expected_version=1)
-    assert (result.approved_cut_version, result.approval_review_id) == (3, "gate")
+    result = approve_episode(store, "ep1", cut_output_id=cut.output_id,
+                             review_id="gate", expected_version=1)
+    assert (result.approved_cut_version, result.approved_cut_output_id,
+            result.approval_review_id) == (3, cut.output_id, "gate")
 
 
 @pytest.mark.parametrize("make_review", [
@@ -387,18 +418,21 @@ def test_r2_approve_episode_refuses_wrong_or_legacy_or_agent_reviews(
     store: ProjectStore, make_review,
 ) -> None:
     add_episode(store)
+    cut = add_cut_output(store, timeline_version=3)
     store.save(make_review(), expected_version=0)
     with pytest.raises(JobError) as error:
-        approve_episode(store, "ep1", cut_version=3, review_id="gate", expected_version=1)
+        approve_episode(store, "ep1", cut_output_id=cut.output_id,
+                        review_id="gate", expected_version=1)
     assert error.value.kind is JobErrorKind.INVALID_MANIFEST
     assert store.load(Episode, "ep1").approved_cut_version is None
 
 
 def test_r2_approve_episode_agent_review_accepted_with_setting(store: ProjectStore) -> None:
     add_episode(store)
+    cut = add_cut_output(store, timeline_version=3)
     store.save(scoped("gate", kind="episode_cut", target="ep1", version=3, episode="ep1",
                       actor="agent"), expected_version=0)
-    result = approve_episode(store, "ep1", cut_version=3, review_id="gate",
+    result = approve_episode(store, "ep1", cut_output_id=cut.output_id, review_id="gate",
                              expected_version=1, agent_may_approve=True)
     assert result.approval_review_id == "gate"
 
@@ -1029,7 +1063,8 @@ def test_r6_reassembling_an_unchanged_timeline_keeps_the_cut_approval(tmp_path: 
     approve_cut_directly(store, "episode-1")
     _assemble(fixture)
     episode = store.load(Episode, "episode-1")
-    assert (episode.approved_cut_version, episode.approval_review_id) == (1, "gate")
+    assert (episode.approved_cut_version, episode.approved_cut_output_id,
+            episode.approval_review_id) == (1, "approved-episode-1", "gate")
 
 
 # --------------------------------------------------------------------------
@@ -1037,7 +1072,7 @@ def test_r6_reassembling_an_unchanged_timeline_keeps_the_cut_approval(tmp_path: 
 # --------------------------------------------------------------------------
 
 
-def test_r7_propose_shots_on_an_approved_episode_clears_both_approval_fields(
+def test_r7_propose_shots_on_an_approved_episode_clears_all_approval_fields(
     store: ProjectStore,
 ) -> None:
     add_episode(store, approved_cut_version=2, approval_review_id="gate")
@@ -1053,7 +1088,8 @@ def test_r7_propose_shots_leaves_other_episodes_approval_alone(store: ProjectSto
     propose_shots(store, [Shot(shot_id="new", episode_id="ep1", duration_sec=3)])
     assert_cut_revoked(store, "ep1")
     other = store.load(Episode, "ep2")
-    assert (other.approved_cut_version, other.approval_review_id) == (3, "gate2")
+    assert (other.approved_cut_version, other.approved_cut_output_id,
+            other.approval_review_id) == (3, "approved-ep2", "gate2")
 
 
 def test_r7_propose_shots_on_an_unapproved_episode_still_appends(store: ProjectStore) -> None:
@@ -1101,6 +1137,7 @@ def test_r8_revise_location_stales_shots_in_every_episode_without_being_told(
     assert store.load(Shot, "other", episode_id="ep3").status is ShotStatus.APPROVED
     untouched = store.load(Episode, "ep3")
     assert untouched.approved_cut_version == 1
+    assert untouched.approved_cut_output_id == "approved-ep3"
 
 
 def test_r8_an_episode_not_named_anywhere_is_still_invalidated(store: ProjectStore) -> None:

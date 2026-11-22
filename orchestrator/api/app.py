@@ -9,7 +9,7 @@ import html
 import math
 import threading
 import uuid
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import quote, urlsplit
 
 from fastapi import Body, FastAPI, File, Form, Query, Request, UploadFile
@@ -38,10 +38,11 @@ from orchestrator.domain.entities import (
     Shot,
 )
 from orchestrator.jobs.gpu_slot import GpuExecutionSlot
-from orchestrator.jobs.journal import read_job_records
+from orchestrator.jobs.journal import TERMINAL_STATES, read_job as read_job_record, read_job_records
 from orchestrator.jobs.lease import GpuLease, PynvmlProbe
 from orchestrator.jobs.queue import JobQueue, ProjectQuarantine, SystemHostResources
 from orchestrator.platform.containment import ProjectRoot, validate_upload
+from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.platform.settings import Settings
 from orchestrator.service.assets import (
     AssetRegistrationInvalid,
@@ -60,6 +61,29 @@ from orchestrator.service.perfedit import (
     inspect_take_pauses,
 )
 from orchestrator.service.compose import compose_render_request
+from orchestrator.service.credits import collect_credits_for_shots
+from orchestrator.service.timeline import compose_timeline
+from orchestrator.service.approval import (
+    approve_episode,
+    approve_framing,
+    approve_shot,
+    record_review,
+)
+from orchestrator.service.inspect import FrameUnavailable, inspect_output as inspect_project_output
+from orchestrator.service.perception import (
+    PerceptionInvalid,
+    contact_sheet as build_contact_sheet,
+    evaluate_rubric as evaluate_cut_rubric,
+    measure_asset as measure_audio_asset,
+    measure_output as measure_project_output,
+    rubric_sample as build_rubric_sample,
+)
+from orchestrator.service.audio_review import (
+    get_audio_review as read_audio_review,
+    list_audio_reviews as read_audio_reviews,
+    resolve_audio_review_snapshot,
+    with_brief_actor,
+)
 from orchestrator.service.dependencies import (
     create_camera_profile,
     create_episode,
@@ -68,6 +92,8 @@ from orchestrator.service.dependencies import (
     create_project,
     draft_script,
     propose_shots,
+    resume_invalidations,
+    revise_camera_profile,
     revise_location,
     revise_script,
     revise_shot,
@@ -104,7 +130,9 @@ from orchestrator.store.json_store import ProjectStore, RecordNotFound
 from .errors import (
     MAPPED,
     AdapterRequestInvalid,
+    CreatorOnly,
     MissingAdapter,
+    OutputInspectionInvalid,
     RequestMismatch,
     describe,
     error_body,
@@ -128,6 +156,14 @@ _LOOPBACK_HOSTNAMES = ("127.0.0.1", "localhost", "[::1]")
 _MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
+def _annotate_recorded_review_failure(exc: Exception, review_id: str) -> None:
+    """Keep the original failure type while identifying the persisted opinion."""
+    message = f"{exc} (approving Review {review_id!r} was recorded and remains immutable)"
+    if isinstance(exc, JobError):
+        exc.message = message
+    exc.args = (message,)
+
+
 class OperationContext:
     """Runtime dependencies and the shared dispatcher used by HTTP and CLI."""
 
@@ -138,9 +174,11 @@ class OperationContext:
         *,
         job_queues: dict[str, JobQueue] | None = None,
         job_runner: JobRunner | None = None,
+        actor: Literal["creator", "agent"] = "agent",
     ) -> None:
         self.settings = settings
         self.root = root
+        self.actor = actor
         self.job_queues = job_queues or {}
         self._runtime: _DefaultRuntime | None = None
         if job_runner is None and root is not None:
@@ -169,6 +207,14 @@ class OperationContext:
         return ProjectStore(self._project_root(project_id, create=create))
 
     def invoke(self, operation: str, data: dict[str, Any]) -> Any:
+        declared = next((item for item in OPERATIONS if item.name == operation), None)
+        if (
+            declared is not None
+            and declared.creator_only
+            and self.actor == "agent"
+            and not self.settings.approvals.agent_may_approve
+        ):
+            raise CreatorOnly()
         if operation == "health":
             return {"status": "ok"}
         if operation == "create_project":
@@ -278,6 +324,255 @@ class OperationContext:
         if operation == "score_rubric":
             scores = RubricScores.model_validate(data.get("scores", data))
             return {"scores": scores.model_dump(mode="json"), "passed": scores.passed()}
+        if operation == "record_review":
+            review = record_review(
+                self._store(data["project_id"]),
+                target_kind=data["target_kind"],
+                target_id=data["target_id"],
+                target_version=data["target_version"],
+                episode_id=data.get("episode_id"),
+                actor=self.actor,
+                approval_state=ShotStatus(data["approval_state"]),
+                comment=data.get("comment", ""),
+                rubric_scores=data.get("rubric_scores", ()),
+                waiver_text=data.get("waiver_text"),
+            )
+            return review.model_dump(mode="json")
+        if operation == "list_reviews":
+            reviews = self._store(data["project_id"]).list_reviews()
+            return [
+                review.model_dump(mode="json")
+                for review in reviews
+                if (data.get("target_kind") is None or review.target_kind == data["target_kind"])
+                and (data.get("target_id") is None or review.target_id == data["target_id"])
+                and (data.get("episode_id") is None or review.episode_id == data["episode_id"])
+            ]
+        if operation == "approve_framing":
+            store = self._store(data["project_id"])
+            review_id = data.get("review_id")
+            recorded_review = None
+            if review_id is None:
+                shot = store.load(Shot, data["shot_id"], episode_id=data["episode_id"])
+                recorded_review = record_review(
+                    store,
+                    target_kind="framing",
+                    target_id=data["shot_id"],
+                    target_version=shot.version,
+                    episode_id=data["episode_id"],
+                    actor=self.actor,
+                    approval_state=ShotStatus.APPROVED,
+                    comment=data.get("comment", ""),
+                )
+                review_id = recorded_review.review_id
+            try:
+                shot = approve_framing(
+                    store,
+                    data["shot_id"],
+                    episode_id=data["episode_id"],
+                    review_id=review_id,
+                    expected_version=data["expected_version"],
+                    agent_may_approve=self.settings.approvals.agent_may_approve,
+                )
+            except Exception as exc:
+                if recorded_review is not None:
+                    _annotate_recorded_review_failure(exc, recorded_review.review_id)
+                raise
+            return shot.model_dump(mode="json")
+        if operation == "approve_shot":
+            store = self._store(data["project_id"])
+            review_id = data.get("review_id")
+            recorded_review = None
+            if review_id is None:
+                shot = store.load(Shot, data["shot_id"], episode_id=data["episode_id"])
+                recorded_review = record_review(
+                    store,
+                    target_kind="shot",
+                    target_id=data["shot_id"],
+                    target_version=shot.version,
+                    episode_id=data["episode_id"],
+                    actor=self.actor,
+                    approval_state=ShotStatus.APPROVED,
+                    comment=data.get("comment", ""),
+                )
+                review_id = recorded_review.review_id
+            try:
+                shot = approve_shot(
+                    store,
+                    data["shot_id"],
+                    episode_id=data["episode_id"],
+                    review_id=review_id,
+                    expected_version=data["expected_version"],
+                    agent_may_approve=self.settings.approvals.agent_may_approve,
+                )
+            except Exception as exc:
+                if recorded_review is not None:
+                    _annotate_recorded_review_failure(exc, recorded_review.review_id)
+                raise
+            return shot.model_dump(mode="json")
+        if operation == "approve_cut":
+            store = self._store(data["project_id"])
+            review_id = data.get("review_id")
+            recorded_review = None
+            if review_id is None:
+                episode_id = data["episode_id"]
+                cut = next(
+                    (row for row in store.list_episode_outputs(episode_id)
+                     if row.output_id == data["cut_output_id"]),
+                    None,
+                )
+                if cut is None:
+                    raise RecordNotFound(
+                        f"Episode {episode_id!r} has no cut output {data['cut_output_id']!r}"
+                    )
+                recorded_review = record_review(
+                    store,
+                    target_kind="episode_cut",
+                    target_id=episode_id,
+                    target_version=cut.timeline_store_version,
+                    episode_id=episode_id,
+                    actor=self.actor,
+                    approval_state=ShotStatus.APPROVED,
+                    comment=data.get("comment", ""),
+                )
+                review_id = recorded_review.review_id
+            try:
+                episode = approve_episode(
+                    store,
+                    data["episode_id"],
+                    cut_output_id=data["cut_output_id"],
+                    review_id=review_id,
+                    expected_version=data["expected_version"],
+                    agent_may_approve=self.settings.approvals.agent_may_approve,
+                )
+            except Exception as exc:
+                if recorded_review is not None:
+                    _annotate_recorded_review_failure(exc, recorded_review.review_id)
+                raise
+            return episode.model_dump(mode="json")
+        if operation == "resume_invalidations":
+            resumed = resume_invalidations(self._store(data["project_id"]))
+            return {"resumed": list(resumed)}
+        if operation == "revise_camera_profile":
+            camera_profile = CameraProfile.model_validate(data["camera_profile"])
+            _require_path_match(data, "camera_id", camera_profile.camera_id)
+            invalidated = revise_camera_profile(
+                self._store(data["project_id"]),
+                camera_profile,
+                expected_version=data["expected_version"],
+            )
+            return {
+                "camera_profile": camera_profile.model_dump(mode="json"),
+                "invalidated": list(invalidated),
+            }
+        if operation == "cancel_job":
+            if self.job_runner is None:
+                raise RuntimeError("default JobRunner was not configured")
+            store = self._store(data["project_id"])
+            previous = read_job_record(store._root, data["job_id"])
+            job = self.job_runner.cancel(data["project_id"], data["job_id"])
+            requested = (
+                previous is not None
+                and previous.get("state") not in TERMINAL_STATES
+                and job.state == "cancelled"
+            )
+            return {
+                "job_id": job.job_id,
+                "state": job.state,
+                "cancellation_requested": requested,
+            }
+        if operation == "list_shot_outputs":
+            outputs = self._store(data["project_id"]).list_shot_outputs(
+                data["shot_id"],
+                episode_id=data["episode_id"],
+                record_version=data.get("record_version"),
+                kind=data.get("kind"),
+            )
+            return [output.model_dump(mode="json") for output in outputs]
+        if operation == "list_cuts":
+            outputs = self._store(data["project_id"]).list_episode_outputs(data["episode_id"])
+            return [output.model_dump(mode="json") for output in outputs]
+        if operation == "inspect_output":
+            at_sec = data.get("at_sec", 0.0)
+            valid_at_sec = False
+            if not isinstance(at_sec, bool) and isinstance(at_sec, (int, float)):
+                try:
+                    valid_at_sec = math.isfinite(at_sec) and at_sec >= 0
+                except OverflowError:
+                    valid_at_sec = False
+            if not valid_at_sec:
+                raise OutputInspectionInvalid("at_sec must be finite and greater than or equal to zero")
+            try:
+                return inspect_project_output(
+                    self._store(data["project_id"]),
+                    episode_id=data["episode_id"],
+                    output_id=data["output_id"],
+                    ffmpeg_exe=self.settings.binaries.ffmpeg_exe,
+                    at_sec=float(at_sec),
+                )
+            except FrameUnavailable as exc:
+                raise OutputInspectionInvalid(str(exc)) from exc
+        if operation == "contact_sheet":
+            try:
+                return build_contact_sheet(
+                    self._store(data["project_id"]),
+                    episode_id=data["episode_id"],
+                    output_id=data["output_id"],
+                    ffmpeg_exe=self.settings.binaries.ffmpeg_exe,
+                    frames=data.get("frames", 9),
+                    times=data.get("times"),
+                    mode=data.get("mode", "frames"),
+                )
+            except PerceptionInvalid as exc:
+                raise OutputInspectionInvalid(str(exc)) from exc
+        if operation == "rubric_sample":
+            try:
+                return build_rubric_sample(
+                    self._store(data["project_id"]),
+                    episode_id=data["episode_id"],
+                    output_id=data["output_id"],
+                )
+            except PerceptionInvalid as exc:
+                raise OutputInspectionInvalid(str(exc)) from exc
+        if operation == "evaluate_rubric":
+            try:
+                return evaluate_cut_rubric(
+                    self._store(data["project_id"]),
+                    episode_id=data["episode_id"],
+                    output_id=data["output_id"],
+                    scores=data["scores"],
+                )
+            except PerceptionInvalid as exc:
+                raise OutputInspectionInvalid(str(exc)) from exc
+        if operation == "measure_output":
+            try:
+                return measure_project_output(
+                    self._store(data["project_id"]),
+                    episode_id=data["episode_id"],
+                    output_id=data["output_id"],
+                    ffmpeg_exe=self.settings.binaries.ffmpeg_exe,
+                    samples=data.get("samples", 12),
+                )
+            except PerceptionInvalid as exc:
+                raise OutputInspectionInvalid(str(exc)) from exc
+        if operation == "measure_asset":
+            try:
+                return measure_audio_asset(
+                    self._store(data["project_id"]),
+                    asset_id=data["asset_id"],
+                    ffmpeg_exe=self.settings.binaries.ffmpeg_exe,
+                )
+            except PerceptionInvalid as exc:
+                raise OutputInspectionInvalid(str(exc)) from exc
+        if operation == "get_audio_review":
+            return read_audio_review(self._store(data["project_id"]), data["audio_review_id"])
+        if operation == "list_audio_reviews":
+            try:
+                return read_audio_reviews(
+                    self._store(data["project_id"]),
+                    target_kind=data.get("target_kind"), target_id=data.get("target_id"),
+                )
+            except PerceptionInvalid as exc:
+                raise OutputInspectionInvalid(str(exc)) from exc
         if operation == "export":
             from orchestrator.adapters.export.package import export_project
 
@@ -495,6 +790,41 @@ class OperationContext:
         if operation == "report_jobs":
             queue = self.job_queues.get(data["project_id"])
             return self._read_job_reports(data["project_id"], root=queue.root if queue else None)
+        if operation == "assemble_cut":
+            if self.job_runner is None:
+                raise RuntimeError("default JobRunner was not configured")
+            episode_id = data["episode_id"]
+            store = self._store(data["project_id"])
+            _episode, episode_token = store.load_with_version(Episode, episode_id)
+            # Fail before creating a job id when the current manifest cannot form a cut:
+            # the timeline must compose, and the rights collection assembly runs (each
+            # shot's built scene, licences, publication blockers) must pass as well.
+            cut = compose_timeline(store, episode_id=episode_id)
+            selected = [
+                store.load(Shot, shot_id, episode_id=episode_id)
+                for shot_id in dict.fromkeys(
+                    entry.ref for entry in cut.entries if entry.type == "shot" and entry.ref
+                )
+            ]
+            credits = collect_credits_for_shots(store, selected)
+            if credits["publication_blockers"]:
+                raise JobError(
+                    JobErrorKind.INVALID_MANIFEST,
+                    "episode has publication-blocking rights metadata: "
+                    + "; ".join(credits["publication_blockers"]),
+                )
+            request = AdapterRequest(
+                kind=AdapterKind.ASSEMBLE,
+                payload={"credit_card_duration_sec": data.get("credit_card_duration_sec", 5.0)},
+                record_id=episode_id,
+                record_version=episode_token,
+                episode_id=episode_id,
+                required_disk_gb=data.get("required_disk_gb", 0.0),
+            )
+            job = self.job_runner.submit(data["project_id"], request)
+            return {"job_id": job.job_id, "state": job.state}
+        if operation == "review_audio":
+            return self._submit_audio_review(data)
         if operation in ASYNC_ADAPTER_OPERATIONS:
             if self.job_runner is None:
                 raise RuntimeError("default JobRunner was not configured")
@@ -644,6 +974,48 @@ class OperationContext:
         job = self.job_runner.submit(data["project_id"], request)
         return {"job_id": job.job_id, "state": job.state, "run_id": run_id,
                 "asset_id": f"tts-{run_id}"}
+
+    def _submit_audio_review(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Verify an immutable media target, then queue one advisory review."""
+        if self.job_runner is None:
+            raise RuntimeError("default JobRunner was not configured")
+        from .routes import AudioReviewRequest
+
+        body = AudioReviewRequest.model_validate({
+            key: data[key] for key in AudioReviewRequest.model_fields if key in data
+        })
+        policy = self.settings.qwen_review
+        store = self._store(data["project_id"])
+        try:
+            snapshot = resolve_audio_review_snapshot(
+                store,
+                target=body.target.model_dump(mode="python"),
+                brief=body.brief,
+                mode=body.mode,
+                start_sec=body.start_sec,
+                duration_sec=body.duration_sec,
+                max_interval_seconds=policy.max_interval_seconds,
+                ffmpeg_exe=self.settings.binaries.ffmpeg_exe,
+            )
+        except PerceptionInvalid as exc:
+            raise OutputInspectionInvalid(str(exc)) from exc
+        snapshot = with_brief_actor(snapshot, self.actor)
+        audio_review_id = uuid.uuid4().hex
+        output_episode_id = (
+            snapshot["target"].get("episode_id") if snapshot["target"]["kind"] == "output" else None
+        )
+        request = AdapterRequest(
+            kind=AdapterKind.AUDIO_REVIEW,
+            payload={"audio_review_id": audio_review_id, "snapshot": snapshot},
+            record_id=audio_review_id,
+            record_version=0,
+            episode_id=output_episode_id,
+            required_vram_gb=policy.required_vram_gb,
+            required_ram_gb=policy.required_ram_gb,
+            required_disk_gb=policy.required_disk_gb,
+        )
+        job = self.job_runner.submit(data["project_id"], request)
+        return {"job_id": job.job_id, "state": job.state}
 
     def _submit_audio_post(self, data: dict[str, Any]) -> dict[str, Any]:
         """Validate an audio post request, then submit it as a CPU job bound to its Shot."""
@@ -840,7 +1212,9 @@ def create_app(
             queue_for=runtime, adapters=runtime.registry,
         )
     runner = job_runner
-    context = OperationContext(configured, root, job_queues=job_queues, job_runner=runner)
+    context = OperationContext(
+        configured, root, job_queues=job_queues, job_runner=runner, actor="agent"
+    )
     app = FastAPI(title="CCTV Production Pipeline API", version="0.1.0")
     app.state.settings = configured
     app.state.loopback_token = token
@@ -962,9 +1336,27 @@ def _register_operation(app: FastAPI, operation: Operation, context: OperationCo
         if files:
             data["uploads"] = [await _describe_upload(item) for item in files]
         if operation.name == "export":
-            # The request waits for the package, while copies and FFmpeg run off the event loop.
+            # Packaging runs off the event loop.
             return await run_in_threadpool(operation.invoke, context, data)
-        result = operation.invoke(context, data)
+        if operation.name in {"inspect_output", "contact_sheet", "measure_output", "measure_asset"}:
+            # Frame decoding runs off the event loop.
+            result = await run_in_threadpool(operation.invoke, context, data)
+            if operation.name in {"inspect_output", "contact_sheet"}:
+                if not isinstance(result, bytes):
+                    raise RuntimeError(f"{operation.name} service returned non-binary image data")
+                return Response(
+                    content=result,
+                    media_type="image/png",
+                    headers={"X-Content-Type-Options": "nosniff"},
+                )
+            return result
+        try:
+            result = operation.invoke(context, data)
+        except JobError as exc:
+            if (operation.name == "get_audio_review"
+                    and exc.kind is JobErrorKind.CORRUPT_ARTIFACT):
+                return _error(422, JobErrorKind.CORRUPT_ARTIFACT.value, exc.message)
+            raise
         if operation.name == "asset_browser":
             return HTMLResponse(content=_asset_browser_html(result), media_type="text/html")
         if operation.name == "asset_preview":
@@ -1008,7 +1400,9 @@ def _register_operation(app: FastAPI, operation: Operation, context: OperationCo
                     annotation=Annotated[model_field.annotation, Form()],
                 ))
     elif operation.name in {"search_assets", "asset_browser", "list_asset_categories",
-                            "asset_preview", "inspect_take_pauses"}:
+                            "asset_preview", "inspect_take_pauses", "list_reviews",
+                            "list_shot_outputs", "inspect_output", "contact_sheet",
+                                "measure_output", "list_audio_reviews"}:
         for name, model_field in operation.request_model.model_fields.items():
             default = (
                 Parameter.empty if model_field.is_required()
@@ -1048,6 +1442,15 @@ def _register_operation(app: FastAPI, operation: Operation, context: OperationCo
                       name=operation.name, operation_id=operation.name,
                       summary=operation.summary, response_model=None, include_in_schema=True,
                       status_code=202 if operation.name in ASYNC_ADAPTER_OPERATIONS else 200,
+                      # These two answer with image bytes, not JSON; say so in OpenAPI so a
+                      # generated client picks the right decoder. A plain Response class
+                      # stops FastAPI adding its default application/json entry beside them.
+                      response_class=(Response if operation.name in {"inspect_output", "contact_sheet", "asset_preview"}
+                                      else JSONResponse),
+                      responses=({200: {"content": {"image/png": {}}}}
+                                 if operation.name in {"inspect_output", "contact_sheet"}
+                                 else {200: {"content": {"image/jpeg": {}, "image/png": {}, "image/webp": {}}}}
+                                 if operation.name == "asset_preview" else None),
                       openapi_extra={"parameters": [{
                           "name": "X-Loopback-Token",
                           "in": "header",
@@ -1169,6 +1572,12 @@ class _DefaultRuntime:
                 elif kind is AdapterKind.DEGRADE:
                     from orchestrator.adapters.postprofile.runner import PostProfileAdapter
                     adapter = PostProfileAdapter(project_root, self.settings)
+                elif kind is AdapterKind.ASSEMBLE:
+                    from orchestrator.adapters.timeline.job import CutAssemblyAdapter
+                    adapter = CutAssemblyAdapter(project_root, self.settings)
+                elif kind is AdapterKind.AUDIO_REVIEW:
+                    from orchestrator.adapters.qwen.job import QwenAudioReviewAdapter
+                    adapter = QwenAudioReviewAdapter(project_root, self.settings)
                 else:
                     raise ValueError(f"no adapter is defined for {kind.value}")
                 self._adapters[key] = adapter
@@ -1187,7 +1596,9 @@ class _DefaultRuntime:
             if key in self._queues:
                 return self._queues[key]
             adapter = self.adapter_for(root, kind)
-            queue_settings = (adapter.settings if kind in {AdapterKind.H3_CANDIDATE, AdapterKind.TTS_INDEXTTS2}
+            queue_settings = (adapter.settings if kind in {
+                AdapterKind.H3_CANDIDATE, AdapterKind.TTS_INDEXTTS2, AdapterKind.AUDIO_REVIEW,
+            }
                               else self.settings)
             if self._nvml is None:
                 self._nvml = PynvmlProbe()
@@ -1196,7 +1607,8 @@ class _DefaultRuntime:
             lease = GpuLease(root, queue_settings, nvml=self._nvml, worker=worker,
                              execution_slot=GpuExecutionSlot(repo_root))
             queue = JobQueue(root, queue_settings, lease, ProjectStore(root), nvml=self._nvml,
-                             host=SystemHostResources(), quarantine=ProjectQuarantine(root))
+                             host=SystemHostResources(), quarantine=ProjectQuarantine(root),
+                             attempt_limit=1 if kind is AdapterKind.AUDIO_REVIEW else None)
             self._queues[key] = queue
             return queue
 

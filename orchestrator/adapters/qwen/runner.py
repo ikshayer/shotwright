@@ -12,10 +12,12 @@ import secrets
 import shutil
 import subprocess
 import sys
+import threading
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from contextlib import nullcontext
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from orchestrator.adapters.qwen.core import (
     AnalysisRequest,
@@ -48,8 +50,10 @@ LIMITATIONS = [
 
 
 class Backend(Protocol):
-    def probe(self, media_rel: str, *, work_rel: str, modality: str) -> MediaInfo: ...
-    def prepare(self, media_rel: str, window: WindowSpec, *, work_rel: str, modality: str) -> PreparedWindow: ...
+    def probe(self, media_rel: str, *, work_rel: str, modality: str,
+              input_format: str | None = None) -> MediaInfo: ...
+    def prepare(self, media_rel: str, window: WindowSpec, *, work_rel: str, modality: str,
+                input_format: str | None = None) -> PreparedWindow: ...
     def infer_batch(self, prepared: Sequence[PreparedWindow], windows: Sequence[WindowSpec], *, prompt: str,
                     max_new_tokens: int, modality: str, work_rel: str) -> BatchOutcome: ...
 
@@ -262,14 +266,19 @@ class NativeBackend:
             self._analyzer = module
         return self._analyzer
 
-    def probe(self, media_rel: str, *, work_rel: str, modality: str) -> MediaInfo:
+    def probe(self, media_rel: str, *, work_rel: str, modality: str,
+              input_format: str | None = None) -> MediaInfo:
         source = self.root.resolve(media_rel)
         if not source.is_file():
             raise QwenRequestError(f"media file does not exist: {media_rel}")
-        result = _run(["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(source)],
+        command = ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json"]
+        if input_format is not None:
+            command.extend(["-probesize", "32", "-analyzeduration", "0", "-f", input_format])
+        command.append(str(source))
+        result = _run(command,
                       root=self.root, work_rel=work_rel)
         data = json.loads(result.stdout)
-        probe_command = ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(source)]
+        probe_command = command
         self.last_probe = {"command": _local_protocol_command(probe_command), "exit_code": result.returncode,
                            "stderr": result.stderr,
                            "version": _run(["ffprobe", "-version"], root=self.root, work_rel=work_rel).stdout.splitlines()[0],
@@ -304,17 +313,23 @@ class NativeBackend:
                 raise QwenRequestError("video dimensions and frame rate must be positive")
         return MediaInfo(duration, rate, channels, width, height, fps, astart, vstart)
 
-    def prepare(self, media_rel: str, window: WindowSpec, *, work_rel: str, modality: str) -> PreparedWindow:
+    def prepare(self, media_rel: str, window: WindowSpec, *, work_rel: str, modality: str,
+                input_format: str | None = None) -> PreparedWindow:
         src = self.root.resolve(media_rel)
         _require_disk_space(self.root)
         out_rel = f"{work_rel}/prepared/window_{window.index:03d}.mkv"
         out = self.root.resolve(out_rel)
-        info = self.probe(media_rel, work_rel=work_rel, modality=modality)
+        probe_options = {"input_format": input_format} if input_format is not None else {}
+        info = self.probe(media_rel, work_rel=work_rel, modality=modality, **probe_options)
+        input_options = (
+            ["-probesize", "32", "-analyzeduration", "0", "-f", input_format]
+            if input_format is not None else []
+        )
         first = max(0, math.floor(window.start_seconds * info.sample_rate))
         last = first + max(1, math.floor(window.duration_seconds * info.sample_rate))
         audio_filter = f"atrim=start_sample={first}:end_sample={last},asetpts=PTS-STARTPTS"
         if modality == "audio":
-            command = ["ffmpeg", "-hide_banner", "-nostdin", "-n", "-i", str(src), "-map", "0:a:0",
+            command = ["ffmpeg", "-hide_banner", "-nostdin", "-n", *input_options, "-i", str(src), "-map", "0:a:0",
                        "-af", audio_filter, "-c:a", "pcm_f32le", "-avoid_negative_ts", "make_zero", str(out)]
         else:
             # FFmpeg's default input timestamp normalization makes the common
@@ -322,7 +337,7 @@ class NativeBackend:
             video_start = window.start_seconds
             vf = (f"trim=start={video_start:.9f}:duration={window.duration_seconds:.9f},"
                   "setpts=PTS-STARTPTS,scale='min(640,iw)':-2:flags=lanczos,format=yuv420p")
-            command = ["ffmpeg", "-hide_banner", "-nostdin", "-n", "-i", str(src), "-filter_complex",
+            command = ["ffmpeg", "-hide_banner", "-nostdin", "-n", *input_options, "-i", str(src), "-filter_complex",
                        f"[0:v:0]{vf}[v];[0:a:0]{audio_filter}[a]", "-map", "[v]", "-map", "[a]",
                        "-c:v", "ffv1", "-fps_mode", "passthrough", "-c:a", "pcm_f32le", str(out)]
         prepared_process: list[subprocess.CompletedProcess[str]] = []
@@ -364,7 +379,9 @@ class NativeBackend:
         return PreparedWindow(out_rel, _sha(out), metrics, prep)
 
     def infer_batch(self, prepared: Sequence[PreparedWindow], windows: Sequence[WindowSpec], *, prompt: str,
-                    max_new_tokens: int, modality: str, work_rel: str) -> BatchOutcome:
+                    max_new_tokens: int, modality: str, work_rel: str,
+                    should_stop: Callable[[], bool] | None = None,
+                    on_window_complete: Callable[[int], None] | None = None) -> BatchOutcome:
         analyze = self._module()
         run_id = f"batch_{windows[0].index:03d}_{uuid.uuid4().hex[:8]}"
         result_rel = f"{work_rel}/batches/{run_id}_worker_result.json"
@@ -374,10 +391,40 @@ class NativeBackend:
         module.BASE = BASE
         items = [{"media": str(self.root.resolve(item.media_path)), "start": spec.source_start_seconds,
                   "media_sha256": item.media_sha256} for item, spec in zip(prepared, windows, strict=True)]
+        monitor_stop = threading.Event()
+        progress_errors: list[str] = []
+        progress_thread: threading.Thread | None = None
+        if on_window_complete is not None:
+            def monitor_progress() -> None:
+                observed = 0
+                result_path = self.root.resolve(result_rel)
+                while not monitor_stop.wait(0.25):
+                    if not result_path.is_file():
+                        continue
+                    try:
+                        current = json.loads(self.root.read_text(result_rel, encoding="utf-8"))
+                        results = current.get("results") if isinstance(current, dict) else None
+                        count = len(results) if isinstance(results, list) else observed
+                        if count > observed:
+                            observed = min(count, len(windows))
+                            on_window_complete(observed)
+                    except FileNotFoundError:
+                        continue
+                    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
+                        progress_errors.append(f"{type(exc).__name__}: {exc}")
+                        return
+
+            progress_thread = threading.Thread(
+                target=monitor_progress, name=f"qwen-progress-{run_id}", daemon=True,
+            )
+            progress_thread.start()
         try:
-            output, telemetry = analyze.run_supervised(items, modality, max_new_tokens,
-                        max(spec.duration_seconds for spec in windows), result_rel, stdout_rel, stderr_rel,
-                        resources_rel, prompt)
+            supervised_kwargs = {"should_stop": should_stop} if should_stop is not None else {}
+            output, telemetry = analyze.run_supervised(
+                items, modality, max_new_tokens,
+                max(spec.duration_seconds for spec in windows), result_rel, stdout_rel, stderr_rel,
+                resources_rel, prompt, **supervised_kwargs,
+            )
         except BaseException as interruption:  # noqa: BLE001 - supervisor has completed its cleanup path
             output = {}
             result_path = self.root.resolve(result_rel)
@@ -415,6 +462,10 @@ class NativeBackend:
                      "traceback": __import__("traceback").format_exc()}
             return BatchOutcome(tuple(output.get("results", [])), telemetry,
                                 "cancelled" if cancelled else "failure", error)
+        finally:
+            monitor_stop.set()
+            if progress_thread is not None:
+                progress_thread.join(timeout=2)
         cleanup = telemetry.get("owned_process_tree_cleanup")
         cleanup_ok = (isinstance(cleanup, dict) and cleanup.get("verified_stopped") is True
                       and not cleanup.get("survivors") and not cleanup.get("unverifiable_identities")
@@ -430,6 +481,9 @@ class NativeBackend:
         failure_text = str(output.get("error", ""))
         failure_type = str(output.get("error_type", ""))
         error_kind = JobErrorKind.INTERNAL
+        caller_cancelled = failure_type == "CallerCancelled"
+        if caller_cancelled:
+            error_kind = JobErrorKind.CANCELLED
         if "out of memory" in failure_text.lower() or failure_type in {"OutOfMemoryError", "MemoryError"}:
             error_kind = JobErrorKind.OUT_OF_MEMORY
         elif "missing model" in failure_text.lower() or failure_type == "FileNotFoundError":
@@ -440,13 +494,16 @@ class NativeBackend:
             error_kind = JobErrorKind.BUDGET_EXCEEDED
         if not cleanup_ok:
             error_kind = JobErrorKind.WORKER_UNREACHABLE
+        if progress_errors:
+            telemetry["progress_monitor_errors"] = progress_errors
         error = None if status == "success" else {"family": "job", "kind": error_kind.value,
                 "message": output.get("error", "native worker failure or cleanup is unverified"),
                 "retryable": error_kind.retryable, "remediation": error_kind.remediation,
                 "traceback": output.get("traceback"), "cleanup": cleanup}
+        outcome_status = "cancelled" if status != "success" and caller_cancelled and cleanup_ok else status
         return BatchOutcome(results, {"native": telemetry, "owned_process_tree_cleanup": cleanup, "native_status": status,
                     "worker_result_path": result_rel, "stdout_path": stdout_rel,
-                    "stderr_path": stderr_rel, "resources_path": resources_rel}, status, error)
+                    "stderr_path": stderr_rel, "resources_path": resources_rel}, outcome_status, error)
 
 
 class _Lock:
@@ -511,10 +568,49 @@ class QwenAdapter:
             raise QwenSetupError(f"native Qwen backend is restricted to repository root {ROOT}")
 
     def run(self, request: AnalysisRequest) -> dict:
+        return self._run(
+            request, managed=False, cancel=None, input_format=None, expected_sha256=None, progress=None,
+        )
+
+    def run_managed(
+        self,
+        request: AnalysisRequest,
+        *,
+        lease: Any,
+        cancel: Callable[[], bool] | None,
+        input_format: str,
+        expected_sha256: str,
+        progress: Callable[[float], None] | None = None,
+    ) -> dict:
+        if not getattr(lease, "_owned", False):
+            raise ValueError("run_managed requires the currently owned production GPU lease")
+        return self._run(
+            request, managed=True, cancel=cancel, input_format=input_format,
+            expected_sha256=expected_sha256, progress=progress,
+        )
+
+    def _run(
+        self,
+        request: AnalysisRequest,
+        *,
+        managed: bool,
+        cancel: Callable[[], bool] | None,
+        input_format: str | None,
+        expected_sha256: str | None,
+        progress: Callable[[float], None] | None,
+    ) -> dict:
         validate_request(request)
         media_path = self.root.resolve(request.media)
         if not media_path.is_file():
             raise QwenRequestError(f"media does not exist: {request.media}")
+        if managed:
+            if (not isinstance(expected_sha256, str) or len(expected_sha256) != 64
+                    or any(char not in "0123456789abcdef" for char in expected_sha256)):
+                raise JobError(JobErrorKind.CORRUPT_ARTIFACT,
+                               "managed Qwen run requires the verified source SHA-256")
+            if _sha(media_path) != expected_sha256:
+                raise JobError(JobErrorKind.CORRUPT_ARTIFACT,
+                               "staged source media does not match the verified SHA-256")
         if self.native:
             analyzer = self.root.resolve(f"{SPIKE}/analyze.py")
             env_python = self.root.resolve(f"{BASE}/env/Scripts/python.exe" if os.name == "nt" else f"{BASE}/env/bin/python")
@@ -537,9 +633,10 @@ class QwenAdapter:
         self.root.write_text(request_rel, json.dumps(report["request"], ensure_ascii=False, allow_nan=False, indent=2))
         self.root.append_line(f"{run_rel}/events.jsonl", json.dumps({"event": "request_created", "report_id": rid}, separators=(",", ":")))
         try:
-            shared_slot = GpuExecutionSlot(self.root) if not request.dry_run else None
-            with _Lock(self.root, execution_slot=shared_slot):
-                if not request.dry_run:
+            shared_slot = GpuExecutionSlot(self.root) if not managed and not request.dry_run else None
+            lock = nullcontext() if managed else _Lock(self.root, execution_slot=shared_slot)
+            with lock:
+                if not managed and not request.dry_run:
                     lease_rel = "jobs/gpu_lease.json"
                     if self.root.resolve(lease_rel).is_file():
                         lease = json.loads(self.root.read_text(lease_rel))
@@ -547,12 +644,16 @@ class QwenAdapter:
                         alive = type(pid) is int and pid > 0 and pid_is_alive(pid)
                         if alive:
                             raise QwenSetupError("a live production GPU lease exists; Qwen helper will not launch")
-                info = self.backend.probe(request.media, work_rel=run_rel, modality=request.modality)
+                probe_options = {"input_format": input_format} if input_format is not None else {}
+                info = self.backend.probe(
+                    request.media, work_rel=run_rel, modality=request.modality, **probe_options,
+                )
                 end = info.duration_seconds if request.duration_seconds is None else request.start_seconds + request.duration_seconds
                 windows = plan_windows(info.duration_seconds, start_seconds=request.start_seconds, end_seconds=end,
                     window_seconds=request.window_seconds, overlap_seconds=request.overlap_seconds,
                     source_offset_seconds=request.source_offset_seconds)
-                report["media"].update(sha256=_sha(media_path), info=info.__dict__)
+                source_sha256 = expected_sha256 if managed else _sha(media_path)
+                report["media"].update(sha256=source_sha256, info=info.__dict__)
                 if isinstance(self.backend, NativeBackend) and hasattr(self.backend, "last_probe"):
                     report["media"]["probe"] = self.backend.last_probe
                 report["input_coverage"] = {"requested_interval": [request.start_seconds, end],
@@ -567,15 +668,33 @@ class QwenAdapter:
                     report["status"] = "planned"
                 else:
                     completed: list[WindowSpec] = []
+                    cancellation_error = {
+                        "family": "job", "kind": JobErrorKind.CANCELLED.value,
+                        "message": "Qwen audio review cancelled by its caller",
+                        "retryable": JobErrorKind.CANCELLED.retryable,
+                        "remediation": JobErrorKind.CANCELLED.remediation,
+                    }
                     for offset in range(0, len(windows), 3):
+                        if cancel is not None and cancel():
+                            report["errors"].append(cancellation_error)
+                            break
                         _require_disk_space(self.root)
                         batch_windows = windows[offset:offset + 3]
                         prepared = []
+                        cancelled_before_batch = False
                         for window in batch_windows:
+                            if cancel is not None and cancel():
+                                report["errors"].append(cancellation_error)
+                                cancelled_before_batch = True
+                                break
                             _require_disk_space(self.root)
                             if _sha(media_path) != report["media"]["sha256"]:
                                 raise JobError(JobErrorKind.CORRUPT_ARTIFACT, "source media changed during helper execution")
-                            item = self.backend.prepare(request.media, window, work_rel=run_rel, modality=request.modality)
+                            prepare_options = {"input_format": input_format} if input_format is not None else {}
+                            item = self.backend.prepare(
+                                request.media, window, work_rel=run_rel, modality=request.modality,
+                                **prepare_options,
+                            )
                             if item.preparation.get("source_sha256", report["media"]["sha256"]) != report["media"]["sha256"]:
                                 raise JobError(JobErrorKind.CORRUPT_ARTIFACT, "source hash changed during window preparation")
                             try:
@@ -584,12 +703,27 @@ class QwenAdapter:
                                 raise JobError(JobErrorKind.CORRUPT_ARTIFACT,
                                                "prepared audio metrics contain invalid or non-finite values", cause=exc) from exc
                             prepared.append(item)
+                        if cancelled_before_batch:
+                            break
                         if _sha(media_path) != report["media"]["sha256"]:
                             raise JobError(JobErrorKind.CORRUPT_ARTIFACT, "source media changed before inference")
                         _require_disk_space(self.root)
-                        outcome = self.backend.infer_batch(prepared, batch_windows,
+                        if cancel is not None and cancel():
+                            report["errors"].append(cancellation_error)
+                            break
+                        infer_options: dict[str, Any] = {}
+                        if isinstance(self.backend, NativeBackend) and cancel is not None:
+                            infer_options["should_stop"] = cancel
+                        if isinstance(self.backend, NativeBackend) and progress is not None:
+                            infer_options["on_window_complete"] = (
+                                lambda count, base=offset: progress(min(1.0, (base + count) / len(windows)))
+                            )
+                        outcome = self.backend.infer_batch(
+                            prepared, batch_windows,
                             prompt=build_prompt(request.purpose, request.brief, request.modality),
-                            max_new_tokens=request.max_new_tokens, modality=request.modality, work_rel=run_rel)
+                            max_new_tokens=request.max_new_tokens, modality=request.modality,
+                            work_rel=run_rel, **infer_options,
+                        )
                         report["batches"].append({"windows": [w.index for w in batch_windows], **outcome.telemetry,
                                                    "status": outcome.status, "error": outcome.error})
                         cleanup = outcome.telemetry.get("owned_process_tree_cleanup")
@@ -625,6 +759,8 @@ class QwenAdapter:
                             self.root.write_text(receipt_rel, json.dumps(native, ensure_ascii=False, allow_nan=False, indent=2))
                             target["receipt_path"] = receipt_rel
                             completed.append(window)
+                            if progress is not None:
+                                progress(min(1.0, (offset + i + 1) / len(windows)))
                             self.root.append_line(f"{run_rel}/events.jsonl", json.dumps(
                                 {"event": "window_completed", "index": window.index, "status": target["status"]},
                                 ensure_ascii=False, allow_nan=False, separators=(",", ":")))
@@ -653,7 +789,8 @@ class QwenAdapter:
             report["errors"].append({"family": "job", "kind": kind.value,
                                      "message": "interrupted after native supervisor cleanup",
                                      "retryable": kind.retryable, "remediation": kind.remediation})
-        except (QwenRequestError, QwenSetupError, ContainmentError):
+        except (QwenRequestError, QwenSetupError, ContainmentError) as exc:
+            exc.helper_report = report
             raise
         except Exception as exc:  # noqa: BLE001 - unknown execution failures map to INTERNAL
             err = JobError.from_exception(exc, origin="adapter")
@@ -678,8 +815,12 @@ class QwenAdapter:
                 {"event": report["status"], "completed_windows": [w.index for w in completed_specs]}, separators=(",", ":")))
         report["report_path"] = f"{run_rel}/report.json"
         report["markdown_path"] = f"{run_rel}/report.md"
-        self.root.write_text(report["report_path"], json.dumps(report, ensure_ascii=False, allow_nan=False, indent=2))
-        self.root.write_text(report["markdown_path"], render_markdown(report))
+        try:
+            self.root.write_text(report["report_path"], json.dumps(report, ensure_ascii=False, allow_nan=False, indent=2))
+            self.root.write_text(report["markdown_path"], render_markdown(report))
+        except BaseException as exc:  # noqa: BLE001 - preserve cleanup evidence if helper report persistence fails.
+            exc.helper_report = report
+            raise
         return report
 
 

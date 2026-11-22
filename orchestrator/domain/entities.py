@@ -142,6 +142,7 @@ class Episode(Entity):
     duration_target_sec: float = Field(gt=0)
     shot_ids: list[str] = Field(default_factory=list)
     approved_cut_version: int | None = Field(None, ge=1)
+    approved_cut_output_id: str | None = Field(None, min_length=1, pattern=r"^[A-Za-z0-9_-]+$")
     #: 10.1: Shot, Episode and StyleBible store a pointer to the approving
     #: Review. Gate C is recorded here, and any shot entering stale or draft
     #: revokes it (10.2).

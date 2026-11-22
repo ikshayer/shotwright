@@ -87,9 +87,13 @@ class ProjectQuarantine:
 class JobQueue:
     def __init__(self, root: ProjectRoot, settings: Settings, lease: GpuLease, store: ProjectStore, *,
                  nvml: NvmlProbe, host: HostResources, quarantine: Quarantine,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic,
+                 attempt_limit: int | None = None) -> None:
+        if attempt_limit is not None and (type(attempt_limit) is not int or attempt_limit < 1):
+            raise ValueError("attempt_limit must be a positive integer when supplied")
         self.root, self.settings, self.lease, self.store = root, settings, lease, store
         self.nvml, self.host, self.quarantine, self.clock = nvml, host, quarantine, clock
+        self.attempt_limit = attempt_limit
         self._budget_lock = threading.Lock()
         self._watch_context = threading.local()
 
@@ -275,11 +279,15 @@ class JobQueue:
                     acquired_here = False
                     policy = last_error.kind.policy.retry
                     budget_attempt_limit = self.settings.budget.retries_per_shot + 1
-                    if policy is not None and job.attempts >= budget_attempt_limit < policy.max_attempts:
+                    if (self.attempt_limit is None and policy is not None
+                            and job.attempts >= budget_attempt_limit < policy.max_attempts):
                         last_error = JobError(JobErrorKind.BUDGET_EXCEEDED,
                                               "per-shot attempt ceiling reached",
                                               job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
-                    effective_limit = min(budget_attempt_limit, policy.max_attempts if policy else 1)
+                    effective_limit = min(
+                        self.attempt_limit or budget_attempt_limit,
+                        policy.max_attempts if policy else 1,
+                    )
                     if not last_error.retryable or job.attempts >= effective_limit:
                         break
                     retry_policy = last_error.kind.policy.retry
@@ -322,10 +330,14 @@ class JobQueue:
                     break
                 retry_policy = last_error.kind.policy.retry
                 budget_attempt_limit = self.settings.budget.retries_per_shot + 1
-                if retry_policy is not None and job.attempts >= budget_attempt_limit < retry_policy.max_attempts:
+                if (self.attempt_limit is None and retry_policy is not None
+                        and job.attempts >= budget_attempt_limit < retry_policy.max_attempts):
                     last_error = JobError(JobErrorKind.BUDGET_EXCEEDED, "per-shot attempt ceiling reached",
                                           job_id=job.job_id, shot_id=job.shot_id, run_id=job.run_id)
-                effective_limit = min(budget_attempt_limit, retry_policy.max_attempts if retry_policy else 1)
+                effective_limit = min(
+                    self.attempt_limit or budget_attempt_limit,
+                    retry_policy.max_attempts if retry_policy else 1,
+                )
                 if not last_error.retryable or job.attempts >= effective_limit:
                     break
                 if retry_policy is not None:
