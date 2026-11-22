@@ -320,7 +320,9 @@ def test_project_store_rejects_font_paths_outside_the_project_on_save_and_load(
 ) -> None:
     root = ProjectRoot(tmp_path)
     store = ProjectStore(root)
-    unsafe = _post_profile(font_relative="../outside.ttf")
+    safe = _post_profile(font_relative=None)
+    unsafe_overlay = safe.overlay.model_copy(update={"font_relative": "../outside.ttf"})
+    unsafe = safe.model_copy(update={"overlay": unsafe_overlay})
 
     with pytest.raises(JobError) as save_error:
         store.save(unsafe, expected_version=0)

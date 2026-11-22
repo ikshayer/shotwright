@@ -72,8 +72,49 @@ class LocationRevision(BaseModel):
     expected_version: int = Field(ge=1)
 
 
+_CAMERA_PROFILE_FIELDS_GUIDANCE = (
+    "Each of these nine camera effect fields is opt-in: neutral values keep the stored PostProfile "
+    "behavior. bitrate_kbps (int|null, 16-20000, neutral None) selects target-rate encoding "
+    "with -b:v and -maxrate at the target, -bufsize twice the target, and no CRF; it is a "
+    "rate target rather than a minimum, and block_artifacts can hold actual bitrate well "
+    "below it when its quantizer floor limits a dark or static scene; "
+    "decimation_pattern (str|null, neutral None) accepts 1-16 positive colon-separated "
+    "source-frame spans for an uneven cadence whose mean exactly equals source fps / output fps; noise_model "
+    "({luma:0-100,chroma:0-100,temporal:bool=true,uniform:bool=true}, neutral {}) adds seeded "
+    "component noise; chroma_smearing (float 0-16 storage pixels, neutral 0) blurs chroma "
+    "horizontally only; block_artifacts (float 0-1, neutral 0) raises the libx264 quantizer "
+    "floor and weakens deblocking (other codecs are refused); sharpening (float 0-3, neutral 0) "
+    "sharpens luma with 5x5 unsharp; grade_white_balance (neutral {}) accepts temperature_k "
+    "1000-40000 K (6500 neutral), red_gain/green_gain/blue_gain 0.25-4 (1 neutral), brightness -1..1 "
+    "(0 neutral), contrast 0..3 (1 neutral) and saturation 0..3 (1 neutral), using "
+    "colortemperature, colorchannelmixer and eq; overlay_model (neutral {}) accepts "
+    "camera_id_text (nonempty printable str), clock_epoch int >=0, clock_format using only %Y %y %m %d %H %M %S "
+    "%p %I %b %a %j plus digits, letters, spaces and / - : . , [ ] ( ), fontsize int 6-96, "
+    "x/y int >=0 and placement "
+    "in_recording|on_playback; analog_artifacts (neutral {}) is refused until the ntscrs stage "
+    "exists. Active camera fields override a PostProfile stage of the same family: noise, fps "
+    "cadence, colortemperature, colorchannelmixer, eq, gblur, unsharp and clock overlay. "
+    "decimation_pattern must average exactly source fps / fps. "
+    "Core post fields: codec (str, default 'libx264', selects the output encoder); "
+    "storage_resolution (tuple[int,int], both positive, default 640x480, sets output pixels); "
+    "display_aspect_ratio (str, default '4:3', determines sample aspect ratio); fps (float >0, "
+    "default 12, output rate); frame_drop_schedule (list[ArtifactScheduleEntry], default [], "
+    "post-decode drop/freeze windows). Their neutral values are the listed defaults. "
+    "Rebuild-triggering fields keep their current types, ranges and defaults and affect the "
+    "Blender render: camera_mode "
+    "cctv|non_cctv ('cctv'); field_of_view_mm float >0 (12); barrel_distortion float (0); "
+    "exposure_ev float (0); practical_light_color_k int >0 (3200); practical_light_intensity "
+    "float >=0 (1); monochrome_night bool (false); camera_position tuple[float,float,float] "
+    "or None (None); camera_mount str or None (None); depth_of_field float or None (None). "
+    "They control render-time camera class/framing, lens distortion, exposure, practical-light "
+    "color/intensity, monochrome capture, camera placement/mount and depth-of-field blur."
+)
+
+
 class CameraProfileCreation(BaseModel):
-    camera_profile: CameraProfile
+    model_config = ConfigDict(extra="forbid")
+
+    camera_profile: CameraProfile = Field(description=_CAMERA_PROFILE_FIELDS_GUIDANCE)
 
 
 class PostProfileCreation(BaseModel):
@@ -139,8 +180,8 @@ class CutAssemblyRequest(BaseModel):
 class CameraProfileRevision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    camera_profile: CameraProfile
-    expected_version: int = Field(ge=1)
+    camera_profile: CameraProfile = Field(description=_CAMERA_PROFILE_FIELDS_GUIDANCE)
+    expected_version: int = Field(ge=1, description="Current CameraProfile mutation token.")
 
 
 class ShotOutputsQuery(BaseModel):
@@ -362,7 +403,7 @@ def path_parameters(path: str) -> list[str]:
 OPERATIONS = (
     Operation("health", "GET", "/health", "Check that the pipeline API is up; answers {status: ok} and changes nothing.", False, "api", None, _call("health")),
     Operation("create_project", "POST", "/projects", "Create a project. payload is a bare Project, not wrapped: project_id (also its directory name) and title are required; story_brief, style_defaults, default_duration_sec (default 180) and output_profile (default dvr-2005) are optional. Also seeds the dvr-2005, low-light-bw and consumer-2002 camera and post profiles. Answers 409 if the project already exists.", True, "service.dependencies.create_project / store", Project, _call("create_project")),
-    Operation("create_camera_profile", "POST", "/projects/{project_id}/camera-profiles/{camera_id}", "Create a CameraProfile (version 1) for camera_id. payload {camera_profile: CameraProfile}: camera_id must match the path and profile_name is required; lens, distortion, exposure, practical light, mount, codec, bitrate, resolution and fps have defaults. Every project already has dvr-2005, low-light-bw and consumer-2002; an existing camera_id answers 409.", True, "service.dependencies.create_camera_profile", CameraProfileCreation, _call("create_camera_profile")),
+    Operation("create_camera_profile", "POST", "/projects/{project_id}/camera-profiles/{camera_id}", "Create a CameraProfile (version 1) for camera_id. payload {camera_profile: CameraProfile}: camera_id must match the path and profile_name is required. " + _CAMERA_PROFILE_FIELDS_GUIDANCE + " Every project already has dvr-2005, low-light-bw and consumer-2002; an existing camera_id answers 409.", True, "service.dependencies.create_camera_profile", CameraProfileCreation, _call("create_camera_profile")),
     Operation("create_post_profile", "POST", "/projects/{project_id}/post-profiles/{profile_name}", "Create a PostProfile: a versioned CCTV video degradation chain (FFmpeg stages, pinned binaries, output fps and resolution, overlay, encode). payload {post_profile: PostProfile}: name must match profile_name and semver must be MAJOR.MINOR.PATCH. Profiles are never overwritten; an existing name answers 409.", True, "service.dependencies.create_post_profile", PostProfileCreation, _call("create_post_profile")),
     Operation("create_audio_post_profile", "POST", "/projects/{project_id}/audio-post-profiles/{profile_name}", "Create an audio post profile: a versioned, seeded voice degradation chain, pinned to the installed FFmpeg", True, "service.audiopost", AudioPostProfileCreation, _call("create_audio_post_profile")),
     Operation("create_episode", "POST", "/projects/{project_id}/episodes", "Create an episode in an existing project. payload {episode: Episode}: episode_id, project_id (must match the path), number (1 or more) and duration_target_sec (the authoritative runtime). Shots are added later by propose_shots or derive_script_scene_plan. An existing episode_id answers 409.", True, "service.dependencies.create_episode", EpisodeCreation, _call("create_episode")),
@@ -409,7 +450,7 @@ OPERATIONS = (
     Operation("approve_shot", "POST", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/approve", "Creator-only: approve a Shot after its dependencies are current and framing is approved or not required. Send expected_version and optional review_id/comment; the Shot and its exact Review must exist. Without review_id, an approving Review is recorded first. Returns the updated Shot. Agent approval requires approvals.agent_may_approve=true; otherwise use the CLI.", True, "service.approval.approve_shot", ApprovalRequest, _call("approve_shot"), creator_only=True),
     Operation("approve_cut", "POST", "/projects/{project_id}/episodes/{episode_id}/cut/approve", "Creator-only: approve one exact cut from list_cuts after its Timeline is current and every Shot is in an approvable state. Send expected_version, cut_output_id and optional review_id/comment; without review_id, an approving Review is recorded first. Returns the updated Episode. Export can ship only this cut or a byte-identical cut. Agent approval requires approvals.agent_may_approve=true; otherwise use the CLI.", True, "service.approval.approve_episode", CutApprovalRequest, _call("approve_cut"), creator_only=True),
     Operation("resume_invalidations", "POST", "/projects/{project_id}/invalidations/resume", "Resume pending dependency invalidation cascades after a partial upstream revision. Send an empty object; pending cascade plans must be valid. Returns the cascade ids resumed (or an empty list when none are pending).", True, "service.dependencies.resume_invalidations", EmptyRequest, _call("resume_invalidations")),
-    Operation("revise_camera_profile", "POST", "/projects/{project_id}/camera-profiles/{camera_id}/revise", "Revise a CameraProfile and check every episode for affected Shots. Send camera_profile and expected_version; camera_id must match the path and expected_version is the current mutation token. Returns the revised profile and invalidated shot ids.", True, "service.dependencies.revise_camera_profile", CameraProfileRevision, _call("revise_camera_profile")),
+    Operation("revise_camera_profile", "POST", "/projects/{project_id}/camera-profiles/{camera_id}/revise", "Revise a CameraProfile and check every episode for affected Shots. Send camera_profile and expected_version; camera_id must match the path and expected_version is the current mutation token. " + _CAMERA_PROFILE_FIELDS_GUIDANCE + " Post-only edits are re-derived from the existing master and do not rerender; rebuild-triggering optics, camera placement, motion, lighting and monochrome changes can invalidate shots. Returns the revised profile and invalidated shot ids.", True, "service.dependencies.revise_camera_profile", CameraProfileRevision, _call("revise_camera_profile")),
     Operation("cancel_job", "POST", "/projects/{project_id}/jobs/{job_id}/cancel", "Request cancellation of any existing project job. Send an empty object; the JobRunner must know the job id. Returns job_id, state and whether cancellation was requested (false when the job is already terminal).", True, "service.runner.JobRunner.cancel", EmptyRequest, _call("cancel_job")),
     Operation("list_shot_outputs", "GET", "/projects/{project_id}/episodes/{episode_id}/shots/{shot_id}/outputs", "List verified output receipts for a Shot across its versions. Query optional record_version and kind filters; the Episode must exist. Returns matching ShotOutput records in append order.", False, "store", ShotOutputsQuery, _call("list_shot_outputs")),
     Operation("list_cuts", "GET", "/projects/{project_id}/episodes/{episode_id}/cuts", "List verified rendered cut receipts for an Episode. The Episode must exist. Returns its EpisodeOutput records in append order.", False, "store", None, _call("list_cuts")),

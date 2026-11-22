@@ -55,6 +55,7 @@ def _fake_popen_factory(*, calls=None, start_time="0", invalid_master=False,
     help_full = b"-filter:v <filter_graph> ...\n-c:v <codec> ...\n-preset <preset> ...\n-crf <float> ...\n-pix_fmt <format> ...\n-threads <count> ...\n-fflags <flags> ...\n-flags <flags> ...\n"
     noise_help = b"Filter noise\nnoise AVOptions:\n all_seed <int> (from -1 to INT_MAX)\n alls <int> (from 0 to 100)\n allf <flags>\n"
     loop_help = b"Filter loop\nloop AVOptions:\n loop <int> (from -1 to INT_MAX)\n size <int64> (from 0 to 32767)\n start <int64> (from -1 to I64_MAX)\n"
+    unsharp_help = b"Filter unsharp\nunsharp AVOptions:\n luma_msize_x <int> (from 3 to 23)\n luma_msize_y <int> (from 3 to 23)\n luma_amount <float> (from -2 to 5)\n"
     x264_help = b"Encoder libx264 [libx264 H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10]:\n-preset <string> ...\n-crf <float> ...\n-threads <count> ...\n-pix_fmt <format> ...\n"
 
     class FakeProcess:
@@ -92,6 +93,7 @@ def _fake_popen_factory(*, calls=None, start_time="0", invalid_master=False,
                     "full": help_full,
                     "filter=noise": noise_help,
                     "filter=loop": loop_help,
+                    "filter=unsharp": unsharp_help,
                     "encoder=libx264": x264_help,
                 }.get(target, b"")
             elif any("ffprobe" in value.lower() for value in self.argv):
@@ -399,13 +401,11 @@ def test_graph_is_deterministic_seeded_and_orders_clock_overlay_before_degradati
     assert "settb=1/12" in graph
 
 
-def test_filter_graph_escapes_font_path_with_filter_special_characters():
+def test_filter_graph_rejects_font_paths_outside_the_safe_character_set():
     checked = validate_profile(_spec(), _camera(), master_frames=300, master_rate=Fraction(60, 1))
-    graph = build_filter_graph(checked, shot_id="S003", degrade_seed=1,
-                               font_path="assets/Camera: 01\\font.ttf")
-    assert "drawtext=" in graph
-    assert "Camera\\: 01" in graph
-    assert "\\\\font.ttf" in graph or "font.ttf" in graph
+    with pytest.raises(ValueError, match="font_path"):
+        build_filter_graph(checked, shot_id="S003", degrade_seed=1,
+                           font_path="assets/Camera: 01\\font.ttf")
 
 
 def test_camera_profile_impact_delegates_tagged_invalidation():

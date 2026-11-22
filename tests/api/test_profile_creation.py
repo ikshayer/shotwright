@@ -439,9 +439,9 @@ def test_fresh_project_materializes_default_profiles_on_disk_and_composes_withou
     )
     assert low_light_graph.endswith("setsar=12/11")
     assert low_light_graph.count("drawtext=") == 2
-    assert low_light_graph.index("text='CAM 03") < low_light_graph.index("text='REC")
+    assert low_light_graph.index("text='CAM 03") < low_light_graph.index(r"text='REC \[||||\]'")
     assert r"text='REC \[||||\]':x=8:y=8:fontsize=12:fontcolor=white:box=1:boxcolor=black@0.4" in low_light_graph
-    assert low_light_graph.index("text='REC") < low_light_graph.index("noise=")
+    assert low_light_graph.index(r"text='REC \[||||\]'") < low_light_graph.index("noise=")
     assert low_light_post.overlay.indicator.placement == "in_recording"
     assert "saturation=0" not in low_light_graph
 

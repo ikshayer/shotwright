@@ -20,6 +20,7 @@ import hashlib
 import json
 import math
 import re
+import unicodedata
 from datetime import date, datetime
 from enum import StrEnum
 from pathlib import PurePosixPath, PureWindowsPath
@@ -29,6 +30,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     StrictInt,
     ValidationError,
     field_serializer,
@@ -56,6 +58,109 @@ from .base import (
 # one is added, use a separate mount/motion attribute rather than redefining this mode.
 CameraMode = Literal["cctv", "non_cctv"]
 CAMERA_MOTION_MODEL_SEMVER = "0.1.0"
+CAMERA_PROFILE_SCHEMA_VERSION = 3
+
+
+def _safe_clock_format(value: str) -> str:
+    """Accept a small strftime grammar safe to embed in drawtext's pts expansion."""
+    if not isinstance(value, str):
+        raise ValueError("clock_format must be a string")
+    allowed = set("YymdHMSpIbaj")
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char == "%":
+            if index + 1 >= len(value) or value[index + 1] not in allowed:
+                raise ValueError(
+                    "clock_format may use only %Y %y %m %d %H %M %S %p %I %b %a %j"
+                )
+            index += 2
+            continue
+        if not (char.isascii() and (char.isalnum() or char in " /-:.,[]()")):
+            raise ValueError(
+                "clock_format may contain only strftime tokens, letters, digits, "
+                "spaces and / - : . , [ ] ( )"
+            )
+        index += 1
+    return value
+
+
+class CameraNoiseModel(BaseModel):
+    """Opt-in per-component sensor noise settings for a CameraProfile."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
+
+    luma: StrictInt = Field(0, ge=0, le=100, description="Luma noise strength (0-100); neutral 0.")
+    chroma: StrictInt = Field(0, ge=0, le=100, description="U/V chroma noise strength (0-100); neutral 0.")
+    temporal: StrictBool = Field(True, description="Use temporal noise when either strength is nonzero.")
+    uniform: StrictBool = Field(True, description="Use uniform noise when either strength is nonzero.")
+
+    @property
+    def active(self) -> bool:
+        return self.luma > 0 or self.chroma > 0
+
+
+class CameraWhiteBalance(BaseModel):
+    """Optional color temperature, channel gains and display-level grade."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
+
+    temperature_k: StrictInt | None = Field(None, ge=1000, le=40000, description="Color temperature in Kelvin (1000-40000); 6500 is neutral.")
+    red_gain: float | None = Field(None, ge=0.25, le=4, strict=True, description="Red diagonal channel gain (0.25-4); 1 is neutral.")
+    green_gain: float | None = Field(None, ge=0.25, le=4, strict=True, description="Green diagonal channel gain (0.25-4); 1 is neutral.")
+    blue_gain: float | None = Field(None, ge=0.25, le=4, strict=True, description="Blue diagonal channel gain (0.25-4); 1 is neutral.")
+    brightness: float | None = Field(None, ge=-1, le=1, strict=True, description="EQ brightness (-1-1); 0 is neutral.")
+    contrast: float | None = Field(None, ge=0, le=3, strict=True, description="EQ contrast (0-3); 1 is neutral.")
+    saturation: float | None = Field(None, ge=0, le=3, strict=True, description="EQ saturation (0-3); 1 is neutral.")
+
+    @property
+    def temperature_active(self) -> bool:
+        return self.temperature_k is not None and self.temperature_k != 6500
+
+    @property
+    def gains_active(self) -> bool:
+        return any(value is not None and value != 1 for value in (self.red_gain, self.green_gain, self.blue_gain))
+
+    @property
+    def eq_active(self) -> bool:
+        return any(value is not None and value != neutral for value, neutral in (
+            (self.brightness, 0), (self.contrast, 1), (self.saturation, 1),
+        ))
+
+    @property
+    def active(self) -> bool:
+        return self.temperature_active or self.gains_active or self.eq_active
+
+
+class CameraOverlayModel(BaseModel):
+    """Partial, typed overrides for a PostProfile clock overlay."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
+
+    camera_id_text: str | None = Field(None, description="Optional printable camera label; omitted keeps the PostProfile label.")
+    clock_epoch: StrictInt | None = Field(None, ge=0, description="Unix clock epoch in seconds (0 or greater).")
+    clock_format: str | None = Field(None, min_length=1, description="Safe strftime clock format; omitted keeps the PostProfile format.")
+    fontsize: StrictInt | None = Field(None, ge=6, le=96, description="Drawtext font size (6-96).")
+    x: StrictInt | None = Field(None, ge=0, description="Horizontal clock position (0 or greater).")
+    y: StrictInt | None = Field(None, ge=0, description="Vertical clock position (0 or greater).")
+    placement: Literal["in_recording", "on_playback"] | None = Field(None, description="Which composition stage draws the clock.")
+
+    @field_validator("camera_id_text")
+    @classmethod
+    def _safe_camera_text(cls, value: str | None) -> str | None:
+        if value is not None and (
+            not value
+            or any(unicodedata.category(char) == "Cc" or char in "\u2028\u2029" for char in value)
+        ):
+            raise ValueError("camera_id_text must be nonempty printable text without control characters or newlines")
+        if value is not None and value != value.strip():
+            raise ValueError("camera_id_text must not have leading or trailing whitespace")
+        return value
+
+    @field_validator("clock_format")
+    @classmethod
+    def _valid_clock_format(cls, value: str | None) -> str | None:
+        return _safe_clock_format(value) if value is not None else None
 
 # --------------------------------------------------------------------------
 # narrative
@@ -273,6 +378,7 @@ class ShotOutput(Entity):
     engine_build: str | None = None
     profile_semver: str | None = None
     filter_graph_hash: str | None = None
+    postprofile_spec_sha256: str | None = None
     pinned_binaries: dict[str, str] | None = None
     frame_count: StrictInt | None = Field(None, gt=0)
     output_fps: StrictInt | None = Field(None, gt=0)
@@ -290,7 +396,7 @@ class ShotOutput(Entity):
             raise ValueError("relative_path must not traverse above its project-relative location")
         return value
 
-    @field_validator("content_sha256", "filter_graph_hash")
+    @field_validator("content_sha256", "filter_graph_hash", "postprofile_spec_sha256")
     @classmethod
     def _sha256_hex(cls, value: str | None) -> str | None:
         if value is not None and not re.fullmatch(r"[0-9a-f]{64}", value):
@@ -319,19 +425,22 @@ class ShotOutput(Entity):
             if self.engine_id is not None and (not self.engine_id or not self.engine_build):
                 raise ValueError("scene engine provenance fields must be non-empty when provided")
             if any(value is not None for value in
-                   (self.profile_semver, self.filter_graph_hash, self.pinned_binaries)):
+                   (self.profile_semver, self.filter_graph_hash, self.postprofile_spec_sha256,
+                    self.pinned_binaries)):
                 raise ValueError("scene outputs may not carry degradation provenance")
         elif self.kind is ShotOutputKind.MASTER:
             if not self.engine_id or not self.engine_build:
                 raise ValueError(f"{self.kind.value} output requires engine_id and engine_build")
             if any(value is not None for value in
-                   (self.profile_semver, self.filter_graph_hash, self.pinned_binaries)):
+                   (self.profile_semver, self.filter_graph_hash, self.postprofile_spec_sha256,
+                    self.pinned_binaries)):
                 raise ValueError("render outputs may not carry degradation provenance")
         elif self.kind is ShotOutputKind.PREVIEW:
             if not self.engine_id or not self.engine_build:
                 raise ValueError(f"{self.kind.value} output requires engine_id and engine_build")
             if any(value is not None for value in
-                   (self.profile_semver, self.filter_graph_hash, self.pinned_binaries)):
+                   (self.profile_semver, self.filter_graph_hash, self.postprofile_spec_sha256,
+                    self.pinned_binaries)):
                 raise ValueError("preview outputs may not carry degradation or master conversion provenance")
         elif self.kind is ShotOutputKind.DEGRADED:
             if not self.profile_semver or not self.filter_graph_hash or not self.pinned_binaries:
@@ -344,11 +453,12 @@ class ShotOutput(Entity):
             if not self.engine_id or not self.engine_build:
                 raise ValueError(f"{self.kind.value} output requires engine_id and engine_build")
             if any(value is not None for value in
-                   (self.profile_semver, self.filter_graph_hash, self.pinned_binaries)):
+                   (self.profile_semver, self.filter_graph_hash, self.postprofile_spec_sha256,
+                    self.pinned_binaries)):
                 raise ValueError("generated outputs may not carry degradation provenance")
         elif any(value is not None for value in (
             self.engine_id, self.engine_build, self.profile_semver, self.filter_graph_hash,
-            self.pinned_binaries,
+            self.postprofile_spec_sha256, self.pinned_binaries,
         )):
             raise ValueError("still output has no additional provenance fields")
         return self
@@ -497,6 +607,7 @@ class CameraProfile(VersionedEntity):
     dependency graph keys invalidation off these tags.
     """
 
+    schema_version: int = CAMERA_PROFILE_SCHEMA_VERSION
     camera_id: str
     profile_name: str
     camera_mode: CameraMode = rebuild_triggering("cctv")
@@ -514,19 +625,67 @@ class CameraProfile(VersionedEntity):
 
     # --- post-only: re-derived from the existing master ---
     codec: str = post_only("libx264")
-    bitrate_kbps: int = post_only(800, gt=0)
+    bitrate_kbps: StrictInt | None = post_only(
+        None, ge=16, le=20000,
+        description="Optional target bitrate in kbps (16-20000); None disables rate control.",
+    )
     storage_resolution: tuple[int, int] = post_only((640, 480))
     display_aspect_ratio: str = post_only("4:3")
     fps: float = post_only(12.0, gt=0)
-    decimation_pattern: str | None = post_only(None)
-    noise_model: dict[str, float] = post_only(default_factory=dict)
-    chroma_smearing: float = post_only(0.0, ge=0)
-    block_artifacts: float = post_only(0.0, ge=0)
-    sharpening: float = post_only(0.0, ge=0)
-    grade_white_balance: dict[str, float] = post_only(default_factory=dict)
-    overlay_model: dict[str, str | int | float] = post_only(default_factory=dict)
-    analog_artifacts: dict[str, float] = post_only(default_factory=dict)
+    decimation_pattern: str | None = post_only(
+        None,
+        description="Optional colon-separated source-frame spans (1-16 positive terms); None uses uniform fps decimation.",
+    )
+    noise_model: CameraNoiseModel = post_only(
+        default_factory=CameraNoiseModel,
+        description="Opt-in seeded luma/chroma noise. Neutral: luma=0, chroma=0.",
+    )
+    chroma_smearing: float = post_only(
+        0.0, ge=0, le=16, strict=True, allow_inf_nan=False,
+        description="Horizontal-only chroma blur in storage pixels (0-16); neutral 0.",
+    )
+    block_artifacts: float = post_only(
+        0.0, ge=0, le=1, strict=True, allow_inf_nan=False,
+        description="Encode quantizer/deblocking artifact strength (0-1); neutral 0.",
+    )
+    sharpening: float = post_only(
+        0.0, ge=0, le=3, strict=True, allow_inf_nan=False,
+        description="Luma sharpening amount (0-3); neutral 0.",
+    )
+    grade_white_balance: CameraWhiteBalance = post_only(
+        default_factory=CameraWhiteBalance,
+        description="Opt-in temperature, channel gains, brightness, contrast and saturation grade; neutral {}.",
+    )
+    overlay_model: CameraOverlayModel = post_only(
+        default_factory=CameraOverlayModel,
+        description="Opt-in clock overlay overrides; neutral {}.",
+    )
+    analog_artifacts: dict[str, float] = post_only(
+        default_factory=dict,
+        description="Neutral {}; nonempty values are refused until the ntscrs stage exists.",
+    )
     frame_drop_schedule: list[ArtifactScheduleEntry] = post_only(default_factory=list)
+
+    # The legacy bitrate_kbps migration (pre-v3 records read as None) lives in the store's
+    # record read, not here: a request that merely carries an old schema_version must keep
+    # the bitrate it explicitly asks for.
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _migrate_schema_version(cls, value: Any) -> int:
+        if type(value) is not int or value not in {1, 2, CAMERA_PROFILE_SCHEMA_VERSION}:
+            raise ValueError(f"CameraProfile schema_version {value!r} has no migration to {CAMERA_PROFILE_SCHEMA_VERSION}")
+        return CAMERA_PROFILE_SCHEMA_VERSION
+
+    @field_validator("decimation_pattern")
+    @classmethod
+    def _valid_decimation_pattern(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        terms = value.split(":")
+        if not 1 <= len(terms) <= 16 or any(not term.isascii() or not term.isdigit() or int(term) <= 0 for term in terms):
+            raise ValueError("decimation_pattern must contain 1-16 colon-separated positive integers")
+        return value
+
 
 
 class PostStage(Entity):
@@ -565,6 +724,21 @@ class PostProfileOverlay(Entity):
     y: StrictInt | str = "h-24"
     placement: Literal["in_recording", "on_playback"] = "in_recording"
     indicator: PostProfileOverlayIndicator | None = None
+
+    @field_validator("font_relative")
+    @classmethod
+    def _safe_font_relative(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if (
+            not re.fullmatch(r"[A-Za-z0-9_./-]+", value)
+            or value.startswith("/")
+            or any(part in {"", ".."} for part in value.split("/"))
+        ):
+            raise ValueError(
+                "font_relative must use [A-Za-z0-9_./-] path segments without a leading / or .. segment"
+            )
+        return value
 
 
 class PostProfileEncode(Entity):

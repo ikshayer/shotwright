@@ -29,7 +29,9 @@ gate-C revocation, and verifying an approval_review_id names a real approving Re
 from __future__ import annotations
 
 import hashlib
+from decimal import Decimal, InvalidOperation
 import json
+import math
 import os
 import re
 import threading
@@ -40,9 +42,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, ClassVar, Literal, TypeVar
+from typing import Annotated, Any, ClassVar, Literal, TypeVar
 
-from pydantic import ValidationError
+from pydantic import Field, TypeAdapter, ValidationError
 
 from orchestrator.domain.base import (
     LEGACY_SCHEMA_VERSION,
@@ -57,6 +59,7 @@ from orchestrator.domain.entities import (
     Asset,
     AudioPostProfile,
     CameraProfile,
+    CAMERA_PROFILE_SCHEMA_VERSION,
     Episode,
     EpisodeOutput,
     Export,
@@ -90,6 +93,15 @@ _ABSOLUTE_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\|/)")
 _VERSION_FILE = re.compile(r"^v(\d{4,})\.json$")
 _LIFECYCLE_FILE = re.compile(r"^v(\d{4,})\.lifecycle\.(\d{8,})\.json$")
 _SHOT_OUTPUT_FILE = re.compile(r"^o(\d{8,})-([A-Za-z0-9_-]+)\.json$")
+# The types main (CameraProfile schema 2) read these post-only fields with; a pre-v3
+# record must satisfy them before the v3 migration normalises it.
+_LEGACY_CAMERA_FIELD_TYPES: dict[str, TypeAdapter[Any]] = {
+    # null never occurred on main, but it maps to the same inactive value below.
+    "bitrate_kbps": TypeAdapter(Annotated[int, Field(gt=0)] | None),
+    "noise_model": TypeAdapter(dict[str, float]),
+    "grade_white_balance": TypeAdapter(dict[str, float]),
+    "overlay_model": TypeAdapter(dict[str, str | int | float]),
+}
 _REPLACE_ATTEMPTS = 5
 _REPLACE_BACKOFF_S = 0.02
 _LIFECYCLE_FIELDS = frozenset({
@@ -1293,7 +1305,99 @@ class ProjectStore:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise _invalid(f"{relative} is not valid JSON: {exc}", cause=exc) from exc
-        self._require_readable_schema(relative, data)
+        self._require_readable_schema(relative, data, entity_type=cls)
+        if cls is CameraProfile and data["schema_version"] < CAMERA_PROFILE_SCHEMA_VERSION:
+            # A pre-v3 record is first held to the types main read it with, so the
+            # migration neither revives a record main refused nor refuses one it loaded.
+            for field, adapter in _LEGACY_CAMERA_FIELD_TYPES.items():
+                if field in data:
+                    value = data[field]
+                    if isinstance(value, dict):
+                        # main's dicts could not hold null; a null key is the neutral value.
+                        value = {key: item for key, item in value.items() if item is not None}
+                    try:
+                        data[field] = adapter.validate_python(value)
+                    except ValidationError as exc:
+                        raise _invalid(
+                            f"{relative} legacy CameraProfile.{field} is invalid: {exc.errors()[0]['msg']}",
+                            cause=exc,
+                        ) from exc
+            # bitrate_kbps was formerly a stored default with no encoder effect.
+            # Treat every pre-v3 value as inactive so loading old projects cannot
+            # silently change their output under the newly wired encoder option.
+            data["bitrate_kbps"] = None
+            legacy_dict_fields = {
+                "noise_model": (
+                    {"luma", "chroma"},
+                    {"luma", "chroma", "temporal", "uniform"},
+                    {"temporal", "uniform"},
+                ),
+                "grade_white_balance": (
+                    {"temperature_k"},
+                    {"temperature_k", "red_gain", "green_gain", "blue_gain",
+                     "brightness", "contrast", "saturation"},
+                    set(),
+                ),
+                "overlay_model": (
+                    {"clock_epoch", "fontsize", "x", "y"},
+                    {"camera_id_text", "clock_epoch", "clock_format", "fontsize",
+                     "x", "y", "placement"},
+                    set(),
+                ),
+            }
+            for field, (integer_keys, allowed_keys, boolean_keys) in legacy_dict_fields.items():
+                nested_value = data.get(field)
+                if not isinstance(nested_value, dict):
+                    continue  # The typed model below reports the field's type error.
+                unknown = set(nested_value) - allowed_keys
+                if unknown:
+                    names = ", ".join(sorted(repr(name) for name in unknown))
+                    raise _invalid(
+                        f"{relative} has unknown legacy CameraProfile.{field} key(s): {names}"
+                    )
+                normalized = dict(nested_value)
+                for key in boolean_keys & normalized.keys():
+                    value = normalized[key]
+                    if isinstance(value, bool):
+                        continue
+                    if (
+                        type(value) in (int, float)
+                        and value in (0, 1)
+                        and math.isfinite(value)
+                    ):
+                        normalized[key] = bool(value)
+                    else:
+                        raise _invalid(
+                            f"{relative} legacy CameraProfile.{field}.{key} must be boolean or exactly 0 or 1"
+                        )
+                for key in integer_keys & normalized.keys():
+                    number = normalized[key]
+                    if type(number) is str:  # main's overlay_model kept numeric strings as str
+                        # Decimal, not float: "16.0000000000000001" must stay fractional.
+                        try:
+                            exact = Decimal(number.strip())
+                        except InvalidOperation:
+                            exact = Decimal("NaN")
+                        if not exact.is_finite() or exact != exact.to_integral_value():
+                            raise _invalid(
+                                f"{relative} legacy CameraProfile.{field}.{key} must be an integral finite number"
+                            )
+                        number = int(exact)
+                    if type(number) in (int, float):
+                        if isinstance(number, float) and (
+                            not math.isfinite(number) or not number.is_integer()
+                        ):
+                            raise _invalid(
+                                f"{relative} legacy CameraProfile.{field}.{key} must be an integral finite number"
+                            )
+                        normalized[key] = int(number)
+                if field == "overlay_model":
+                    # main stored overlay_model as dict[str, str|int|float] and never read it,
+                    # so a numeric camera id such as 123 loaded there; keep it loading as text.
+                    text = normalized.get("camera_id_text")
+                    if type(text) in (int, float):
+                        normalized["camera_id_text"] = str(text)
+                data[field] = normalized
         # Also on load: a project folder can be hand-edited or arrive from an
         # export, so a stored path is untrusted input until containment says so.
         self._check_path_fields(data, cls)
@@ -1321,21 +1425,29 @@ class ProjectStore:
         return entity, metadata
 
     @staticmethod
-    def _require_readable_schema(relative: str, data: Any) -> None:
+    def _require_readable_schema(
+        relative: str, data: Any, *, entity_type: type[Entity] | None = None,
+    ) -> None:
         stored = data.get("schema_version") if isinstance(data, dict) else None
         if isinstance(stored, bool) or not isinstance(stored, int):
             raise _invalid(f"{relative} has no integer schema_version")
-        if stored > SCHEMA_VERSION:
+        camera_profile = entity_type is CameraProfile
+        current = CAMERA_PROFILE_SCHEMA_VERSION if camera_profile else SCHEMA_VERSION
+        allowed = (
+            {LEGACY_SCHEMA_VERSION, SCHEMA_VERSION, CAMERA_PROFILE_SCHEMA_VERSION}
+            if camera_profile else {LEGACY_SCHEMA_VERSION, SCHEMA_VERSION}
+        )
+        if stored > current:
             raise JobError(
                 JobErrorKind.SCHEMA_VERSION_MISMATCH,
                 f"{relative} has schema_version {stored}, newer than this build "
-                f"({SCHEMA_VERSION}); refusing to load it",
+                f"({current}); refusing to load it",
             )
-        if stored not in {LEGACY_SCHEMA_VERSION, SCHEMA_VERSION}:
+        if stored not in allowed:
             raise JobError(
                 JobErrorKind.SCHEMA_VERSION_MISMATCH,
                 f"{relative} has schema_version {stored} and no migration to "
-                f"{SCHEMA_VERSION} is registered",
+                f"{current} is registered",
             )
 
     def _write(

@@ -201,7 +201,9 @@ def test_episode_reuses_the_hashed_room_and_rig_then_invalidates_both_shots(
     _assert_reuse_evidence(pipeline, first, "built", base_path, digest)
 
     camera, camera_token = pipeline.store.load_with_version(CameraProfile, _RIG_ID)
-    post_only = camera.model_copy(update={**camera.next_version(), "bitrate_kbps": camera.bitrate_kbps + 100})
+    post_only = camera.model_copy(update={
+        **camera.next_version(), "bitrate_kbps": (camera.bitrate_kbps or 800) + 100,
+    })
     assert revise_camera_profile(
         pipeline.store, post_only, expected_version=camera_token,
     ) == ()

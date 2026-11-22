@@ -16,7 +16,7 @@ from typing import Any, Protocol
 
 from orchestrator.adapters.blender.runner import RenderRequest
 from orchestrator.adapters.comfyui.workflow import ImageRequest
-from orchestrator.adapters.postprofile.profile import PostProfileSpec
+from orchestrator.adapters.postprofile.profile import PostProfileSpec, ProfileValidationError
 from orchestrator.adapters.postprofile.runner import DegradeRequest
 from orchestrator.domain.base import Invalidation, ShotStatus
 from orchestrator.domain.entities import (
@@ -24,6 +24,7 @@ from orchestrator.domain.entities import (
     Episode,
     EpisodeOutput,
     Job,
+    PostStage,
     Shot,
     ShotOutput,
     ShotOutputKind,
@@ -1061,7 +1062,8 @@ def _provenance(kind: ShotOutputKind, value: Any) -> dict[str, Any]:
         fields = ("engine_id", "engine_build")
     elif kind is ShotOutputKind.DEGRADED:
         fields = (
-            "profile_semver", "filter_graph_hash", "pinned_binaries", "frame_count", "output_fps",
+            "profile_semver", "filter_graph_hash", "postprofile_spec_sha256",
+            "pinned_binaries", "frame_count", "output_fps",
         )
     else:
         fields = ()
@@ -1090,22 +1092,222 @@ def postprofile_spec_from_camera(camera: CameraProfile, spec: PostProfileSpec) -
         if field_invalidation(CameraProfile, name) is Invalidation.POST_ONLY
     }
     if "fps" in tagged:
-        values["output_fps"] = int(camera.fps)
+        output_rate = Fraction(str(camera.fps))
+        if output_rate.denominator != 1:
+            raise ProfileValidationError(
+                f"CameraProfile.fps {camera.fps} is not an integer output rate supported by PostProfile"
+            )
+        values["output_fps"] = output_rate.numerator
     if "storage_resolution" in tagged:
         values["storage_resolution"] = camera.storage_resolution
     if "display_aspect_ratio" in tagged or "storage_resolution" in tagged:
         display = Fraction(camera.display_aspect_ratio.replace(":", "/"))
         width, height = camera.storage_resolution
-        values["sample_aspect_ratio"] = str(display / Fraction(width, height))
+        sample_aspect = display / Fraction(width, height)
+        values["sample_aspect_ratio"] = (
+            f"{sample_aspect.numerator}/{sample_aspect.denominator}"
+        )
     if "frame_drop_schedule" in tagged:
         values["artifact_schedule"] = tuple(camera.frame_drop_schedule)
+
+    stages = list(spec.identity.stages)
+    overrides: list[dict[str, str | None]] = []
+
+    def rank(stage: PostStage) -> int:
+        if stage.filter == "setpts":
+            return 4 if stage.params.get("from_schedule") == "clock" else 6
+        if stage.filter == "select" and "pattern" in stage.params:
+            return 1
+        return {
+            "scale": 0, "fps": 1, "select": 2, "loop": 3, "drawtext": 5,
+            "colortemperature": 7, "colorchannelmixer": 8, "eq": 9,
+            "gblur": 10, "noise": 11, "unsharp": 12, "setsar": 13,
+        }[stage.filter]
+
+    def install(
+        field: str,
+        camera_stages: list[PostStage],
+        matches: Callable[[PostStage], bool],
+    ) -> None:
+        indexes = [index for index, current in enumerate(stages) if matches(current)]
+        if indexes:
+            replaced = stages[indexes[0]].name
+            for index in reversed(indexes):
+                stages.pop(index)
+            insert_at = indexes[0]
+            stages[insert_at:insert_at] = camera_stages
+            overrides.append({"field": field, "replaced_stage": replaced})
+            return
+        for camera_stage in camera_stages:
+            insert_at = next(
+                (index for index, current in enumerate(stages) if rank(current) > rank(camera_stage)),
+                len(stages),
+            )
+            stages.insert(insert_at, camera_stage)
+
+    if "decimation_pattern" in tagged and camera.decimation_pattern is not None:
+        install(
+            "decimation_pattern",
+            [PostStage(name="camera_decimation_pattern", filter="select",
+                       params={"pattern": camera.decimation_pattern})],
+            lambda stage: stage.filter == "fps" or (
+                stage.filter == "select" and "pattern" in stage.params
+            ),
+        )
+
+    if "noise_model" in tagged and camera.noise_model.active:
+        flags = "+".join(
+            flag for enabled, flag in ((camera.noise_model.temporal, "t"),
+                                       (camera.noise_model.uniform, "u")) if enabled
+        )
+        noise_params: dict[str, Any] = {
+            "c0s": camera.noise_model.luma,
+            "c1s": camera.noise_model.chroma,
+            "c2s": camera.noise_model.chroma,
+        }
+        if flags:
+            noise_params.update({"c0f": flags, "c1f": flags, "c2f": flags})
+        install(
+            "noise_model",
+            [PostStage(name="camera_noise_model", filter="noise", params=noise_params,
+                       seed_source="shot_degrade_seed")],
+            lambda stage: stage.filter == "noise",
+        )
+
+    if "grade_white_balance" in tagged:
+        grade = camera.grade_white_balance
+        if grade.temperature_active:
+            install(
+                "grade_white_balance",
+                [PostStage(name="camera_grade_white_balance_temperature",
+                           filter="colortemperature",
+                           params={"temperature": grade.temperature_k})],
+                lambda stage: stage.filter == "colortemperature",
+            )
+        if grade.gains_active:
+            gains = {
+                "rr": 1.0 if grade.red_gain is None else grade.red_gain,
+                "gg": 1.0 if grade.green_gain is None else grade.green_gain,
+                "bb": 1.0 if grade.blue_gain is None else grade.blue_gain,
+            }
+            # FFmpeg 8.1.1 caps colorchannelmixer diagonal options at 2.0. Split
+            # larger gains over two named stages so the CameraProfile range reaches 4.
+            if max(gains.values()) > 2:
+                factor = {key: math.sqrt(value) for key, value in gains.items()}
+                mixer_stages = [
+                    PostStage(name="camera_grade_white_balance", filter="colorchannelmixer",
+                              params=factor),
+                    PostStage(name="camera_grade_white_balance_gain_2", filter="colorchannelmixer",
+                              params=factor),
+                ]
+            else:
+                mixer_stages = [PostStage(name="camera_grade_white_balance",
+                                          filter="colorchannelmixer", params=gains)]
+            install(
+                "grade_white_balance", mixer_stages,
+                lambda stage: stage.filter == "colorchannelmixer",
+            )
+        if grade.eq_active:
+            install(
+                "grade_white_balance",
+                [PostStage(name="camera_grade_white_balance_eq", filter="eq", params={
+                    "brightness": 0 if grade.brightness is None else grade.brightness,
+                    "contrast": 1 if grade.contrast is None else grade.contrast,
+                    "saturation": 1 if grade.saturation is None else grade.saturation,
+                })],
+                lambda stage: stage.filter == "eq",
+            )
+
+    if "chroma_smearing" in tagged and camera.chroma_smearing > 0:
+        install(
+            "chroma_smearing",
+            [PostStage(name="camera_chroma_smearing", filter="gblur", params={
+                "sigma": camera.chroma_smearing / 2,
+                "sigmaV": 0,
+                "planes": 6,
+            })],
+            lambda stage: stage.filter == "gblur",
+        )
+
+    if "sharpening" in tagged and camera.sharpening > 0:
+        install(
+            "sharpening",
+            [PostStage(name="camera_sharpening", filter="unsharp", params={
+                "luma_msize_x": 5, "luma_msize_y": 5,
+                "luma_amount": camera.sharpening,
+            })],
+            lambda stage: stage.filter == "unsharp",
+        )
+
+    if "overlay_model" in tagged:
+        overlay_model = camera.overlay_model
+        if overlay_model.placement == "on_playback" and overlay_model.clock_format is not None:
+            raise ProfileValidationError(
+                "CameraProfile.overlay_model.clock_format is ignored by the delivery builder; "
+                "on_playback clock_format is unsupported until step 3b implements playback compositing"
+            )
+        if spec.overlay is None and any(
+            getattr(overlay_model, name) is not None
+            for name in ("camera_id_text", "clock_epoch", "clock_format", "fontsize", "x", "y", "placement")
+        ):
+            raise ProfileValidationError(
+                "overlay_model requires an existing PostProfile clock overlay and drawtext stage"
+            )
+        if spec.overlay is not None:
+            overlay_updates = {
+                "camera_id": overlay_model.camera_id_text,
+                "clock_epoch": overlay_model.clock_epoch,
+                "clock_format": overlay_model.clock_format,
+                "fontsize": overlay_model.fontsize,
+                "x": overlay_model.x,
+                "y": overlay_model.y,
+                "placement": overlay_model.placement,
+            }
+            overlay_updates = {key: value for key, value in overlay_updates.items()
+                               if value is not None}
+            if overlay_updates:
+                clock_stages = [
+                    stage for stage in stages
+                    if stage.filter == "drawtext" and stage.params.get("element", "clock") == "clock"
+                ]
+                if len(clock_stages) != 1:
+                    raise ProfileValidationError(
+                        "overlay_model requires exactly one existing PostProfile clock drawtext stage"
+                    )
+                overlay = spec.overlay.model_copy(update=overlay_updates)
+                stage_updates = {
+                    "camera_id": overlay.camera_id,
+                    "clock_epoch": overlay.clock_epoch,
+                    "fontsize": overlay.fontsize,
+                    "x": overlay.x,
+                    "y": overlay.y,
+                    "clock_format": overlay.clock_format,
+                }
+                install(
+                    "overlay_model",
+                    [clock_stages[0].model_copy(update={
+                        "name": "camera_overlay_model",
+                        "params": {**clock_stages[0].params,
+                                   **{key: value for key, value in stage_updates.items() if value is not None}},
+                        "composite_stage": overlay.placement,
+                    })],
+                    lambda stage: stage.filter == "drawtext" and stage.params.get("element", "clock") == "clock",
+                )
+                values["overlay"] = overlay
+
     encode_updates: dict[str, Any] = {}
     if "codec" in tagged:
         encode_updates["codec"] = camera.codec
+    if "bitrate_kbps" in tagged:
+        encode_updates["bitrate_kbps"] = camera.bitrate_kbps
+    if "block_artifacts" in tagged:
+        encode_updates["block_artifacts"] = camera.block_artifacts
     encode = spec.encode.model_copy(update=encode_updates) if encode_updates else spec.encode
     values["encode"] = encode
-    mapped = spec.model_copy(update=values)
-    return PostProfileSpec.model_validate(mapped.model_dump(mode="python"))
+    if stages != list(spec.identity.stages):
+        values["identity"] = spec.identity.model_copy(update={"stages": stages})
+    values["provenance"] = {"camera_overrides": overrides}
+    return PostProfileSpec.model_validate(spec.model_dump(mode="python") | values)
 
 
 def _job_error(kind: JobErrorKind, message: str, job: Job,

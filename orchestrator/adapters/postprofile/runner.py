@@ -65,8 +65,16 @@ class DegradeRequest(BaseModel):
     def _optional_relative_font_path(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        if not value or "\x00" in value or Path(value).is_absolute() or re.match(r"^[A-Za-z]:", value):
-            raise ValueError("font path must be project-relative")
+        if (
+            not re.fullmatch(r"[A-Za-z0-9_./-]+", value)
+            or value.startswith("/")
+            or Path(value).is_absolute()
+            or re.match(r"^[A-Za-z]:", value)
+            or any(part in {"", ".."} for part in value.split("/"))
+        ):
+            raise ValueError(
+                "font_relative must use [A-Za-z0-9_./-] path segments without a leading / or .. segment"
+            )
         return value
 
     @model_validator(mode="after")
@@ -85,6 +93,7 @@ class DegradeResult:
     artifact_schedule: tuple[Any, ...]
     filter_graph: str
     filter_graph_hash: str
+    postprofile_spec_sha256: str
     output_sha256: str
     frame_count: int
     output_fps: int
@@ -105,13 +114,35 @@ def build_command(
     crf: int,
     pixel_format: str,
     threads: int,
+    bitrate_kbps: int | None = None,
+    block_artifacts: float = 0.0,
 ) -> list[str]:
     """Return explicit FFmpeg argv, never a shell command string."""
-    return [str(ffmpeg_exe), "-hide_banner", "-nostdin", "-y", "-fflags", "+bitexact",
-            "-i", str(master), "-map", "0:v:0", "-vf", filter_graph,
-            "-c:v", codec, "-preset", preset, "-crf", str(crf), "-pix_fmt", pixel_format,
-            "-threads", str(threads), "-map_metadata", "-1", "-flags", "+bitexact",
-            "-fflags", "+bitexact", str(output)]
+    command = [str(ffmpeg_exe), "-hide_banner", "-nostdin", "-y", "-fflags", "+bitexact",
+               "-i", str(master), "-map", "0:v:0", "-vf", filter_graph,
+               "-c:v", codec, "-preset", preset]
+    if bitrate_kbps is None:
+        command.extend(["-crf", str(crf)])
+    else:
+        command.extend([
+            "-b:v", f"{bitrate_kbps}k",
+            "-maxrate", f"{bitrate_kbps}k",
+            "-bufsize", f"{bitrate_kbps * 2}k",
+        ])
+    if block_artifacts > 0:
+        if codec != "libx264":
+            raise ProfileValidationError(
+                f"block_artifacts is supported only by libx264; codec {codec!r} has no quantizer-floor mapping"
+            )
+        qpmin = round(18 + 33 * block_artifacts)
+        # qpmin is an x264 private parameter, not an FFmpeg libx264 AVOption on
+        # this build; -x264-params is the accepted route. The weakest loop filter
+        # strength is applied explicitly alongside it.
+        command.extend(["-x264-params", f"qpmin={qpmin}", "-deblock", "-6:-6"])
+    command.extend(["-pix_fmt", pixel_format, "-threads", str(threads),
+                    "-map_metadata", "-1", "-flags", "+bitexact",
+                    "-fflags", "+bitexact", str(output)])
+    return command
 
 
 class PostProfileAdapter:
@@ -180,6 +211,11 @@ class PostProfileAdapter:
         log_rel = f"{run_relative}/ffmpeg.log"
         metadata_rel = f"{run_relative}/metadata.json"
         run_log = self.root.resolve(log_rel)
+        derived_spec = request.profile.model_dump(mode="json")
+        derived_spec_canonical_json = json.dumps(
+            derived_spec, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")
+        )
+        derived_spec_sha256 = hashlib.sha256(derived_spec_canonical_json.encode("utf-8")).hexdigest()
         metadata: dict[str, Any] = {
             "schema_version": 1,
             "status": "running",
@@ -189,6 +225,9 @@ class PostProfileAdapter:
             "profile_name": request.profile.identity.name,
             "profile_semver": request.profile.identity.semver,
             "supersedes": request.profile.supersedes,
+            "derived_spec": derived_spec,
+            "derived_spec_canonical_json": derived_spec_canonical_json,
+            "postprofile_spec_sha256": derived_spec_sha256,
             "degrade_seed": request.degrade_seed,
             "master_path": request.master_relative,
             "output_path": output_rel,
@@ -206,7 +245,9 @@ class PostProfileAdapter:
                                         filter_graph=graph, codec=request.profile.encode.codec,
                                         preset=request.profile.encode.preset, crf=request.profile.encode.crf,
                                         pixel_format=request.profile.encode.pix_fmt,
-                                        threads=request.profile.encode.threads)
+                                        threads=request.profile.encode.threads,
+                                        bitrate_kbps=request.profile.encode.bitrate_kbps,
+                                        block_artifacts=request.profile.encode.block_artifacts)
 
                 def write_log(log_path: Path) -> None:
                     with log_path.open("wb") as log_file:
@@ -284,6 +325,7 @@ class PostProfileAdapter:
             artifact_schedule=validated.schedule,
             filter_graph=graph,
             filter_graph_hash=metadata["filter_graph_hash"],
+            postprofile_spec_sha256=derived_spec_sha256,
             output_sha256=digest,
             frame_count=output_probe["frame_count"],
             output_fps=request.profile.output_fps,
@@ -347,6 +389,34 @@ class PostProfileAdapter:
                 raise JobError(JobErrorKind.INVALID_MANIFEST,
                                "installed FFmpeg noise all_seed range differs from the measured INT32_MAX contract",
                                shot_id=request.shot_id, run_id=request.run_id)
+        option_requirements = {
+            "colortemperature": {"temperature"},
+            "colorchannelmixer": {"rr", "gg", "bb"},
+            "gblur": {"sigma", "sigmaV", "planes"},
+            "unsharp": {"luma_msize_x", "luma_msize_y", "luma_amount"},
+        }
+        for stage in request.profile.identity.stages:
+            if stage.filter == "noise":
+                names = {key for key in stage.params if key in {
+                    "c0s", "c1s", "c2s", "c0f", "c1f", "c2f",
+                }}
+                if names:
+                    names.add("all_seed")
+                    option_requirements.setdefault("noise", set()).update(names)
+        for filter_name, options in option_requirements.items():
+            if filter_name not in required:
+                continue
+            help_text = self._capture(
+                [str(self.ffmpeg_exe), "-hide_banner", "-h", f"filter={filter_name}"], request
+            )
+            missing = sorted(option for option in options
+                             if not re.search(rf"^\s*{re.escape(option)}\s+", help_text, flags=re.MULTILINE))
+            if missing:
+                raise JobError(
+                    JobErrorKind.INVALID_MANIFEST,
+                    f"installed FFmpeg {filter_name} filter lacks required option(s): {', '.join(missing)}",
+                    shot_id=request.shot_id, run_id=request.run_id,
+                )
         if "loop" in required:
             help_text = self._capture([str(self.ffmpeg_exe), "-hide_banner", "-h", "filter=loop"], request)
             if not re.search(r"\bstart\b", help_text):
@@ -354,11 +424,26 @@ class PostProfileAdapter:
                                shot_id=request.shot_id, run_id=request.run_id)
         encoder_help = self._capture([str(self.ffmpeg_exe), "-hide_banner", "-h",
                                       f"encoder={request.profile.encode.codec}"], request)
-        for option in ("preset", "crf"):
+        required_encoder_options = ["preset"]
+        if request.profile.encode.bitrate_kbps is None:
+            required_encoder_options.append("crf")
+        if request.profile.encode.block_artifacts > 0:
+            required_encoder_options.extend(("x264-params", "deblock"))
+        for option in required_encoder_options:
             if not re.search(rf"^\s*-{option}\s", encoder_help, flags=re.MULTILINE):
                 raise JobError(JobErrorKind.INVALID_MANIFEST,
                                f"installed encoder lacks required -{option} option",
                                shot_id=request.shot_id, run_id=request.run_id)
+        if request.profile.encode.bitrate_kbps is not None:
+            required_rate_options = {"b", "maxrate", "bufsize"}
+            missing = sorted(option for option in required_rate_options
+                             if not re.search(rf"^\s*-{option}\s", global_help, flags=re.MULTILINE))
+            if missing:
+                raise JobError(
+                    JobErrorKind.INVALID_MANIFEST,
+                    f"installed FFmpeg lacks required rate-control option(s): {', '.join(missing)}",
+                    shot_id=request.shot_id, run_id=request.run_id,
+                )
 
     @staticmethod
     def _listed_entry(output: str, name: str) -> bool:
