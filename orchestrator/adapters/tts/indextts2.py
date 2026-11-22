@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import threading
 import time
@@ -22,7 +23,7 @@ from typing import Any
 import psutil
 
 from orchestrator.domain.entities import Asset, Job
-from orchestrator.platform.containment import ProjectRoot
+from orchestrator.platform.containment import ContainmentError, ProjectRoot
 from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.platform.settings import Settings
 from orchestrator.store.json_store import ProjectStore, RecordNotFound
@@ -35,6 +36,7 @@ from .core import (
     INDEXTTS2_CONFIG_SHA256,
     INDEXTTS2_PYTHON,
     INDEXTTS2_REPOSITORY,
+    INDEXTTS2_WEIGHT_PINS,
     EmotionReference,
     EmotionText,
     EmotionVector,
@@ -45,6 +47,7 @@ from .core import (
     inspect_wav,
     job_error,
     last_lines,
+    require_cancel_clear,
     repository_root,
     sha256_file,
 )
@@ -58,6 +61,8 @@ _RESULT_KEYS = frozenset({
 _TERMINATE_GRACE_SECONDS = 5.0
 _ATTEMPT_DRAIN_SECONDS = 10.0
 _SETTINGS_HINT = "set enabled = true and explicit reservations under [indextts2] in settings.toml"
+_VERIFIED_WEIGHT_FILES: set[tuple[Path, int, int, str]] = set()
+_VERIFICATION_CACHE_LOCK = threading.Lock()
 
 #: Worker error codes (see indextts2_worker.py) mapped onto the closed FR-27 taxonomy.
 _WORKER_ERROR_KINDS = {
@@ -269,10 +274,17 @@ class IndexTTS2Adapter:
         attempt = self._worker.begin(stops_seen)
         try:
             files.prepare(request.text)
-            commit, config_sha256 = self._verify_runtime(request, job)
-            identity = f"indextts2 {commit} config.yaml sha256 {config_sha256}"
+            commit, config_sha256, weights_digest = self._verify_runtime(request, job, cancel)
+            identity = (
+                f"indextts2 {commit} config.yaml sha256 {config_sha256} "
+                f"weights sha256 {weights_digest}"
+            )
             report["engine_version"] = identity
-            report["runtime"] = {"git_commit": commit, "config_sha256": config_sha256}
+            report["runtime"] = {
+                "git_commit": commit, "config_sha256": config_sha256,
+                "weights_sha256": weights_digest,
+                "weights_identity": f"weights sha256 {weights_digest}",
+            }
             speaker_copy = self._stage_speaker(request, files, job)
             report["speaker"] = {
                 "speaker_asset_id": request.speaker_asset_id, "path": request.speaker_path,
@@ -329,26 +341,115 @@ class IndexTTS2Adapter:
             channels=facts.channels, duration_seconds=facts.duration_seconds,
         )
 
-    def _verify_runtime(self, request: IndexTts2Request, job: Job) -> tuple[str, str]:
+    def _verify_runtime(self, request: IndexTts2Request, job: Job,
+                        cancel: Callable[[], bool] | None = None) -> tuple[str, str, str]:
         """Refuse an unpinned runtime or a changed speaker reference.
 
-        Returns the verified (git commit, config.yaml SHA-256).
+        Returns the verified (git commit, config.yaml SHA-256, weights digest).
         """
         for relative in (INDEXTTS2_PYTHON, INDEXTTS2_CONFIG, *(
                 f"{INDEXTTS2_CHECKPOINTS}/{name}" for name in INDEXTTS2_AUXILIARY_FILES)):
-            if not self.repository.resolve(relative).is_file():
+            try:
+                runtime_path = self.repository.resolve(relative)
+            except ContainmentError as exc:
+                raise job_error(
+                    JobErrorKind.MISSING_MODEL_ARTIFACT,
+                    f"IndexTTS-2 runtime path is not contained: {relative}", job, exc,
+                ) from exc
+            if not runtime_path.is_file():
                 raise job_error(JobErrorKind.MISSING_MODEL_ARTIFACT,
                                 f"IndexTTS-2 file is missing and will not be downloaded: {relative}", job)
+
+        # Resolve and stat every pin before hashing any of them. This rejects missing,
+        # linked, non-regular and wrong-sized files without first reading large weights.
+        pins = tuple(INDEXTTS2_WEIGHT_PINS)
+        pinned_files: list[tuple[Any, str, Path, os.stat_result]] = []
+        for pin in pins:
+            relative = f"{INDEXTTS2_CHECKPOINTS}/{pin.path}"
+            # The shared containment helper validates the relative path (including Windows
+            # reserved names) and keeps it inside the repository.
+            try:
+                path = self.repository.resolve(relative)
+            except ContainmentError as exc:
+                raise job_error(
+                    JobErrorKind.MISSING_MODEL_ARTIFACT,
+                    f"IndexTTS-2 pinned path is not contained: {relative}", job, exc,
+                ) from exc
+            # resolve() follows links that stay inside the root; a pinned file must not be one.
+            symlink_check = self.repository.path
+            for component in relative.split("/"):
+                symlink_check /= component
+                if symlink_check.is_symlink():
+                    raise job_error(
+                        JobErrorKind.MISSING_MODEL_ARTIFACT,
+                        f"IndexTTS-2 pinned path contains a symlink; expected a regular file: "
+                        f"{relative}", job,
+                    )
+            try:
+                file_stat = path.stat()
+            except OSError as exc:
+                raise job_error(
+                    JobErrorKind.MISSING_MODEL_ARTIFACT,
+                    f"IndexTTS-2 pinned file is missing or unreadable: {relative}", job, exc,
+                ) from exc
+            if not stat.S_ISREG(file_stat.st_mode):
+                raise job_error(
+                    JobErrorKind.MISSING_MODEL_ARTIFACT,
+                    f"IndexTTS-2 pinned path is not a regular file: {relative}", job,
+                )
+            if file_stat.st_size != pin.size:
+                raise job_error(
+                    JobErrorKind.MISSING_MODEL_ARTIFACT,
+                    f"IndexTTS-2 pinned file {relative} has byte size {file_stat.st_size}; "
+                    f"expected {pin.size}", job,
+                )
+            pinned_files.append((pin, relative, path, file_stat))
+
+        require_cancel_clear(cancel, job, "IndexTTS-2 weight verification cancelled")
         config_sha256 = sha256_file(self.repository.resolve(INDEXTTS2_CONFIG))
         if config_sha256 != INDEXTTS2_CONFIG_SHA256:
             raise job_error(JobErrorKind.CORRUPT_ARTIFACT,
-                            f"{INDEXTTS2_CONFIG} does not match the pinned SHA-256", job)
+                            f"{INDEXTTS2_CONFIG} does not match the pinned SHA-256: expected "
+                            f"{INDEXTTS2_CONFIG_SHA256}, observed {config_sha256}", job)
+
+        for pin, relative, path, file_stat in pinned_files:
+            cache_key = (path, file_stat.st_size, file_stat.st_mtime_ns, pin.sha256)
+            with _VERIFICATION_CACHE_LOCK:
+                if cache_key in _VERIFIED_WEIGHT_FILES:
+                    continue
+            require_cancel_clear(cancel, job, f"IndexTTS-2 weight verification cancelled: {relative}")
+            digest = hashlib.sha256()
+            try:
+                with path.open("rb") as stream:
+                    while chunk := stream.read(1024 * 1024):
+                        digest.update(chunk)
+                        require_cancel_clear(
+                            cancel, job, f"IndexTTS-2 weight verification cancelled: {relative}"
+                        )
+            except OSError as exc:
+                raise job_error(
+                    JobErrorKind.MISSING_MODEL_ARTIFACT,
+                    f"IndexTTS-2 pinned file could not be hashed: {relative}", job, exc,
+                ) from exc
+            observed_sha256 = digest.hexdigest()
+            if observed_sha256 != pin.sha256:
+                raise job_error(
+                    JobErrorKind.MISSING_MODEL_ARTIFACT,
+                    f"IndexTTS-2 pinned file {relative} SHA-256 mismatch: expected "
+                    f"{pin.sha256}, observed {observed_sha256}", job,
+                )
+            with _VERIFICATION_CACHE_LOCK:
+                _VERIFIED_WEIGHT_FILES.add(cache_key)
+
         commit = _git_head(self.repository.resolve(INDEXTTS2_REPOSITORY))
         if commit != INDEXTTS2_COMMIT:
             raise job_error(JobErrorKind.CORRUPT_ARTIFACT,
                             f"{INDEXTTS2_REPOSITORY} is at {commit or 'an unreadable commit'}, "
                             f"not the pinned {INDEXTTS2_COMMIT}", job)
-        return commit, config_sha256
+        weights_digest = hashlib.sha256("\n".join(sorted(
+            f"{pin.path}:{pin.sha256}" for pin in pins
+        )).encode("utf-8")).hexdigest()
+        return commit, config_sha256, weights_digest
 
     def _stage_speaker(self, request: IndexTts2Request, files: RunFiles, job: Job) -> str:
         """Re-verify the speaker Asset now, then hand the worker a private, hashed copy.

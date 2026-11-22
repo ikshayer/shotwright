@@ -22,7 +22,7 @@ from orchestrator.domain.entities import Asset, Episode, Project, Shot
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.errors import JobErrorKind
 from orchestrator.platform.settings import Settings
-from orchestrator.store.json_store import ProjectStore, RecordNotFound
+from orchestrator.store.json_store import RecordNotFound
 from tests.api.conftest import LOOPBACK_BASE, TOKEN, TOKEN_HEADER
 from tests.service.conftest import Environment
 
@@ -198,17 +198,39 @@ class FakeIndexProcess:
 
 
 @pytest.fixture
-def indextts2_harness(tmp_path: Path, request):
+def indextts2_harness(tmp_path: Path, request, monkeypatch: pytest.MonkeyPatch):
     """Assumed public adapter name/constructor: IndexTTS2Adapter(root, settings, popen=...)."""
     mutation = getattr(request, "param", None)
     module = pytest.importorskip("orchestrator.adapters.tts.indextts2")
     adapter_type = module.IndexTTS2Adapter
-    repo = Path(__file__).resolve().parents[3]
-    index_repo = repo / "spikes" / "05_voice" / "_work" / "index-tts"
-    if not (index_repo / ".venv" / "Scripts" / "python.exe").is_file() or not (
-        index_repo / "checkpoints" / "config.yaml"
-    ).is_file():
-        pytest.skip("the pinned IndexTTS-2 interpreter is not installed; no model will be started")
+    from orchestrator.adapters.tts import core
+
+    runtime_root = tmp_path / "index-runtime"
+    index_repo = runtime_root / core.INDEXTTS2_REPOSITORY
+    python_path = runtime_root / core.INDEXTTS2_PYTHON
+    checkpoints = runtime_root / core.INDEXTTS2_CHECKPOINTS
+    python_path.parent.mkdir(parents=True)
+    python_path.write_bytes(b"fake IndexTTS-2 interpreter")
+    config_bytes = b"test: indextts2\n"
+    weight_bytes = b"small fake IndexTTS-2 weights"
+    (checkpoints / "config.yaml").parent.mkdir(parents=True)
+    (checkpoints / "config.yaml").write_bytes(config_bytes)
+    (checkpoints / "fixture.bin").write_bytes(weight_bytes)
+    fixture_pins = (
+        core.IndexTTS2WeightPin(
+            path="config.yaml", size=len(config_bytes),
+            sha256=hashlib.sha256(config_bytes).hexdigest(), source="test fixture",
+        ),
+        core.IndexTTS2WeightPin(
+            path="fixture.bin", size=len(weight_bytes),
+            sha256=hashlib.sha256(weight_bytes).hexdigest(), source="test fixture",
+        ),
+    )
+    monkeypatch.setattr(core, "INDEXTTS2_WEIGHT_PINS", fixture_pins)
+    monkeypatch.setattr(module, "INDEXTTS2_WEIGHT_PINS", fixture_pins)
+    monkeypatch.setattr(module, "INDEXTTS2_CONFIG_SHA256", hashlib.sha256(config_bytes).hexdigest())
+    monkeypatch.setattr(module, "INDEXTTS2_AUXILIARY_FILES", ())
+    monkeypatch.setattr(module, "_git_head", lambda _repo: core.INDEXTTS2_COMMIT)
 
     parent = tmp_path / "projects"
     project_path = parent / "p1"
@@ -254,7 +276,7 @@ def indextts2_harness(tmp_path: Path, request):
         calls.append(process)
         return process
 
-    backend = adapter_type(env.root, env.settings, popen=popen)
+    backend = adapter_type(env.root, env.settings, popen=popen, repository=ProjectRoot(runtime_root))
     # Expose the fake-backed adapter to lifecycle tests that need to deliver worker
     # control signals at a precise point in synthesize_managed.
     env.indextts2_backend = backend

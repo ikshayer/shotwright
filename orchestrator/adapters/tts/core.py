@@ -44,6 +44,139 @@ INDEXTTS2_AUXILIARY_FILES = (
     "qwen0.6bemo4-merge/config.json",
 )
 
+
+class IndexTTS2WeightPin(BaseModel):
+    """Immutable identity and expected bytes for one loaded checkpoint file."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    path: str = Field(min_length=1)
+    size: StrictInt = Field(gt=0)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source: str = Field(min_length=1)
+
+
+_INDEXTEAM_PIN_SOURCE = "IndexTeam/IndexTTS-2@740dcaff396282ffb241903d150ac011cd4b1ede"
+_LOCAL_PIN_SOURCE = "local, size matches publisher (no published SHA-256)"
+
+# Files loaded by IndexTTS2's constructor and the optional Qwen emotion-text path.
+# Published SHA-256 values are used where available; local-only values are for small
+# git-blob assets whose publisher does not publish a SHA-256.
+INDEXTTS2_WEIGHT_PINS = (
+    IndexTTS2WeightPin(
+        path="gpt.pth", size=3484663079,
+        sha256="baaaeb8b56328da81731dc540a85a7dee32eca9da28f174b05757cb651c602a4",
+        source=f"{_INDEXTEAM_PIN_SOURCE}:gpt.pth",
+    ),
+    IndexTTS2WeightPin(
+        path="s2mel.pth", size=1202198223,
+        sha256="aae1bb12017cbb47e7a5ce537fc82f40b6b1deb71acdb9b8f25686f32714b636",
+        source=f"{_INDEXTEAM_PIN_SOURCE}:s2mel.pth",
+    ),
+    IndexTTS2WeightPin(
+        path="bpe.model", size=475997,
+        sha256="b2a5ce8090d32da3642cc4f81fdc996376bc6dd3f4cd5e3d165f71120d9f2bc8",
+        source=f"{_INDEXTEAM_PIN_SOURCE}:bpe.model",
+    ),
+    IndexTTS2WeightPin(
+        path="feat1.pt", size=57170,
+        sha256="f219cb447d80216ba615666da2ff8d63ac544eee26657f3a7b278692bf7a67c4",
+        source=f"{_INDEXTEAM_PIN_SOURCE}:feat1.pt",
+    ),
+    IndexTTS2WeightPin(
+        path="feat2.pt", size=374866,
+        sha256="9c4292e96dee535aea9a6206e9a0c856dd578dde9212acdb16dd3ada4d12bf80",
+        source=f"{_INDEXTEAM_PIN_SOURCE}:feat2.pt",
+    ),
+    IndexTTS2WeightPin(
+        path="wav2vec2bert_stats.pt", size=9343,
+        sha256="c9c176c2b8850ab2e3ba828bbfa969deaf4566ce55db5f2687b8430b87526ad2",
+        source=f"{_INDEXTEAM_PIN_SOURCE}:wav2vec2bert_stats.pt",
+    ),
+    IndexTTS2WeightPin(
+        path="qwen0.6bemo4-merge/model.safetensors", size=1192135096,
+        sha256="11293257a8df593c154a8ecd5fc039f3076de35411e35f06d41b471e136f6641",
+        source=f"{_INDEXTEAM_PIN_SOURCE}:qwen0.6bemo4-merge/model.safetensors",
+    ),
+    IndexTTS2WeightPin(
+        path="qwen0.6bemo4-merge/tokenizer.json", size=11422654,
+        sha256="aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+        source=f"{_INDEXTEAM_PIN_SOURCE}:qwen0.6bemo4-merge/tokenizer.json",
+    ),
+    IndexTTS2WeightPin(
+        path="hf_cache/w2v-bert-2.0/model.safetensors", size=2322063736,
+        sha256="eb890c9660ed6e3414b6812e27257b8ce5454365d5490d3ad581ea60b93be043",
+        source="facebook/w2v-bert-2.0@da985ba0987f70aaeb84a80f2851cfac8c697a7b",
+    ),
+    IndexTTS2WeightPin(
+        path="hf_cache/semantic_codec_model.safetensors", size=177183712,
+        sha256="ec947271175d8cad75ec37e83aa487e27c97a0f72a303393772da5ffa84bddf2",
+        source=("amphion/MaskGCT@265c6cef07625665d0c28d2faafb1415562379dc:"
+                "semantic_codec/model.safetensors"),
+    ),
+    IndexTTS2WeightPin(
+        path="hf_cache/campplus_cn_common.bin", size=28036335,
+        sha256="3388cf5fd3493c9ac9c69851d8e7a8badcfb4f3dc631020c4961371646d5ada8",
+        source="funasr/campplus@e4b6ede7ce16997aff4ae69fbca1f0175e2afede",
+    ),
+    IndexTTS2WeightPin(
+        path="hf_cache/bigvgan/bigvgan_generator.pt", size=449228171,
+        sha256="e95ba25972d3de0628d99cd156e9315a9c018899bf739988959ebe3544080ced",
+        source=("nvidia/bigvgan_v2_22khz_80band_256x@"
+                "633ff708ed5b74903e86ff1298cf4a98e921c513"),
+    ),
+    IndexTTS2WeightPin(
+        path="config.yaml", size=2882,
+        sha256="ea9c2815ecc3874577c7ac158b97248c027250e5b05972fbbb1216b6d6539081",
+        source=_LOCAL_PIN_SOURCE,
+    ),
+    IndexTTS2WeightPin(
+        path="hf_cache/w2v-bert-2.0/config.json", size=1874,
+        sha256="f5572bd5998b68182e9c328a43127ed21fed687f6910497136b91a4e3b0e3675",
+        source=_LOCAL_PIN_SOURCE,
+    ),
+    IndexTTS2WeightPin(
+        path="hf_cache/w2v-bert-2.0/preprocessor_config.json", size=275,
+        sha256="8e6281aad64f97e40534135a59dcc5d33571efae376f2a25adf5551951897ab4",
+        source=_LOCAL_PIN_SOURCE,
+    ),
+    IndexTTS2WeightPin(
+        path="hf_cache/bigvgan/config.json", size=1405,
+        sha256="88a1f47acf747db0b21e97a389d838566147f7a5464583ff5c8d819d870f03ee",
+        source=_LOCAL_PIN_SOURCE,
+    ),
+    IndexTTS2WeightPin(
+        path="qwen0.6bemo4-merge/config.json", size=727,
+        sha256="2e04bc223dfb548dde52faebe2a819964523ff749cbe26467c49380aa371594f",
+        source=_LOCAL_PIN_SOURCE,
+    ),
+    IndexTTS2WeightPin(
+        path="qwen0.6bemo4-merge/generation_config.json", size=117,
+        sha256="6453260cdb41552215d87400ab399a760f25509ec2860ceb07817b195651626d",
+        source=_LOCAL_PIN_SOURCE,
+    ),
+    IndexTTS2WeightPin(
+        path="qwen0.6bemo4-merge/tokenizer_config.json", size=5433,
+        sha256="147bae7844ddfb8767c1f9cc0f505d4a26839bd6fbb0656d6d6bc17c82e9108a",
+        source=_LOCAL_PIN_SOURCE,
+    ),
+    IndexTTS2WeightPin(
+        path="qwen0.6bemo4-merge/added_tokens.json", size=707,
+        sha256="c0284b582e14987fbd3d5a2cb2bd139084371ed9acbae488829a1c900833c680",
+        source=_LOCAL_PIN_SOURCE,
+    ),
+    IndexTTS2WeightPin(
+        path="qwen0.6bemo4-merge/special_tokens_map.json", size=616,
+        sha256="6676f091c8bc4d1b50146427cfde92073402866b87b6e39223227931b70083e9",
+        source=_LOCAL_PIN_SOURCE,
+    ),
+    IndexTTS2WeightPin(
+        path="qwen0.6bemo4-merge/chat_template.jinja", size=550,
+        sha256="a13337ea164ac47b2c1e644b6338d5e7e91cdcb58218511899c083112472730c",
+        source=_LOCAL_PIN_SOURCE,
+    ),
+)
+
 INDEXTTS2_MODEL_LICENSE = (
     "bilibili Model Use License (IndexTTS-2; royalty-free below 100M MAU / RMB 1bn)"
 )
