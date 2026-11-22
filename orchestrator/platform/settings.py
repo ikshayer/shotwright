@@ -265,6 +265,36 @@ class Indextts2Settings(_Section):
         return self
 
 
+class QwenReviewSettings(_Section):
+    """Admission and watchdog policy for queued advisory Qwen reviews."""
+
+    required_vram_gb: float = Field(8.0, gt=0, description="Measured helper admission guard.")
+    required_ram_gb: float = Field(6.0, gt=0, description="Measured helper admission guard.")
+    required_disk_gb: float = Field(8.0, gt=0, description="Measured helper admission guard.")
+    startup_allowance_seconds: float = Field(
+        960.0, gt=0, description="One native batch can run for up to its 900-second deadline."
+    )
+    wall_clock_seconds: float = Field(
+        1800.0, gt=0,
+        description="A1 unmeasured placeholder; the existing GPU-minute ceiling remains binding.",
+    )
+    max_interval_seconds: float = Field(
+        120.0, gt=0, description="A1 limit: five 25-second windows in two native batches."
+    )
+
+    @field_validator(
+        "required_vram_gb", "required_ram_gb", "required_disk_gb",
+        "startup_allowance_seconds", "wall_clock_seconds", "max_interval_seconds",
+        mode="before",
+    )
+    @classmethod
+    def _strict_qwen_review_numbers(cls, value: object) -> object:
+        _strict_finite_number(value, "qwen_review settings")
+        if value <= 0:  # type: ignore[operator]
+            raise ValueError("Qwen review settings must be finite positive values")
+        return value
+
+
 class ApprovalSettings(_Section):
     #: D1. When false (default), an agent-authored Review is an opinion and approves nothing.
     agent_may_approve: bool = False
@@ -295,6 +325,7 @@ class Settings(_Section):
     minimax_h3: MinimaxH3Settings = MinimaxH3Settings()
     piper: PiperSettings = PiperSettings()
     indextts2: Indextts2Settings = Indextts2Settings()
+    qwen_review: QwenReviewSettings = QwenReviewSettings()
     credentials: dict[str, str] = Field(
         default_factory=dict,
         description="provider name -> NAME of the environment variable holding its secret. Never the secret.",

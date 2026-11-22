@@ -53,6 +53,9 @@ CONTRACT_OPERATIONS = {
     "evaluate rubric": r"evaluate.*rubric|rubric.*evaluate",
     "measure output": r"measure.*output|output.*measure",
     "measure asset": r"measure.*asset|asset.*measure",
+    "review audio": r"review.*audio|audio.*review",
+    "get audio review": r"get.*audio.*review|audio.*review.*get",
+    "list audio reviews": r"list.*audio.*review|audio.*review.*list",
     "export": r"export",
 }
 

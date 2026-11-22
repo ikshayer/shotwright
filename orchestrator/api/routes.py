@@ -6,9 +6,10 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, BinaryIO, Literal
+import math
+from typing import Annotated, Any, BinaryIO, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from orchestrator.adapters.assets.models import (
     AssetAcquireRequest,
@@ -167,6 +168,66 @@ class OutputMetricsQuery(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     samples: int = Field(12, ge=1, le=60)
+
+
+class AudioReviewOutputTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["output"]
+    episode_id: str = Field(min_length=1)
+    output_id: str = Field(min_length=1)
+
+
+class AudioReviewAssetTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["asset"]
+    asset_id: str = Field(min_length=1)
+
+
+AudioReviewTarget = Annotated[
+    AudioReviewOutputTarget | AudioReviewAssetTarget,
+    Field(discriminator="kind"),
+]
+
+
+class AudioReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target: AudioReviewTarget
+    brief: str
+    mode: Literal["audio", "joint"] = "audio"
+    start_sec: float = Field(0.0, ge=0, allow_inf_nan=False, strict=True)
+    duration_sec: float | None = Field(None, gt=0, allow_inf_nan=False, strict=True)
+
+    @field_validator("brief")
+    @classmethod
+    def _valid_intent_brief(cls, value: str) -> str:
+        if "\x00" in value or not 1 <= len(value.strip()) <= 4000:
+            raise ValueError("brief must contain 1 through 4000 non-whitespace characters and no NUL")
+        return value
+
+    @field_validator("start_sec", "duration_sec", mode="before")
+    @classmethod
+    def _strict_interval_numbers(cls, value: object) -> object:
+        if value is None:
+            return value
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError("audio review interval values must be finite numbers")
+        return value
+
+
+class AudioReviewListQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_kind: Literal["output", "asset"] | None = None
+    target_id: str | None = None
+
+    @model_validator(mode="after")
+    def _target_id_requires_kind(self) -> AudioReviewListQuery:
+        if self.target_id is not None and self.target_kind is None:
+            raise ValueError("target_id requires target_kind")
+        return self
 
 
 class RubricEvaluationEntry(BaseModel):
@@ -358,6 +419,9 @@ OPERATIONS = (
     Operation("evaluate_rubric", "POST", "/projects/{project_id}/episodes/{episode_id}/cuts/{output_id}/rubric-evaluate", "Evaluate one RubricScores object for every index in rubric_sample's plan; extra fields are forbidden and missing or extra indices answer 422. The verified cut must still exist. Returns the pass verdict and per-sample results without storing them; record the outcome with record_review (target_kind=episode_cut, rubric_scores, and creator waiver_text for a failing cut).", True, "service.perception.evaluate_rubric", RubricEvaluationRequest, _call("evaluate_rubric")),
     Operation("measure_output", "GET", "/projects/{project_id}/episodes/{episode_id}/outputs/{output_id}/metrics", "Measure a hash-verified output's container, sampled luma and flicker, saturation, edge energy, active image area, scene changes, and audio loudness (LUFS), range and true peak, or image luma metrics. Send samples (1–60) for video; the output receipt must exist. Returns the metrics. For rubric review, use rubric_sample, then contact_sheet or inspect_output, evaluate_rubric and record_review.", False, "service.perception.measure_output", OutputMetricsQuery, _call("measure_output")),
     Operation("measure_asset", "GET", "/projects/{project_id}/assets/{asset_id}/metrics", "Measure loudness (LUFS), loudness range, true peak and silence intervals for a registered local audio Asset after verifying its checksum. The Asset must be an audio or voice type with a supported local file. Returns container and audio metrics; use them with rubric_sample, contact_sheet or inspect_output, evaluate_rubric and record_review when reviewing a cut.", False, "service.perception.measure_asset", None, _call("measure_asset")),
+    Operation("review_audio", "POST", "/projects/{project_id}/audio-reviews", "After measure_asset or measure_output for the numbers, submit a required intent brief for advisory Qwen audio or joint audio/video review. The request is validated and then queued behind GPU work under the production lease; it takes minutes (about 2 minutes for 8 seconds, about 5 minutes for 35 seconds). Wait for the job, then call get_audio_review and form your own opinion with record_review. The result is unverified model output and never an approval.", True, "service.audio_review", AudioReviewRequest, _call("review_audio")),
+    Operation("get_audio_review", "GET", "/projects/{project_id}/audio-reviews/{audio_review_id}", "After measure_asset or measure_output for numbers, submit review_audio with an intent brief and wait for its GPU queued job (about 2 minutes for 8 seconds or 5 minutes for 35 seconds). Read this bounded report, check its unverified responses against the measurements and your own listening, then record your own record_review opinion. It never approves a target.", False, "service.audio_review", None, _call("get_audio_review")),
+    Operation("list_audio_reviews", "GET", "/projects/{project_id}/audio-reviews", "After measure_asset or measure_output for numbers, submit review_audio with an intent brief and wait for its job, which queues behind GPU work and takes minutes (about 2 minutes for 8 seconds or 5 minutes for 35 seconds). List reports newest first, optionally filter by target_kind=output or asset and target_id (target_id requires target_kind), then use get_audio_review to check unverified responses against the measurements and your own listening before recording your own record_review opinion. It never approves a target.", False, "service.audio_review", AudioReviewListQuery, _call("list_audio_reviews")),
     Operation("export", "POST", "/projects/{project_id}/export", "Export an approved episode cut and its portable project source package: delivery.mp4 plus a project snapshot under exports/{export_id}. payload {episode_id, cut_output_id, expected_version}: cut_output_id is a cut in the Episode's outputs and expected_version is the Episode's mutation token. The cut must match the current Timeline and the episode must carry its cut approval.", True, "adapters.export.package", ProjectExportRequest, _call("export")),
 )
 
@@ -378,4 +442,5 @@ ASYNC_ADAPTER_OPERATIONS = frozenset({
     "generate_indextts2_speech",
     "apply_audio_post_profile",
     "apply_performance_edit",
+    "review_audio",
 })

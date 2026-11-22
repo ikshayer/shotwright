@@ -76,6 +76,7 @@ _LOCALLY_OWNED_JOBS = {
     "generate_indextts2_speech": "IndexTTS-2",
     "apply_audio_post_profile": "Audio post",
     "apply_performance_edit": "Performance edit",
+    "review_audio": "Audio review",
 }
 
 
@@ -162,6 +163,8 @@ def _command_callback(operation_name: str):
                             f"completed cut assembly job {job.job_id} has no EpisodeOutput named {job.run_id!r}"
                         )
                     result["output_id"] = mine[0].output_id
+                if operation_name == "review_audio":
+                    result["audio_review_id"] = job.run_id
         except KeyboardInterrupt:
             cleanup_error = None
             if operation_name in _LOCALLY_OWNED_JOBS and submitted and operation_context is not None and operation_context.job_runner is not None:

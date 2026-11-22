@@ -78,6 +78,12 @@ from orchestrator.service.perception import (
     measure_output as measure_project_output,
     rubric_sample as build_rubric_sample,
 )
+from orchestrator.service.audio_review import (
+    get_audio_review as read_audio_review,
+    list_audio_reviews as read_audio_reviews,
+    resolve_audio_review_snapshot,
+    with_brief_actor,
+)
 from orchestrator.service.dependencies import (
     create_camera_profile,
     create_episode,
@@ -557,6 +563,16 @@ class OperationContext:
                 )
             except PerceptionInvalid as exc:
                 raise OutputInspectionInvalid(str(exc)) from exc
+        if operation == "get_audio_review":
+            return read_audio_review(self._store(data["project_id"]), data["audio_review_id"])
+        if operation == "list_audio_reviews":
+            try:
+                return read_audio_reviews(
+                    self._store(data["project_id"]),
+                    target_kind=data.get("target_kind"), target_id=data.get("target_id"),
+                )
+            except PerceptionInvalid as exc:
+                raise OutputInspectionInvalid(str(exc)) from exc
         if operation == "export":
             from orchestrator.adapters.export.package import export_project
 
@@ -807,6 +823,8 @@ class OperationContext:
             )
             job = self.job_runner.submit(data["project_id"], request)
             return {"job_id": job.job_id, "state": job.state}
+        if operation == "review_audio":
+            return self._submit_audio_review(data)
         if operation in ASYNC_ADAPTER_OPERATIONS:
             if self.job_runner is None:
                 raise RuntimeError("default JobRunner was not configured")
@@ -956,6 +974,48 @@ class OperationContext:
         job = self.job_runner.submit(data["project_id"], request)
         return {"job_id": job.job_id, "state": job.state, "run_id": run_id,
                 "asset_id": f"tts-{run_id}"}
+
+    def _submit_audio_review(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Verify an immutable media target, then queue one advisory review."""
+        if self.job_runner is None:
+            raise RuntimeError("default JobRunner was not configured")
+        from .routes import AudioReviewRequest
+
+        body = AudioReviewRequest.model_validate({
+            key: data[key] for key in AudioReviewRequest.model_fields if key in data
+        })
+        policy = self.settings.qwen_review
+        store = self._store(data["project_id"])
+        try:
+            snapshot = resolve_audio_review_snapshot(
+                store,
+                target=body.target.model_dump(mode="python"),
+                brief=body.brief,
+                mode=body.mode,
+                start_sec=body.start_sec,
+                duration_sec=body.duration_sec,
+                max_interval_seconds=policy.max_interval_seconds,
+                ffmpeg_exe=self.settings.binaries.ffmpeg_exe,
+            )
+        except PerceptionInvalid as exc:
+            raise OutputInspectionInvalid(str(exc)) from exc
+        snapshot = with_brief_actor(snapshot, self.actor)
+        audio_review_id = uuid.uuid4().hex
+        output_episode_id = (
+            snapshot["target"].get("episode_id") if snapshot["target"]["kind"] == "output" else None
+        )
+        request = AdapterRequest(
+            kind=AdapterKind.AUDIO_REVIEW,
+            payload={"audio_review_id": audio_review_id, "snapshot": snapshot},
+            record_id=audio_review_id,
+            record_version=0,
+            episode_id=output_episode_id,
+            required_vram_gb=policy.required_vram_gb,
+            required_ram_gb=policy.required_ram_gb,
+            required_disk_gb=policy.required_disk_gb,
+        )
+        job = self.job_runner.submit(data["project_id"], request)
+        return {"job_id": job.job_id, "state": job.state}
 
     def _submit_audio_post(self, data: dict[str, Any]) -> dict[str, Any]:
         """Validate an audio post request, then submit it as a CPU job bound to its Shot."""
@@ -1290,7 +1350,13 @@ def _register_operation(app: FastAPI, operation: Operation, context: OperationCo
                     headers={"X-Content-Type-Options": "nosniff"},
                 )
             return result
-        result = operation.invoke(context, data)
+        try:
+            result = operation.invoke(context, data)
+        except JobError as exc:
+            if (operation.name == "get_audio_review"
+                    and exc.kind is JobErrorKind.CORRUPT_ARTIFACT):
+                return _error(422, JobErrorKind.CORRUPT_ARTIFACT.value, exc.message)
+            raise
         if operation.name == "asset_browser":
             return HTMLResponse(content=_asset_browser_html(result), media_type="text/html")
         if operation.name == "asset_preview":
@@ -1336,7 +1402,7 @@ def _register_operation(app: FastAPI, operation: Operation, context: OperationCo
     elif operation.name in {"search_assets", "asset_browser", "list_asset_categories",
                             "asset_preview", "inspect_take_pauses", "list_reviews",
                             "list_shot_outputs", "inspect_output", "contact_sheet",
-                            "measure_output"}:
+                                "measure_output", "list_audio_reviews"}:
         for name, model_field in operation.request_model.model_fields.items():
             default = (
                 Parameter.empty if model_field.is_required()
@@ -1509,6 +1575,9 @@ class _DefaultRuntime:
                 elif kind is AdapterKind.ASSEMBLE:
                     from orchestrator.adapters.timeline.job import CutAssemblyAdapter
                     adapter = CutAssemblyAdapter(project_root, self.settings)
+                elif kind is AdapterKind.AUDIO_REVIEW:
+                    from orchestrator.adapters.qwen.job import QwenAudioReviewAdapter
+                    adapter = QwenAudioReviewAdapter(project_root, self.settings)
                 else:
                     raise ValueError(f"no adapter is defined for {kind.value}")
                 self._adapters[key] = adapter
@@ -1527,7 +1596,9 @@ class _DefaultRuntime:
             if key in self._queues:
                 return self._queues[key]
             adapter = self.adapter_for(root, kind)
-            queue_settings = (adapter.settings if kind in {AdapterKind.H3_CANDIDATE, AdapterKind.TTS_INDEXTTS2}
+            queue_settings = (adapter.settings if kind in {
+                AdapterKind.H3_CANDIDATE, AdapterKind.TTS_INDEXTTS2, AdapterKind.AUDIO_REVIEW,
+            }
                               else self.settings)
             if self._nvml is None:
                 self._nvml = PynvmlProbe()
@@ -1536,7 +1607,8 @@ class _DefaultRuntime:
             lease = GpuLease(root, queue_settings, nvml=self._nvml, worker=worker,
                              execution_slot=GpuExecutionSlot(repo_root))
             queue = JobQueue(root, queue_settings, lease, ProjectStore(root), nvml=self._nvml,
-                             host=SystemHostResources(), quarantine=ProjectQuarantine(root))
+                             host=SystemHostResources(), quarantine=ProjectQuarantine(root),
+                             attempt_limit=1 if kind is AdapterKind.AUDIO_REVIEW else None)
             self._queues[key] = queue
             return queue
 

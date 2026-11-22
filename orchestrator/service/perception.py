@@ -635,6 +635,38 @@ def measure_asset(
     return result
 
 
+def audio_review_demuxer(relative_path: str, *, output: bool) -> str | None:
+    """Return the already-allowlisted demuxer used by audio review validation."""
+    suffix = Path(relative_path).suffix.lower()
+    return (_VIDEO_DEMUXERS if output else _AUDIO_DEMUXERS).get(suffix)
+
+
+def probe_audio_review_media(
+    store: ProjectStore,
+    relative_path: str,
+    *,
+    demuxer: str,
+    ffmpeg_exe: str | Path,
+) -> dict[str, Any]:
+    """Probe verified local review media with perception's named-demuxer deadline path."""
+    source = _contained_media_path(store, relative_path)
+    probe = _probe_media(
+        source, demuxer=demuxer, ffmpeg_exe=ffmpeg_exe, ffprobe_exe=None,
+        deadline=_Deadline(), require_video=False,
+    )
+    return {
+        "duration_sec": probe.duration_sec,
+        "audio": probe.audio,
+        "video": probe.video,
+        "format": probe.format_name,
+    }
+
+
+def verify_audio_review_asset(store: ProjectStore, asset: Asset) -> Path:
+    """Expose measure_asset's existing path, existence and checksum verification."""
+    return _verify_asset_file(store, asset, deadline=_Deadline())
+
+
 def _find_output(store: ProjectStore, episode_id: str, output_id: str) -> ShotOutput | EpisodeOutput:
     try:
         return store.find_output(episode_id, output_id)
