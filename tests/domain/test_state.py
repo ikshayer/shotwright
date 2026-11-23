@@ -22,11 +22,16 @@ LEGAL = {
     (S.BLOCKING, S.BLOCKING),
     (S.BLOCKING, S.BUILDING),
     (S.BUILDING, S.REVIEW),
+    (S.BUILDING, S.POST_STALE),
     (S.BUILDING, S.FAILED),
     (S.FAILED, S.BUILDING),
     (S.REVIEW, S.APPROVED),
     (S.REVIEW, S.REJECTED),
+    (S.REVIEW, S.POST_STALE),
     (S.APPROVED, S.STALE),
+    (S.APPROVED, S.POST_STALE),
+    (S.POST_STALE, S.BUILDING),
+    (S.POST_STALE, S.STALE),
 }
 ILLEGAL = sorted(set(itertools.product(S, S)) - LEGAL)
 
@@ -141,5 +146,5 @@ def test_failed_retry_goes_back_to_building_not_review():
         check_transition(S.FAILED, S.REVIEW, OK_CTX)
 
 
-def test_approved_can_only_become_stale():
-    assert allowed_targets(S.APPROVED) == {S.STALE}
+def test_approved_can_become_stale_or_post_stale():
+    assert allowed_targets(S.APPROVED) == {S.STALE, S.POST_STALE}

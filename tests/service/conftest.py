@@ -108,12 +108,20 @@ class FakeAdapter:
             if self.result_value is not _USE_DEFAULT_VALUE:
                 value = self.result_value
             elif is_degrade:
+                from orchestrator.service.compose import postprofile_spec_sha256
+                from orchestrator.service.runner import postprofile_spec_from_camera
+
+                degrade = request.payload
+                current_spec = postprofile_spec_from_camera(
+                    degrade.camera_profile, degrade.profile,
+                )
                 value = {
                     "profile_semver": "1.0.0",
                     "filter_graph_hash": "a" * 64,
                     "pinned_binaries": {"ffmpeg": "fake-build"},
                     "frame_count": 60,
                     "output_fps": 12,
+                    "postprofile_spec_sha256": postprofile_spec_sha256(current_spec),
                 }
             elif request.kind.value == "generate":
                 # ShotOutput STILL has no generation provenance fields.
@@ -226,3 +234,57 @@ class Environment:
 @pytest.fixture
 def env(tmp_path: Path) -> Environment:
     return Environment(tmp_path / "project")
+
+
+def bind_cut_receipt(store: ProjectStore, receipt, *, shot_rows=None):
+    """Return ``receipt`` bound to a sidecar of the episode's current DEGRADED outputs.
+
+    Fixtures that fabricate a cut receipt (instead of running the encoder) call this so the
+    receipt carries the recorded sidecar path and SHA-256 that approval and export require.
+    ``shot_rows`` replaces the derived Shot bindings, for tests of a cut whose Shot never had
+    an eligible output (the bound row then cannot match, and approval must refuse).
+    The sidecar is written through the production writer and path function in
+    ``orchestrator.service.timeline``; shot bindings come from the same
+    ``current_degraded_output`` the validator re-derives.
+    """
+    import hashlib
+
+    from orchestrator.domain.entities import Shot, Timeline
+    from orchestrator.service.compose import current_degraded_output
+    from orchestrator.service.timeline import (
+        _shot_output_binding,
+        _write_cut_input_manifest,
+        cut_input_manifest_path,
+    )
+
+    timeline = store.load(Timeline, receipt.episode_id)
+    shot_ids = sorted({
+        entry.ref for entry in timeline.entries if entry.type == "shot" and entry.ref is not None
+    })
+    manifest = {
+        "schema_version": 1,
+        "episode_id": receipt.episode_id,
+        "cut_output_id": receipt.output_id,
+        "cut_path": receipt.relative_path,
+        "cut_sha256": receipt.content_sha256,
+        "timeline_store_version": receipt.timeline_store_version,
+        "timeline_sha256": receipt.timeline_sha256,
+        "shot_outputs": shot_rows if shot_rows is not None else [
+            _shot_output_binding(
+                shot_id,
+                current_degraded_output(
+                    store, store.load(Shot, shot_id, episode_id=receipt.episode_id),
+                ),
+            )
+            for shot_id in shot_ids
+        ],
+    }
+    relative = cut_input_manifest_path(receipt.episode_id, receipt.output_id)
+    content = (
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False) + "\n"
+    ).encode("utf-8")
+    _write_cut_input_manifest(store, relative, content)
+    return receipt.model_copy(update={
+        "input_manifest_path": relative,
+        "input_manifest_sha256": hashlib.sha256(content).hexdigest(),
+    })

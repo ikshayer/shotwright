@@ -18,6 +18,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+
+from tests.service.conftest import bind_cut_receipt
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
@@ -130,7 +132,7 @@ def add_cut_output(store: ProjectStore, episode_id: str = "ep1", *,
         storage_resolution=(64, 48), output_fps=12, sample_aspect_ratio="1/1",
         ffmpeg_identity="test",
     )
-    store.append_episode_output(receipt, expected_version=0)
+    store.append_episode_output(bind_cut_receipt(store, receipt), expected_version=0)
     return receipt
 
 

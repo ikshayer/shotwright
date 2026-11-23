@@ -314,6 +314,8 @@ def test_dropped_frames_flow_from_delivery_receipt_into_assembled_timeline(env) 
     from types import SimpleNamespace
 
     from orchestrator.service.approval import approve_shot
+    from orchestrator.service.compose import postprofile_spec_sha256
+    from orchestrator.service.runner import postprofile_spec_from_camera
     from orchestrator.service.timeline import compose_timeline
 
     drop = ArtifactScheduleEntry(type="drop", start_frame=24, count=6)
@@ -341,9 +343,13 @@ def test_dropped_frames_flow_from_delivery_receipt_into_assembled_timeline(env) 
     assert degrade_request.profile.artifact_schedule == (drop,)
 
     # The profile schedule and adapter result meet at JobRunner's receipt writer.
+    derived_spec = postprofile_spec_from_camera(
+        degrade_request.camera_profile, degrade_request.profile,
+    )
     env.adapter.result_value = SimpleNamespace(
         profile_semver=profile.semver,
         filter_graph_hash="a" * 64,
+        postprofile_spec_sha256=postprofile_spec_sha256(derived_spec),
         pinned_binaries={"ffmpeg": "fixture-build"},
         artifact_schedule=tuple(profile.artifact_schedule),
         frame_count=delivered_frames,

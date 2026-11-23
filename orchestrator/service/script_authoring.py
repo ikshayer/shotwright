@@ -100,6 +100,7 @@ def derive_script_scene_plan(
         fenced_shot_versions = {
             (row["episode_id"], row["shot_id"], row["version"])
             for plan in validated_cascades(store) for row in plan["affected"]
+            if row.get("scope", "rebuild") != "post"
         }
 
         # Validate registered cameras, every embedded asset and all concurrency tokens.

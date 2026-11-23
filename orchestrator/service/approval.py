@@ -28,12 +28,15 @@ from orchestrator.domain.state import (
     TransitionContext,
     TransitionError,
     check_cut_approval,
+    check_episode_shots_for_cut,
     check_dependency_freshness,
     check_review_approval,
     check_transition,
 )
 from orchestrator.platform.errors import JobError, JobErrorKind
+from orchestrator.service.compose import current_degraded_output
 from orchestrator.service.dependencies import validated_cascades
+from orchestrator.service.timeline import validate_cut_input_manifest
 from orchestrator.store.json_store import ProjectStore, RecordNotFound, VersionConflict
 
 
@@ -117,7 +120,13 @@ def record_review(
 
         try:
             if target_kind in {"shot", "framing"}:
-                shot = store.load(Shot, target_id, episode_id=episode_id, version=target_version)
+                if target_kind == "shot":
+                    shot, lifecycle_token = store.load_with_version(
+                        Shot, target_id, episode_id=episode_id, version=target_version,
+                    )
+                    review = review.model_copy(update={"created_revision": lifecycle_token})
+                else:
+                    shot = store.load(Shot, target_id, episode_id=episode_id, version=target_version)
                 if shot.shot_id != target_id or shot.episode_id != episode_id:
                     raise missing_target()
             elif target_kind == "episode_cut":
@@ -145,16 +154,73 @@ def record_review(
 
 def _fences(store: ProjectStore) -> tuple[tuple[str, str, int], ...]:
     return tuple(sorted({(row["episode_id"], row["shot_id"], row["version"])
-                         for plan in validated_cascades(store) for row in plan["affected"]}))
-
-
-def _shot_snapshot(store: ProjectStore, episode_id: str) -> tuple[Shot, ...]:
-    return tuple(store.load(Shot, shot_id, episode_id=episode_id)
-                 for shot_id in store.ids(Shot, episode_id=episode_id))
+                         for plan in validated_cascades(store) for row in plan["affected"]
+                         if row.get("scope", "rebuild") != "post"}))
 
 
 def _domain_error(exc: ReviewApprovalError | TransitionError) -> JobError:
     return JobError(JobErrorKind.INVALID_MANIFEST, str(exc), cause=exc)
+
+
+def _check_degraded_spec_if_present(store: ProjectStore, shot: Shot) -> None:
+    outputs = store.list_shot_outputs(
+        shot.shot_id,
+        episode_id=shot.episode_id,
+        record_version=shot.version,
+        kind=ShotOutputKind.DEGRADED,
+    )
+    if outputs:
+        current_degraded_output(store, shot)
+
+
+def _post_stale_review_fence(
+    store: ProjectStore,
+    shot: Shot,
+    review: Review,
+    *,
+    current_token: int,
+) -> None:
+    """Require a Review made after the latest REVIEW entry on a post-stale version."""
+    # load_with_version validates the full append-only chain before the private file
+    # helpers expose its immutable lifecycle snapshots below.
+    store.load_with_version(
+        Shot, shot.shot_id, episode_id=shot.episode_id, version=shot.version,
+    )
+    directory = store._directory_of(shot)
+    base_relative = store._version_path(directory, shot.version)
+    base, base_token = store._read_record(Shot, base_relative)
+    saw_post_stale = base.status is ShotStatus.POST_STALE
+    entered_review_token = base_token if base.status is ShotStatus.REVIEW else None
+    previous_status = base.status
+    for token, relative in store._lifecycle_files(directory, shot.version):
+        snapshot, _found = store._read_record(Shot, relative)
+        if snapshot.status is ShotStatus.POST_STALE:
+            saw_post_stale = True
+        if snapshot.status is ShotStatus.REVIEW and previous_status is not ShotStatus.REVIEW:
+            entered_review_token = token
+        previous_status = snapshot.status
+
+    if not saw_post_stale:
+        return
+    if entered_review_token is None:
+        raise JobError(
+            JobErrorKind.INVALID_MANIFEST,
+            f"Shot {shot.shot_id!r}@{shot.version} has been post_stale but its lifecycle "
+            "history has no REVIEW entry; record a fresh Review after re-degradation",
+        )
+    if review.created_revision is None or review.created_revision < entered_review_token:
+        raise JobError(
+            JobErrorKind.INVALID_MANIFEST,
+            f"Review {review.review_id!r} predates Shot {shot.shot_id!r}@{shot.version}'s "
+            f"latest REVIEW lifecycle token {entered_review_token}; record a new Review "
+            "after re-degradation",
+        )
+    if review.created_revision > current_token:
+        raise JobError(
+            JobErrorKind.INVALID_MANIFEST,
+            f"Review {review.review_id!r} claims future Shot lifecycle token "
+            f"{review.created_revision}; current token is {current_token}",
+        )
 
 
 def approve_shot(store: ProjectStore, shot_id: str, *, episode_id: str, review_id: str,
@@ -165,12 +231,14 @@ def approve_shot(store: ProjectStore, shot_id: str, *, episode_id: str, review_i
         shot, token = store.load_with_version(Shot, shot_id, episode_id=episode_id)
         if token != expected_version:
             raise VersionConflict(f"episodes/{episode_id}/shots/{shot_id}", expected_version, token, shot)
+        _check_degraded_spec_if_present(store, shot)
         fences = _fences(store)
-        _review(
+        review = _review(
             store, review_id, target_kind="shot", target_id=shot_id,
             target_version=shot.version, episode_id=episode_id,
             agent_may_approve=agent_may_approve,
         )
+        _post_stale_review_fence(store, shot, review, current_token=token)
         try:
             check_dependency_freshness(shot, invalidated=fences)
             check_transition(shot.status, ShotStatus.APPROVED,
@@ -182,12 +250,14 @@ def approve_shot(store: ProjectStore, shot_id: str, *, episode_id: str, review_i
         if current_token != token or current != shot:
             raise VersionConflict(f"episodes/{episode_id}/shots/{shot_id}", expected_version,
                                   current_token, current)
+        _check_degraded_spec_if_present(store, current)
         _blocked_pending(store)
-        _review(
+        review = _review(
             store, review_id, target_kind="shot", target_id=shot_id,
             target_version=current.version, episode_id=episode_id,
             agent_may_approve=agent_may_approve,
         )
+        _post_stale_review_fence(store, current, review, current_token=current_token)
         updated = current.model_copy(update={"status": ShotStatus.APPROVED,
                                              "approval_review_id": review_id})
         final_fences = _fences(store)
@@ -336,9 +406,14 @@ def approve_framing(
         return updated
 
 
+def _shot_snapshot(store: ProjectStore, episode_id: str) -> tuple[Shot, ...]:
+    return tuple(store.load(Shot, shot_id, episode_id=episode_id)
+                 for shot_id in store.ids(Shot, episode_id=episode_id))
+
+
 def _current_cut_output(
     store: ProjectStore, episode_id: str, cut_output_id: str,
-) -> tuple[EpisodeOutput, int]:
+) -> tuple[EpisodeOutput, Timeline, int, tuple[Shot, ...]]:
     cut = next(
         (row for row in store.list_episode_outputs(episode_id)
          if row.output_id == cut_output_id),
@@ -362,7 +437,10 @@ def _current_cut_output(
             JobErrorKind.INVALID_MANIFEST,
             f"cut {cut_output_id!r} is not of the current Timeline",
         )
-    return cut, timeline_token
+    shots, _manifest_path, _manifest_sha256 = validate_cut_input_manifest(
+        store, cut, timeline,
+    )
+    return cut, timeline, timeline_token, shots
 
 
 def approve_episode(store: ProjectStore, episode_id: str, *, cut_output_id: str,
@@ -374,8 +452,9 @@ def approve_episode(store: ProjectStore, episode_id: str, *, cut_output_id: str,
         episode, token = store.load_with_version(Episode, episode_id)
         if token != expected_version:
             raise VersionConflict(f"episodes/{episode_id}/episode.json", expected_version, token, episode)
-        cut, cut_version = _current_cut_output(store, episode_id, cut_output_id)
-        shots = _shot_snapshot(store, episode_id)
+        cut, _timeline, cut_version, shots = _current_cut_output(
+            store, episode_id, cut_output_id,
+        )
         _review(
             store, review_id, target_kind="episode_cut", target_id=episode_id,
             target_version=cut_version, episode_id=episode_id,
@@ -383,15 +462,15 @@ def approve_episode(store: ProjectStore, episode_id: str, *, cut_output_id: str,
         )
         try:
             check_cut_approval(pending=False, shots=shots)
+            check_episode_shots_for_cut(_shot_snapshot(store, episode_id))
         except ReviewApprovalError as exc:
             raise _domain_error(exc) from exc
         current, current_token = store.load_with_version(Episode, episode_id)
-        current_shots = _shot_snapshot(store, episode_id)
         if current_token != token or current != episode:
             raise VersionConflict(f"episodes/{episode_id}/episode.json", expected_version,
                                   current_token, current)
         _blocked_pending(store)
-        current_cut, current_cut_version = _current_cut_output(
+        current_cut, _current_timeline, current_cut_version, current_shots = _current_cut_output(
             store, episode_id, cut_output_id,
         )
         if current_cut != cut or current_cut_version != cut_version:
@@ -406,11 +485,11 @@ def approve_episode(store: ProjectStore, episode_id: str, *, cut_output_id: str,
         )
         try:
             check_cut_approval(pending=False, shots=current_shots)
+            check_episode_shots_for_cut(_shot_snapshot(store, episode_id))
         except ReviewApprovalError as exc:
             raise _domain_error(exc) from exc
         _blocked_pending(store)
-        current_shots = _shot_snapshot(store, episode_id)
-        current_cut, current_cut_version = _current_cut_output(
+        current_cut, _current_timeline, current_cut_version, current_shots = _current_cut_output(
             store, episode_id, cut_output_id,
         )
         if current_cut != cut or current_cut_version != cut_version:
@@ -420,6 +499,7 @@ def approve_episode(store: ProjectStore, episode_id: str, *, cut_output_id: str,
             )
         try:
             check_cut_approval(pending=False, shots=current_shots)
+            check_episode_shots_for_cut(_shot_snapshot(store, episode_id))
         except ReviewApprovalError as exc:
             raise _domain_error(exc) from exc
         updated = current.model_copy(update={

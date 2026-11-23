@@ -6,6 +6,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -23,12 +24,14 @@ from orchestrator.domain.entities import (
     Project,
     Script,
     Shot,
+    ShotOutputKind,
 )
-from orchestrator.domain.invalidation import revision_impact
+from orchestrator.domain.invalidation import diff_camera_profile, revision_impact
 from orchestrator.domain.state import TransitionContext, check_revision, check_transition
 from orchestrator.platform.errors import JobError, JobErrorKind
+from orchestrator.platform.containment import ContainmentError
 from orchestrator.platform.ffmpeg_identity import normalize_ffmpeg_identity
-from orchestrator.store.json_store import ProjectStore, VersionConflict
+from orchestrator.store.json_store import ProjectStore, RecordNotFound, VersionConflict
 
 _ENTITY_TYPES = {"Script": Script, "Location": Location, "CameraProfile": CameraProfile, "Shot": Shot}
 
@@ -44,6 +47,25 @@ class ShotProposalWriteFailure(RuntimeError):
             f"Shot proposal failed after writing {list(self.written)}; "
             f"not written: {list(self.not_written)}; cause: {cause}"
         )
+
+
+@dataclass(frozen=True)
+class CameraProfileCreationResult:
+    """The persisted profile plus an explicit overlay-fit assessment for the caller."""
+
+    profile: CameraProfile
+    overlay_fit: dict[str, Any]
+
+
+class CameraProfileRevisionResult(tuple):
+    """The invalidated Shot ids (a plain tuple, as before) plus the overlay-fit assessment."""
+
+    overlay_fit: dict[str, Any]
+
+    def __new__(cls, shot_ids: Iterable[str], overlay_fit: dict[str, Any]):
+        result = super().__new__(cls, tuple(shot_ids))
+        result.overlay_fit = overlay_fit
+        return result
 
 
 def validated_cascades(store: ProjectStore) -> tuple[dict[str, Any], ...]:
@@ -72,6 +94,15 @@ def validated_cascades(store: ProjectStore) -> tuple[dict[str, Any], ...]:
             # Exercise domain impact validation as well as successor validation;
             # this keeps journal payloads subject to the same accepted entity set.
             revision_impact(before, after, ())
+            diff = diff_camera_profile(before, after) if isinstance(before, CameraProfile) else None
+            for row in plan.get("affected", ()):
+                scope = row.get("scope", "rebuild")
+                if scope not in {"post", "rebuild"}:
+                    raise ValueError(f"unknown cascade scope {scope!r}")
+                if scope == "post" and not (
+                    diff is not None and diff.post_only and not diff.requires_rebuild
+                ):
+                    raise ValueError("post scope requires a post-only CameraProfile revision")
         except Exception as exc:
             cause = exc.__cause__ if isinstance(exc, JobError) and exc.__cause__ is not None else exc
             raise JobError(
@@ -116,13 +147,159 @@ def _shots(store: ProjectStore, episode_ids: Iterable[str]) -> list[Shot]:
     return result
 
 
+def _camera_profile_overlay_fit(
+    store: ProjectStore, camera: CameraProfile, *, ffmpeg_exe: Path | str,
+) -> dict[str, Any]:
+    """Check in-recording overlays for existing Shots that use ``camera``."""
+    from orchestrator.adapters.postprofile.overlay_fit import (
+        OverlayFitError,
+        has_in_recording_overlays,
+        validate_in_recording_overlays,
+    )
+    from orchestrator.service.compose import (
+        derive_postprofile_spec_for_shot,
+    )
+
+    notes: list[str] = []
+    checked: list[str] = []
+    active_overlay_model = any(
+        getattr(camera.overlay_model, name) is not None
+        for name in (
+            "camera_id_text", "clock_epoch", "clock_format", "fontsize", "x", "y", "placement",
+        )
+    )
+    for episode_id in store.episode_directories():
+        for shot_id in store.ids(Shot, episode_id=episode_id):
+            shot = store.load(Shot, shot_id, episode_id=episode_id)
+            if shot.camera_profile != camera.camera_id:
+                continue
+            try:
+                _resolved, base, derived = derive_postprofile_spec_for_shot(
+                    store, shot, profile_override=camera,
+                )
+            except RecordNotFound as exc:
+                notes.append(
+                    f"Shot {shot.shot_id!r}: overlay fit undecidable because its PostProfile "
+                    f"cannot be resolved ({exc})"
+                )
+                continue
+            if base.identity.overlay is None:
+                if active_overlay_model:
+                    notes.append(
+                        f"Shot {shot.shot_id!r}: overlay fit undecidable because its PostProfile "
+                        "has no clock overlay"
+                    )
+                continue
+            if not has_in_recording_overlays(derived):
+                continue
+            font_relative = base.identity.overlay.font_relative
+            if not font_relative:
+                notes.append(
+                    f"Shot {shot.shot_id!r}: overlay fit undecidable because the PostProfile "
+                    "has no project font path"
+                )
+                continue
+            try:
+                font_path = store._root.resolve(font_relative)
+            except ContainmentError as exc:
+                raise JobError(
+                    JobErrorKind.INVALID_MANIFEST,
+                    f"PostProfile font path {font_relative!r} is invalid: {exc}",
+                    cause=exc,
+                ) from exc
+            try:
+                font_exists = font_path.is_file()
+            except OSError as exc:
+                notes.append(
+                    f"Shot {shot.shot_id!r}: overlay fit undecidable because project font "
+                    f"{font_relative!r} could not be inspected ({exc})"
+                )
+                continue
+            if not font_exists:
+                notes.append(
+                    f"Shot {shot.shot_id!r}: overlay fit undecidable because project font "
+                    f"{font_relative!r} is missing"
+                )
+                continue
+            try:
+                validate_in_recording_overlays(
+                    derived,
+                    font_path,
+                    font_filter_path=font_relative,
+                    working_directory=store._root.path,
+                    ffmpeg_exe=ffmpeg_exe,
+                    duration_sec=shot.duration_sec,
+                )
+            except OverlayFitError as exc:
+                raise JobError(JobErrorKind.INVALID_MANIFEST, str(exc), cause=exc) from exc
+            except (OSError, ValueError) as exc:
+                notes.append(
+                    f"Shot {shot.shot_id!r}: overlay fit undecidable because the project font "
+                    f"{font_relative!r} could not be measured ({exc})"
+                )
+                continue
+            checked.append(shot.shot_id)
+    return {
+        "status": "undecidable" if notes else "checked",
+        "checked_shot_ids": sorted(set(checked)),
+        "notes": notes,
+    }
+
+
 def _plan(store: ProjectStore, before: VersionedEntity, after: VersionedEntity,
           expected_version: int, shots: Iterable[Shot], episode_ids: Iterable[str]) -> dict[str, Any]:
-    affected = sorted(
-        ({"episode_id": shot.episode_id, "shot_id": shot.shot_id, "version": shot.version}
-         for shot in revision_impact(before, after, shots)),
-        key=lambda row: (row["episode_id"], row["shot_id"], row["version"]),
-    )
+    candidates = revision_impact(before, after, shots)
+    affected: list[dict[str, Any]] = []
+    if isinstance(before, CameraProfile):
+        diff = diff_camera_profile(before, after)
+        if diff.requires_rebuild:
+            affected.extend({
+                "episode_id": shot.episode_id,
+                "shot_id": shot.shot_id,
+                "version": shot.version,
+            } for shot in candidates)
+        elif diff.post_only:
+            from orchestrator.service.compose import resolve_camera_profile_for_shot
+
+            # revision_impact intentionally returns a broad candidate set. Resolve each
+            # Shot's selected profile through the same code used by DEGRADE before the
+            # post-only comparison; camera_id is descriptive and may disagree with it.
+            selected_candidates = []
+            for shot in candidates:
+                try:
+                    selected = resolve_camera_profile_for_shot(store, shot)
+                except RecordNotFound:
+                    if shot.camera_profile == before.camera_id:
+                        raise
+                    continue
+                if selected.camera_id == before.camera_id:
+                    selected_candidates.append(shot)
+            for shot in selected_candidates:
+                degraded = store.list_shot_outputs(
+                    shot.shot_id,
+                    episode_id=shot.episode_id,
+                    record_version=shot.version,
+                    kind=ShotOutputKind.DEGRADED,
+                )
+                if not degraded:
+                    continue
+                current_hash = _derived_postprofile_sha256(store, shot, after)
+                receipt_hash = degraded[-1].postprofile_spec_sha256
+                if receipt_hash is not None and receipt_hash == current_hash:
+                    continue
+                affected.append({
+                    "episode_id": shot.episode_id,
+                    "shot_id": shot.shot_id,
+                    "version": shot.version,
+                    "scope": "post",
+                })
+    else:
+        affected.extend({
+            "episode_id": shot.episode_id,
+            "shot_id": shot.shot_id,
+            "version": shot.version,
+        } for shot in candidates)
+    affected.sort(key=lambda row: (row["episode_id"], row["shot_id"], row["version"]))
     ids = sorted({row["episode_id"] for row in affected})
     if isinstance(after, Shot):
         ids = sorted(set(ids) | {after.episode_id})
@@ -138,6 +315,21 @@ def _plan(store: ProjectStore, before: VersionedEntity, after: VersionedEntity,
         "episode_ids": ids,
         "affected": affected,
     }
+
+
+def _derived_postprofile_sha256(
+    store: ProjectStore, shot: Shot, camera: CameraProfile,
+) -> str:
+    """Hash the exact camera-derived PostProfileSpec recorded by a DEGRADE run."""
+    from orchestrator.service.compose import (
+        derive_postprofile_spec_for_shot,
+        postprofile_spec_sha256,
+    )
+
+    _resolved, _base, derived = derive_postprofile_spec_for_shot(
+        store, shot, profile_override=camera,
+    )
+    return postprofile_spec_sha256(derived)
 
 
 def _same(entity: VersionedEntity, payload: dict[str, Any]) -> bool:
@@ -189,9 +381,25 @@ def _stale_affected(store: ProjectStore, plan: dict[str, Any], changed: list[str
             raise RuntimeError(
                 f"affected Shot {row['episode_id']}/{row['shot_id']} diverged from planned version {row['version']}"
             )
+        scope = row.get("scope", "rebuild")
+        if scope == "post":
+            if current.status is ShotStatus.POST_STALE:
+                continue
+            if current.status not in {ShotStatus.REVIEW, ShotStatus.APPROVED}:
+                raise RuntimeError(
+                    f"post-affected Shot {current.episode_id}/{current.shot_id} "
+                    f"left its planned review state for {current.status.value}"
+                )
+            check_transition(current.status, ShotStatus.POST_STALE, TransitionContext())
+            store.update(current.model_copy(update={
+                "status": ShotStatus.POST_STALE,
+                "approval_review_id": None,
+            }), expected_version=token)
+            changed.append(current.shot_id)
+            continue
         if current.status is ShotStatus.STALE:
             continue
-        if current.status is ShotStatus.APPROVED:
+        if current.status in {ShotStatus.APPROVED, ShotStatus.POST_STALE}:
             check_transition(current.status, ShotStatus.STALE, TransitionContext())
             store.update(current.model_copy(update={"status": ShotStatus.STALE}), expected_version=token)
             changed.append(current.shot_id)
@@ -202,20 +410,20 @@ def _roll_forward(store: ProjectStore, plan: dict[str, Any]) -> tuple[str, ...]:
     phase = "gate revocation"
     revoked: list[str] = []
     upstream_committed = False
-    stale_ids: list[str] = []
+    affected_ids: list[str] = []
     try:
         _revoke_gates(store, plan, revoked)
         phase = "upstream commit"
         upstream_committed = _commit_upstream(store, plan)
         phase = "Shot staleness"
-        _stale_affected(store, plan, stale_ids)
+        _stale_affected(store, plan, affected_ids)
         phase = "completion marker"
         store.complete_cascade(plan["cascade_id"])
-        return tuple(stale_ids)
+        return tuple(affected_ids)
     except VersionConflict as exc:
         progress = (
             f"phase={phase}, gates revoked={list(revoked)}, "
-            f"upstream newly committed={upstream_committed}, shots newly stale={list(stale_ids)}"
+            f"upstream newly committed={upstream_committed}, shots newly marked={list(affected_ids)}"
         )
         conflict_message = (
             f"cascade {plan['cascade_id']} remains pending ({progress}); "
@@ -226,7 +434,7 @@ def _roll_forward(store: ProjectStore, plan: dict[str, Any]) -> tuple[str, ...]:
     except Exception as exc:
         progress = (
             f"phase={phase}, gates revoked={list(revoked)}, "
-            f"upstream newly committed={upstream_committed}, shots newly stale={list(stale_ids)}"
+            f"upstream newly committed={upstream_committed}, shots newly marked={list(affected_ids)}"
         )
         raise JobError(
             JobErrorKind.INTERNAL,
@@ -286,9 +494,14 @@ def revise_location(store: ProjectStore, revised: Location, *, expected_version:
 
 def revise_camera_profile(
     store: ProjectStore, revised: CameraProfile, *, expected_version: int,
-) -> tuple[str, ...]:
+    ffmpeg_exe: Path | str = "ffmpeg",
+) -> CameraProfileRevisionResult:
     with store.command():
-        return _revise(store, revised, expected_version, store.episode_directories())
+        _pending_error(store)
+        store.validate_revision(revised, expected_version=expected_version)
+        overlay_fit = _camera_profile_overlay_fit(store, revised, ffmpeg_exe=ffmpeg_exe)
+        invalidated = _revise(store, revised, expected_version, store.episode_directories())
+        return CameraProfileRevisionResult(invalidated, overlay_fit)
 
 
 def revise_shot(store: ProjectStore, revised: Shot, *, expected_version: int) -> Shot:
@@ -575,13 +788,16 @@ def create_project(store: ProjectStore, project: Project) -> Project:
         return project
 
 
-def create_camera_profile(store: ProjectStore, profile: CameraProfile) -> CameraProfile:
-    """Persist a new agent-authored CameraProfile without downstream invalidation."""
+def create_camera_profile(
+    store: ProjectStore, profile: CameraProfile, *, ffmpeg_exe: Path | str = "ffmpeg",
+) -> CameraProfileCreationResult:
+    """Persist a CameraProfile after checking any currently decidable overlay fits."""
     with store.command():
         profile = store.validate_entity_payload(profile)
         store.load(Project)
+        overlay_fit = _camera_profile_overlay_fit(store, profile, ffmpeg_exe=ffmpeg_exe)
         store.create(profile)
-        return profile
+        return CameraProfileCreationResult(profile, overlay_fit)
 
 
 def create_location(store: ProjectStore, location: Location) -> Location:

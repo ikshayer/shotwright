@@ -43,6 +43,7 @@ from orchestrator.domain.entities import (
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.platform.settings import Settings
+from orchestrator.service.compose import derive_postprofile_spec_for_shot, postprofile_spec_sha256
 from orchestrator.store.json_store import ProjectStore
 from tests.service.test_timeline_assembly_contract import _approve_fixture_shot
 
@@ -152,6 +153,8 @@ _PATH_TO = {
                         ShotStatus.REVIEW),
     ShotStatus.REJECTED: (ShotStatus.PLANNED, ShotStatus.BLOCKING, ShotStatus.BUILDING,
                           ShotStatus.REVIEW, ShotStatus.REJECTED),
+    ShotStatus.POST_STALE: (ShotStatus.PLANNED, ShotStatus.BLOCKING, ShotStatus.BUILDING,
+                            ShotStatus.REVIEW, ShotStatus.POST_STALE),
     ShotStatus.FAILED: (ShotStatus.PLANNED, ShotStatus.BLOCKING, ShotStatus.BUILDING,
                         ShotStatus.FAILED),
 }
@@ -161,7 +164,7 @@ def put_shot_in(store: ProjectStore, shot: Shot, status: ShotStatus) -> Shot:
     """Walk a freshly created draft Shot to ``status`` through legitimate store updates."""
     from orchestrator.domain.base import FramingStatus
 
-    if status is ShotStatus.APPROVED or status is ShotStatus.STALE:
+    if status in {ShotStatus.APPROVED, ShotStatus.STALE}:
         shot = _approve_fixture_shot(store, shot)
         if status is ShotStatus.STALE:
             shot = shot.model_copy(update={"status": ShotStatus.STALE})
@@ -200,11 +203,13 @@ def add_degraded_receipt(store: ProjectStore, shot: Shot, clip: bytes, fmt: dict
                          *, record_version: int | None = None, tag: str = "") -> ShotOutput:
     relative = f"delivered/{shot.shot_id}{tag}.mp4"
     store._root.write_bytes(relative, clip)
+    _camera, _base, current_spec = derive_postprofile_spec_for_shot(store, shot)
     output = ShotOutput(
         output_id=f"degraded-{shot.shot_id}{tag}", episode_id=EP, shot_id=shot.shot_id,
         record_version=record_version or shot.version, kind=ShotOutputKind.DEGRADED,
         relative_path=relative, content_sha256=hashlib.sha256(clip).hexdigest(),
         profile_semver="1.0.0", filter_graph_hash="a" * 64,
+        postprofile_spec_sha256=postprofile_spec_sha256(current_spec),
         pinned_binaries={"ffmpeg": "fixture-build"},
         frame_count=fmt["fps"] * fmt["seconds"], output_fps=fmt["fps"])
     ledger = len(store.list_shot_outputs(shot.shot_id, episode_id=EP))
@@ -224,6 +229,11 @@ def build_project(world: World, shots: dict[str, ShotStatus], clip: bytes | None
     store.save(profile, expected_version=0)
     store.save(Episode(episode_id=EP, project_id=PID, number=1, duration_target_sec=30,
                        shot_ids=tuple(shots)), expected_version=0)
+    width, height = fmt["size"]
+    store.create(CameraProfile(
+        camera_id="dvr-2005", profile_name="Fixture camera", fps=float(fmt["fps"]),
+        storage_resolution=fmt["size"], display_aspect_ratio=f"{width}:{height}",
+    ))
     for shot_id, status in shots.items():
         created = Shot(shot_id=shot_id, episode_id=EP, post_profile=profile.name, duration_sec=1)
         store.create(created)
@@ -648,7 +658,7 @@ def test_r1_review_and_approved_shots_are_accepted(
 
 @pytest.mark.parametrize("status", [
     ShotStatus.DRAFT, ShotStatus.PLANNED, ShotStatus.BLOCKING, ShotStatus.BUILDING,
-    ShotStatus.STALE, ShotStatus.REJECTED, ShotStatus.FAILED,
+    ShotStatus.STALE, ShotStatus.POST_STALE, ShotStatus.REJECTED, ShotStatus.FAILED,
 ])
 def test_r1_other_statuses_are_refused_at_submission_naming_shot_and_status(
     client: TestClient, world: World, status: ShotStatus,

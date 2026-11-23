@@ -37,10 +37,11 @@ _EDGES: dict[ShotStatus, frozenset[ShotStatus]] = {
     S.PLANNED: frozenset({S.BLOCKING}),
     # blocking -> blocking is the FR-29 compare loop iterating
     S.BLOCKING: frozenset({S.BLOCKING, S.BUILDING}),
-    S.BUILDING: frozenset({S.REVIEW, S.FAILED}),
+    S.BUILDING: frozenset({S.REVIEW, S.POST_STALE, S.FAILED}),
     S.FAILED: frozenset({S.BUILDING}),
-    S.REVIEW: frozenset({S.APPROVED, S.REJECTED}),
-    S.APPROVED: frozenset({S.STALE}),
+    S.REVIEW: frozenset({S.APPROVED, S.REJECTED, S.POST_STALE}),
+    S.APPROVED: frozenset({S.STALE, S.POST_STALE}),
+    S.POST_STALE: frozenset({S.BUILDING, S.STALE}),
     S.REJECTED: frozenset(),
     S.STALE: frozenset(),
 }
@@ -231,12 +232,23 @@ def check_dependency_freshness(
         )
 
 
+def check_episode_shots_for_cut(shots: Iterable[Shot]) -> None:
+    """Reject cut approval while any current Shot of the Episode, in the cut or not, is
+    stale, a draft or post-stale (the rule before cuts were bound to their inputs)."""
+    for shot in shots:
+        if shot.status in {ShotStatus.STALE, ShotStatus.DRAFT, ShotStatus.POST_STALE}:
+            raise ReviewApprovalError(
+                f"cut approval is blocked by current Shot {shot.shot_id} in {shot.status.value} state"
+            )
+
+
 def check_cut_approval(*, pending: bool, shots: Iterable[Shot]) -> None:
-    """Reject cut approval while recovery is pending or any current Shot is stale/draft."""
+    """Reject cut approval unless every Shot is eligible for a current degraded output."""
     if pending:
         raise ReviewApprovalError("cut approval is blocked while dependency recovery is pending")
     for shot in shots:
-        if shot.status in {ShotStatus.STALE, ShotStatus.DRAFT}:
+        if shot.status not in {ShotStatus.REVIEW, ShotStatus.APPROVED}:
             raise ReviewApprovalError(
-                f"cut approval is blocked by current Shot {shot.shot_id} in {shot.status.value} state"
+                f"cut approval is blocked by current Shot {shot.shot_id} in {shot.status.value} state; "
+                "only review or approved Shots can enter a cut"
             )

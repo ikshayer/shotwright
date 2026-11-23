@@ -11,7 +11,9 @@ adapter-stage seeds.
 
 from __future__ import annotations
 
+import hashlib
 import json
+from pathlib import Path
 from typing import Literal, cast
 
 from orchestrator.adapters.blender.scene import (
@@ -28,6 +30,11 @@ from orchestrator.adapters.postprofile.profile import (
     OverlaySpec,
     PostProfileSpec,
 )
+from orchestrator.adapters.postprofile.overlay_fit import (
+    OverlayFitError,
+    has_in_recording_overlays,
+    validate_in_recording_overlays,
+)
 from orchestrator.adapters.postprofile.runner import DegradeRequest
 from orchestrator.domain.base import Invalidation
 from orchestrator.domain.entities import (
@@ -37,10 +44,12 @@ from orchestrator.domain.entities import (
     PostProfile,
     Project,
     Shot,
+    ShotOutput,
     ShotOutputKind,
 )
 from orchestrator.domain.invalidation import field_invalidation
 from orchestrator.platform.errors import JobError, JobErrorKind
+from orchestrator.platform.containment import ContainmentError
 from orchestrator.store.json_store import ProjectStore, RecordNotFound
 
 
@@ -222,24 +231,40 @@ def _load_location_for_shot(store: ProjectStore, shot: Shot) -> Location:
 
 def camera_profile_for_render(store: ProjectStore, shot: Shot) -> CameraProfile:
     """Resolve the latest post-only profile values and accepted framing values."""
-    try:
-        current = store.load(CameraProfile, shot.camera_profile)
-    except RecordNotFound as exc:
-        raise RecordNotFound(
-            f"Shot {shot.shot_id!r} references missing CameraProfile "
-            f"{shot.camera_profile!r}"
-        ) from exc
+    return resolve_camera_profile_for_shot(store, shot)
+
+
+def resolve_camera_profile_for_shot(
+    store: ProjectStore,
+    shot: Shot,
+    *,
+    profile_override: CameraProfile | None = None,
+) -> CameraProfile:
+    """Resolve the selected profile, retaining pinned rebuild-triggering values."""
+    selected_id = shot.camera_profile
+    if profile_override is not None:
+        if profile_override.camera_id != selected_id:
+            raise ValueError(
+                f"CameraProfile override {profile_override.camera_id!r} does not match "
+                f"Shot {shot.shot_id!r} selected profile {selected_id!r}"
+            )
+        current = profile_override
+    else:
+        try:
+            current = store.load(CameraProfile, selected_id)
+        except RecordNotFound as exc:
+            raise RecordNotFound(
+                f"Shot {shot.shot_id!r} references missing CameraProfile {selected_id!r}"
+            ) from exc
     if shot.camera_profile_version is None:
         return current
     try:
-        frozen = store.load(
-            CameraProfile, shot.camera_profile, version=shot.camera_profile_version,
-        )
+        frozen = store.load(CameraProfile, selected_id, version=shot.camera_profile_version)
     except RecordNotFound as exc:
         raise JobError(
             JobErrorKind.INVALID_MANIFEST,
             f"Shot {shot.shot_id!r} pins missing CameraProfile "
-            f"{shot.camera_profile!r} version {shot.camera_profile_version}",
+            f"{selected_id!r} version {shot.camera_profile_version}",
             shot_id=shot.shot_id,
             cause=exc,
         ) from exc
@@ -250,6 +275,66 @@ def camera_profile_for_render(store: ProjectStore, shot: Shot) -> CameraProfile:
     values = {name: getattr(frozen, name) for name in rebuild_fields}
     resolved = current.model_copy(update=values)
     return CameraProfile.model_validate(resolved.model_dump(mode="python"))
+
+
+def derive_postprofile_spec_for_shot(
+    store: ProjectStore,
+    shot: Shot,
+    *,
+    profile_override: CameraProfile | None = None,
+) -> tuple[CameraProfile, PostProfileSpec, PostProfileSpec]:
+    """Return the resolved camera, base profile, and derived post spec without FFmpeg."""
+    from orchestrator.service.runner import postprofile_spec_from_camera
+
+    camera = resolve_camera_profile_for_shot(
+        store, shot, profile_override=profile_override,
+    )
+    profile = compose_post_profile_spec(store, shot=shot)
+    return camera, profile, postprofile_spec_from_camera(camera, profile)
+
+
+def postprofile_spec_sha256(spec: PostProfileSpec) -> str:
+    """Hash the same canonical derived-spec JSON stored by the DEGRADE adapter."""
+    canonical = json.dumps(
+        spec.model_dump(mode="json"), ensure_ascii=False, allow_nan=False,
+        sort_keys=True, separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def current_degraded_output(store: ProjectStore, shot: Shot) -> ShotOutput:
+    """Return the latest output only when the Shot and its post spec are current."""
+    from orchestrator.domain.base import ShotStatus
+
+    if shot.status not in {ShotStatus.REVIEW, ShotStatus.APPROVED}:
+        raise JobError(
+            JobErrorKind.INVALID_MANIFEST,
+            f"Shot {shot.shot_id!r} is {shot.status.value}; its degraded output is not "
+            "eligible for cut approval or export",
+            shot_id=shot.shot_id,
+        )
+    outputs = store.list_shot_outputs(
+        shot.shot_id, episode_id=shot.episode_id,
+        record_version=shot.version, kind=ShotOutputKind.DEGRADED,
+    )
+    if not outputs:
+        raise JobError(
+            JobErrorKind.INVALID_MANIFEST,
+            f"Shot {shot.shot_id!r}@{shot.version} has no DEGRADED output for cut approval or export",
+            shot_id=shot.shot_id,
+        )
+    _camera, _profile, current_spec = derive_postprofile_spec_for_shot(store, shot)
+    current_hash = postprofile_spec_sha256(current_spec)
+    latest = outputs[-1]
+    if latest.postprofile_spec_sha256 != current_hash:
+        raise JobError(
+            JobErrorKind.INVALID_MANIFEST,
+            f"Shot {shot.shot_id!r}@{shot.version} latest DEGRADED output uses postprofile "
+            f"spec {latest.postprofile_spec_sha256!r}; current spec is {current_hash}; "
+            "run degrade_media again before cut approval or export",
+            shot_id=shot.shot_id,
+        )
+    return latest
 
 
 def _load_scene_spec(
@@ -506,6 +591,8 @@ def compose_degrade_request(
     shot_id: str,
     episode_id: str,
     run_id: str,
+    camera_profile_override: CameraProfile | None = None,
+    ffmpeg_exe: Path | str = "ffmpeg",
 ) -> DegradeRequest:
     """Build degradation from the current Shot, its master receipt, and project profile.
 
@@ -525,13 +612,9 @@ def compose_degrade_request(
             f"Shot {shot.shot_id!r} version {shot.version} has no master output; run render_master first",
             shot_id=shot.shot_id,
         )
-    try:
-        camera_profile = store.load(CameraProfile, shot.camera_profile)
-    except RecordNotFound as exc:
-        raise RecordNotFound(
-            f"Shot {shot.shot_id!r} references missing CameraProfile {shot.camera_profile!r}"
-        ) from exc
-    profile = compose_post_profile_spec(store, shot=shot)
+    camera_profile, profile, derived = derive_postprofile_spec_for_shot(
+        store, shot, profile_override=camera_profile_override,
+    )
     overlay = profile.identity.overlay
     if overlay is not None and not overlay.font_relative:
         raise ValueError(
@@ -541,6 +624,43 @@ def compose_degrade_request(
             f"post_profiles/{profile.identity.name}.json, then place a font you are licensed "
             "to use at assets/fonts/overlay.ttf."
         )
+    if has_in_recording_overlays(derived):
+        font_relative = overlay.font_relative if overlay is not None else None
+        if font_relative:
+            try:
+                font_path = store._root.resolve(font_relative)
+            except ContainmentError as exc:
+                raise JobError(
+                    JobErrorKind.INVALID_MANIFEST,
+                    f"overlay fit is undecidable because font path {font_relative!r} is invalid: {exc}",
+                    shot_id=shot.shot_id,
+                    cause=exc,
+                ) from exc
+            if font_path.is_file():
+                try:
+                    validate_in_recording_overlays(
+                        derived,
+                        font_path,
+                        font_filter_path=font_relative,
+                        working_directory=store._root.path,
+                        ffmpeg_exe=ffmpeg_exe,
+                        duration_sec=shot.duration_sec,
+                    )
+                except OverlayFitError as exc:
+                    raise JobError(
+                        JobErrorKind.INVALID_MANIFEST,
+                        str(exc),
+                        shot_id=shot.shot_id,
+                        cause=exc,
+                    ) from exc
+                except (OSError, ValueError) as exc:
+                    raise JobError(
+                        JobErrorKind.INVALID_MANIFEST,
+                        f"overlay fit is undecidable because project font {font_relative!r} "
+                        f"could not be measured: {exc}",
+                        shot_id=shot.shot_id,
+                        cause=exc,
+                    ) from exc
     return DegradeRequest(
         shot_id=shot.shot_id,
         shot_version=shot.version,

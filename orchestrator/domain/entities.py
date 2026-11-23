@@ -1000,6 +1000,8 @@ class EpisodeOutput(Entity):
     ffmpeg_identity: str = Field(min_length=1)
     credit_manifest_path: str | None = None
     credit_manifest_sha256: str | None = None
+    input_manifest_path: str | None = None
+    input_manifest_sha256: str | None = None
 
     @field_validator("credit_manifest_path")
     @classmethod
@@ -1020,10 +1022,34 @@ class EpisodeOutput(Entity):
             raise ValueError("credit_manifest_sha256 must be 64 lowercase hexadecimal characters")
         return value
 
+    @field_validator("input_manifest_path")
+    @classmethod
+    def _relative_input_manifest_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("input_manifest_path must not be empty")
+        if "\x00" in value:
+            raise ValueError("input_manifest_path must not contain NUL")
+        posix, windows = PurePosixPath(value), PureWindowsPath(value)
+        if (posix.is_absolute() or windows.is_absolute() or windows.drive
+                or any(part == ".." for part in value.replace("\\", "/").split("/"))):
+            raise ValueError("input_manifest_path must be project-relative")
+        return value
+
+    @field_validator("input_manifest_sha256")
+    @classmethod
+    def _input_manifest_sha256_hex(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ValueError("input_manifest_sha256 must be 64 lowercase hexadecimal characters")
+        return value
+
     @model_validator(mode="after")
-    def _paired_credit_manifest(self) -> EpisodeOutput:
+    def _paired_manifests(self) -> EpisodeOutput:
         if (self.credit_manifest_path is None) != (self.credit_manifest_sha256 is None):
             raise ValueError("credit manifest path and SHA256 must be supplied together")
+        if (self.input_manifest_path is None) != (self.input_manifest_sha256 is None):
+            raise ValueError("input manifest path and SHA256 must be supplied together")
         return self
 
     @field_validator("storage_resolution")

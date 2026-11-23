@@ -116,7 +116,7 @@ _PATH_FIELDS: dict[type[Entity], tuple[str, ...]] = {
     Location: ("blend_path",),
     Shot: ("audio_refs", "framing_panel_ref"),
     Timeline: ("audio_tracks",),
-    EpisodeOutput: ("relative_path", "credit_manifest_path"),
+    EpisodeOutput: ("relative_path", "credit_manifest_path", "input_manifest_path"),
     Export: ("output_path",),
     H3Candidate: ("source_path", "av_path", "wav_path", "report_path"),
     GenerationRun: ("input_paths", "output_paths", "log_path"),
@@ -224,7 +224,9 @@ def _declared_paths(data: dict[str, Any], entity_type: type[Entity]) -> list[tup
 
 def _approval_is_binding(record: VersionedEntity) -> bool:
     """True once this version is approved; its content is then immutable (10.2)."""
-    if isinstance(record, Shot) and record.status in {ShotStatus.APPROVED, ShotStatus.STALE}:
+    if isinstance(record, Shot) and record.status in {
+        ShotStatus.APPROVED, ShotStatus.POST_STALE, ShotStatus.STALE,
+    }:
         return True
     return getattr(record, "approval_review_id", None) is not None
 
@@ -819,10 +821,15 @@ class ProjectStore:
             raise _invalid("cascade affected must be a list")
         seen: set[tuple[str, str]] = set()
         for row in plan["affected"]:
-            if (not isinstance(row, dict) or set(row) != {"episode_id", "shot_id", "version"}
+            required_row_fields = {"episode_id", "shot_id", "version"}
+            allowed_row_fields = required_row_fields | {"scope"}
+            if (not isinstance(row, dict)
+                    or not required_row_fields.issubset(row)
+                    or not set(row).issubset(allowed_row_fields)
                     or not isinstance(row["episode_id"], str) or not row["episode_id"]
                     or not isinstance(row["shot_id"], str) or not row["shot_id"]
-                    or type(row["version"]) is not int or row["version"] < 1):
+                    or type(row["version"]) is not int or row["version"] < 1
+                    or ("scope" in row and row["scope"] != "post")):
                 raise _invalid("malformed affected Shot reference in cascade plan")
             key = (row["episode_id"], row["shot_id"])
             if key in seen or row["episode_id"] not in plan["episode_ids"]:
@@ -918,8 +925,20 @@ class ProjectStore:
         if not _approval_is_binding(head):
             return
         if isinstance(head, Shot):
-            # approved -> stale is the one in-place change the state machine allows
-            after["status"] = before["status"]
+            if head.status is ShotStatus.APPROVED and new.status is ShotStatus.POST_STALE:
+                # Post-only invalidation keeps the render, clears the old approval, and
+                # then permits a re-degrade on this same content version.
+                after["status"] = before["status"]
+                after["approval_review_id"] = before["approval_review_id"]
+            elif head.status is ShotStatus.APPROVED and new.status is ShotStatus.STALE:
+                # Approved -> stale remains the rebuild cascade's in-place lifecycle move.
+                after["status"] = before["status"]
+            elif head.status is ShotStatus.POST_STALE and new.status in {
+                ShotStatus.BUILDING, ShotStatus.STALE,
+            }:
+                # Re-degrade or a later rebuild changes lifecycle only; content remains
+                # immutable while the old approval pointer is already cleared.
+                after["status"] = before["status"]
         if before != after:
             raise _invalid(
                 f"version {head.version} is approved and immutable; "
@@ -1186,6 +1205,33 @@ class ProjectStore:
                 raise _invalid(f"cannot hash EpisodeOutput credit manifest {output.credit_manifest_path}: {exc}", cause=exc) from exc
             if manifest_digest.hexdigest() != output.credit_manifest_sha256:
                 raise _invalid(f"EpisodeOutput credit manifest hash mismatch: {output.credit_manifest_path}")
+        if output.input_manifest_path is not None:
+            try:
+                manifest = self._root.resolve(output.input_manifest_path)
+            except ContainmentError as exc:
+                raise _invalid(
+                    f"EpisodeOutput input manifest path escapes the project: {exc}", cause=exc,
+                ) from exc
+            if not manifest.is_file():
+                raise _invalid(
+                    "EpisodeOutput input manifest is missing: "
+                    f"{output.input_manifest_path}"
+                )
+            manifest_digest = hashlib.sha256()
+            try:
+                with manifest.open("rb") as stream:
+                    while block := stream.read(1024 * 1024):
+                        manifest_digest.update(block)
+            except OSError as exc:
+                raise _invalid(
+                    f"cannot hash EpisodeOutput input manifest {output.input_manifest_path}: {exc}",
+                    cause=exc,
+                ) from exc
+            if manifest_digest.hexdigest() != output.input_manifest_sha256:
+                raise _invalid(
+                    "EpisodeOutput input manifest hash mismatch: "
+                    f"{output.input_manifest_path}"
+                )
 
     @staticmethod
     def _version_path(directory: str, version: int) -> str:

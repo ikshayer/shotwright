@@ -33,6 +33,13 @@ from orchestrator.service.dependencies import create_project
 from orchestrator.store.json_store import ProjectStore, RecordNotFound
 
 _FONT_RELATIVE = "assets/fonts/fixture.ttf"
+_DEJAVU_MONO = Path(__file__).resolve().parents[1] / "fixtures" / "fonts" / "DejaVuSansMono.ttf"
+
+
+def _install_real_font(root: ProjectRoot) -> None:
+    if not _DEJAVU_MONO.is_file():
+        pytest.skip(f"fixture font is absent: {_DEJAVU_MONO}")
+    root.write_bytes(_FONT_RELATIVE, _DEJAVU_MONO.read_bytes())
 
 
 def _post_profile(*, font_relative: str | None = _FONT_RELATIVE) -> PostProfile:
@@ -69,7 +76,7 @@ def _store_with_shot(
     store.save(Episode(episode_id="ep1", project_id="p1", number=1, duration_target_sec=30),
                expected_version=0)
     camera = CameraProfile(
-        camera_id="cam-1", profile_name="Distinctive post camera", fps=17.25,
+        camera_id="cam-1", profile_name="Distinctive post camera", fps=15.0,
     )
     store.create(camera)
     store.save(_post_profile(font_relative=font_relative), expected_version=0)
@@ -142,6 +149,7 @@ def test_degrade_composition_uses_current_master_shot_seed_and_named_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root, store, shot = _store_with_shot(tmp_path, current_master=True)
+    _install_real_font(root)
     before = _tree_snapshot(root.path)
 
     def forbidden_command() -> Any:
@@ -189,9 +197,10 @@ def test_degrade_composition_uses_current_master_shot_seed_and_named_profile(
 def test_degrade_composition_uses_the_shot_profile_override(
     tmp_path: Path,
 ) -> None:
-    _root, store, shot = _store_with_shot(
+    root, store, shot = _store_with_shot(
         tmp_path, current_master=True, shot_post_profile="low-light-bw",
     )
+    _install_real_font(root)
 
     selected = compose_module.compose_post_profile_spec(store, shot=shot)
     request = _compose(store, shot)

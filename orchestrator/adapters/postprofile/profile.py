@@ -794,6 +794,65 @@ def _escape_drawtext_literal(value: str) -> str:
     return _escape_drawtext_layers(expansion_safe)
 
 
+def serialize_drawtext_filter(
+    *,
+    font_path: str,
+    content: str,
+    x: int | str,
+    y: int | str,
+    fontsize: int,
+    quote_text: bool,
+) -> str:
+    """Serialize shared drawtext options for the degrade graph and fit measurement."""
+    font = _escape_filter_value(font_path)
+    text_argument = f"text='{content}'" if quote_text else f"text={content}"
+    return (
+        f"drawtext=fontfile='{font}':{text_argument}:x={x}:y={y}:fontsize={fontsize}:"
+        "fontcolor=white:box=1:boxcolor=black@0.4"
+    )
+
+
+def serialize_drawtext_literal_filter(
+    *,
+    font_path: str,
+    text: str,
+    x: int | str,
+    y: int | str,
+    fontsize: int,
+    element: str = "clock",
+    camera_id: str | None = None,
+    clock_format: str | None = None,
+) -> str:
+    """Serialize a static sample using the same escaping policy as its graph element."""
+    if element == "battery_rec":
+        content = _escape_filter_value(text)
+        quote_text = True
+    elif (
+        element == "clock"
+        and clock_format is None
+        and camera_id is not None
+        and _LEGACY_DRAWTEXT_TEXT.fullmatch(camera_id)
+        and text.startswith(f"{camera_id}  ")
+    ):
+        # The production graph quotes the legacy camera id and leaves the gmtime
+        # expansion to FFmpeg. Here the already-expanded sample is quoted the same
+        # way, with its literal clock value following that identical camera prefix.
+        clock_text = text[len(camera_id) + 2:].replace(":", r"\:")
+        content = f"{_escape_filter_value(camera_id)}  {clock_text}"
+        quote_text = True
+    else:
+        content = _escape_drawtext_literal(text)
+        quote_text = False
+    return serialize_drawtext_filter(
+        font_path=font_path,
+        content=content,
+        x=x,
+        y=y,
+        fontsize=fontsize,
+        quote_text=quote_text,
+    )
+
+
 def _clock_expr(steps: tuple[tuple[int, int], ...]) -> str:
     expr = "0"
     for boundary, cumulative in steps:
@@ -887,7 +946,6 @@ def build_filter_graph(
                 raise ProfileValidationError("drawtext stage requires an overlay specification")
             if font_path is None:
                 raise ProfileValidationError("drawtext stage requires a contained overlay font path")
-            font = _escape_filter_value(font_path)
             element = p.get("element", "clock")
             quote_text = True
             if element == "clock":
@@ -926,9 +984,14 @@ def build_filter_graph(
                 x, y, fontsize = indicator.x, indicator.y, indicator.fontsize
             else:  # checked when the persisted profile is validated
                 raise ProfileValidationError(f"unsupported drawtext element {element!r}")
-            text_argument = f"text='{content}'" if quote_text else f"text={content}"
-            parts.append(f"drawtext=fontfile='{font}':{text_argument}:"
-                         f"x={x}:y={y}:fontsize={fontsize}:fontcolor=white:box=1:boxcolor=black@0.4")
+            parts.append(serialize_drawtext_filter(
+                font_path=font_path,
+                content=content,
+                x=x,
+                y=y,
+                fontsize=fontsize,
+                quote_text=quote_text,
+            ))
         elif f == "eq":
             parts.append(f"eq=brightness={p.get('brightness', 0)}:contrast={p.get('contrast', 1)}:saturation={p.get('saturation', 1)}")
         elif f == "colortemperature":

@@ -52,6 +52,7 @@ from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.settings import ApprovalSettings, Settings
 from orchestrator.service.approval import record_review
 from orchestrator.store.json_store import ProjectStore, RecordNotFound
+from tests.service.conftest import bind_cut_receipt
 from tests.service.test_h3_promotion import RUN as H3_RUN
 from tests.service.test_h3_promotion import _setup as _h3_setup
 
@@ -238,7 +239,7 @@ def save_review(store: ProjectStore, kind: str, *, actor: str = "creator",
     return review
 
 
-def add_cut_output(store: ProjectStore, *, output_id: str = "cut-1") -> EpisodeOutput:
+def add_cut_output(store: ProjectStore, *, output_id: str = "cut-1", shot_rows=None) -> EpisodeOutput:
     timeline = store.load(Timeline, EP)
     timeline_token = store.load_with_version(Timeline, EP)[1]
     artifact = f"test cut {output_id}".encode()
@@ -251,6 +252,7 @@ def add_cut_output(store: ProjectStore, *, output_id: str = "cut-1") -> EpisodeO
         storage_resolution=(64, 48), output_fps=12, sample_aspect_ratio="1/1",
         ffmpeg_identity="test",
     )
+    receipt = bind_cut_receipt(store, receipt, shot_rows=shot_rows)
     store.append_episode_output(receipt, expected_version=0)
     return receipt
 
@@ -269,8 +271,16 @@ def prepare(world: World, kind: str, *, review_id: str | None = None,
         ensure_episode(store)
         store.save(timeline(), expected_version=0)
         if draft_blocker:
-            add_shot(store, "blocker")
-        cut = add_cut_output(store)
+            blocker = add_shot(store, "blocker")
+            _timeline, timeline_token = store.load_with_version(Timeline, EP)
+            store.save(Timeline(episode_id=EP, entries=[
+                TimelineEntry(
+                    type="shot", ref=blocker.shot_id,
+                    start_sec=0, duration_sec=blocker.duration_sec,
+                ),
+            ]), expected_version=timeline_token)
+        # A draft blocker has no degraded output to bind; its Shot state is what is refused.
+        cut = add_cut_output(store, shot_rows=[{"shot_id": "blocker"}] if draft_blocker else None)
         body = {"expected_version": episode_token(store), "cut_output_id": cut.output_id}
     if review_id is not None:
         body["review_id"] = review_id
@@ -1174,6 +1184,7 @@ def add_cut(store: ProjectStore, output_id: str, data: bytes) -> EpisodeOutput:
         content_sha256=hashlib.sha256(data).hexdigest(), delivery_profile="dvr-2005",
         storage_resolution=(320, 240), output_fps=10, sample_aspect_ratio="1/1",
         ffmpeg_identity="fixture")
+    output = bind_cut_receipt(store, output)
     store.append_episode_output(output, expected_version=len(store.list_episode_outputs(EP)))
     return output
 

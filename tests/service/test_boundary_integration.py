@@ -4,6 +4,8 @@ from datetime import UTC, datetime
 
 import pytest
 
+from tests.service.conftest import bind_cut_receipt
+
 from orchestrator.domain.base import FramingStatus, ShotStatus
 from orchestrator.domain.entities import (
     Beat, Episode, EpisodeOutput, Review, Script, Shot, StyleBible, Timeline,
@@ -71,7 +73,7 @@ def add_cut_output(store, *, timeline_version: int, output_id: str = "cut-1") ->
         storage_resolution=(64, 48), output_fps=12, sample_aspect_ratio="1/1",
         ffmpeg_identity="test",
     )
-    store.append_episode_output(receipt, expected_version=0)
+    store.append_episode_output(bind_cut_receipt(store, receipt), expected_version=0)
     return receipt
 
 

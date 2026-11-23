@@ -27,7 +27,7 @@ from orchestrator.domain.entities import (
 )
 from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.platform.ffmpeg_identity import normalize_ffmpeg_identity
-from orchestrator.service.compose import compose_post_profile_spec
+from orchestrator.service.compose import current_degraded_output, compose_post_profile_spec
 from orchestrator.service.credits import collect_credits_for_shots
 from orchestrator.store.json_store import ProjectStore, RecordNotFound, VersionConflict
 
@@ -233,6 +233,25 @@ def assemble_episode(
             JobErrorKind.CORRUPT_ARTIFACT,
             f"timeline encoder wrote {result.relative_path!r}; expected {output_relative!r}",
         )
+    input_manifest = {
+        "schema_version": 1,
+        "episode_id": episode_id,
+        "cut_output_id": output_id,
+        "cut_path": result.relative_path,
+        "cut_sha256": result.content_sha256,
+        "timeline_store_version": timeline_token,
+        "timeline_sha256": cut.content_sha256,
+        "shot_outputs": [
+            _shot_output_binding(shot_id, delivered)
+            for shot_id, delivered in sorted(outputs.items())
+        ],
+    }
+    input_manifest_relative = cut_input_manifest_path(episode_id, output_id)
+    input_manifest_text = (
+        json.dumps(input_manifest, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False)
+        + "\n"
+    )
+    input_manifest_bytes = input_manifest_text.encode("utf-8")
     receipt_values = {
         "output_id": output_id,
         "episode_id": episode_id,
@@ -245,6 +264,8 @@ def assemble_episode(
         "output_fps": profile.output_fps,
         "sample_aspect_ratio": profile.sample_aspect_ratio,
         "ffmpeg_identity": normalize_ffmpeg_identity(result.ffmpeg_identity),
+        "input_manifest_path": input_manifest_relative,
+        "input_manifest_sha256": hashlib.sha256(input_manifest_bytes).hexdigest(),
     }
     if "credit_manifest_path" in EpisodeOutput.model_fields:
         receipt_values["credit_manifest_path"] = credit_manifest_path
@@ -252,6 +273,9 @@ def assemble_episode(
     receipt = EpisodeOutput(**receipt_values)
     with store.command():
         existing = store.list_episode_outputs(episode_id)
+        if any(row.output_id == output_id for row in existing):
+            raise _invalid(f"cut output id {output_id!r} already has a receipt")
+        _write_cut_input_manifest(store, input_manifest_relative, input_manifest_bytes)
         store.append_episode_output(receipt, expected_version=len(existing))
     return receipt
 
@@ -305,17 +329,134 @@ def _validate_timeline_shape(timeline: Timeline) -> None:
 
 
 def _delivered_output(store: ProjectStore, shot: Shot) -> ShotOutput:
-    delivered = store.list_shot_outputs(
+    outputs = store.list_shot_outputs(
         shot.shot_id,
         episode_id=shot.episode_id,
         record_version=shot.version,
         kind=ShotOutputKind.DEGRADED,
     )
-    if not delivered:
+    if not outputs:
         raise _invalid(
-            f"Shot {shot.shot_id!r} has no degraded output; run degrade_media first"
+            f"Shot '{shot.shot_id}' has no degraded output; run degrade_media first"
         )
-    return delivered[-1]
+    return outputs[-1]
+
+
+def cut_input_manifest_path(episode_id: str, output_id: str) -> str:
+    """Project-relative, immutable path for one cut's bound Shot output receipts."""
+    return f"episodes/{episode_id}/outputs/cuts/{output_id}.inputs.json"
+
+
+def _shot_output_binding(shot_id: str, output: ShotOutput) -> dict[str, object]:
+    return {
+        "shot_id": shot_id,
+        "output_id": output.output_id,
+        "record_version": output.record_version,
+        "relative_path": output.relative_path,
+        "content_sha256": output.content_sha256,
+        "postprofile_spec_sha256": output.postprofile_spec_sha256,
+    }
+
+
+def _write_cut_input_manifest(store: ProjectStore, relative: str, content: bytes) -> None:
+    """Persist a new contained manifest without replacing an earlier receipt binding."""
+    if store._root.resolve(relative).exists():
+        raise _invalid(f"cut input manifest already exists: {relative}")
+    store._root.write_bytes(relative, content)
+
+
+def validate_cut_input_manifest(
+    store: ProjectStore,
+    cut: EpisodeOutput,
+    timeline: Timeline,
+) -> tuple[tuple[Shot, ...], str, str]:
+    """Verify a cut's immutable source receipts are still the current Shot outputs."""
+    manifest, relative, digest = _read_cut_input_manifest(store, cut)
+    rows = manifest["shot_outputs"]
+    shot_ids = tuple(sorted({
+        entry.ref for entry in timeline.entries if entry.type == "shot" and entry.ref is not None
+    }))
+    row_ids = tuple(sorted(row.get("shot_id") for row in rows if isinstance(row.get("shot_id"), str)))
+    if len(row_ids) != len(rows) or row_ids != shot_ids:
+        raise _invalid(
+            f"cut {cut.output_id!r} Shot input manifest does not bind its exact Shot set"
+        )
+    shots: list[Shot] = []
+    for row in rows:
+        shot_id = row["shot_id"]
+        try:
+            shot = store.load(Shot, shot_id, episode_id=cut.episode_id)
+            output = current_degraded_output(store, shot)
+        except (RecordNotFound, JobError) as exc:
+            raise _invalid(
+                f"cut {cut.output_id!r} cannot use Shot {shot_id!r}: {exc}", cause=exc,
+            ) from exc
+        if row != _shot_output_binding(shot_id, output):
+            raise _invalid(
+                f"cut {cut.output_id!r} was rendered from a different DEGRADED output for "
+                f"Shot {shot_id!r}; reassemble and approve the current cut"
+            )
+        shots.append(shot)
+    return tuple(shots), relative, digest
+
+
+def validate_cut_input_manifest_identity(
+    store: ProjectStore, cut: EpisodeOutput,
+) -> tuple[str, str]:
+    """Verify only the immutable sidecar binding to a cut receipt, including history."""
+    _manifest, relative, digest = _read_cut_input_manifest(store, cut)
+    return relative, digest
+
+
+def _read_cut_input_manifest(
+    store: ProjectStore, cut: EpisodeOutput,
+) -> tuple[dict[str, object], str, str]:
+    if cut.input_manifest_path is None or cut.input_manifest_sha256 is None:
+        raise _invalid(
+            f"cut {cut.output_id!r} predates output binding and must be reassembled "
+            "with assemble_cut"
+        )
+    relative = cut.input_manifest_path
+    try:
+        raw_bytes = store._root.read_bytes(relative)
+    except FileNotFoundError:
+        raise _invalid(
+            f"cut {cut.output_id!r} Shot input manifest is missing: {relative}"
+        ) from None
+    except OSError as exc:
+        raise _invalid(
+            f"cut {cut.output_id!r} Shot input manifest cannot be read", cause=exc,
+        ) from exc
+    digest = hashlib.sha256(raw_bytes).hexdigest()
+    if digest != cut.input_manifest_sha256:
+        raise _invalid(
+            f"cut {cut.output_id!r} Shot input manifest SHA-256 does not match its receipt"
+        )
+    try:
+        manifest = json.loads(raw_bytes.decode("utf-8"))
+    except (ValueError, TypeError, UnicodeDecodeError) as exc:
+        raise _invalid(
+            f"cut {cut.output_id!r} Shot input manifest is not valid JSON", cause=exc,
+        ) from exc
+    if not isinstance(manifest, dict):
+        raise _invalid(f"cut {cut.output_id!r} Shot input manifest must be a JSON object")
+    identity = {
+        "schema_version": 1,
+        "episode_id": cut.episode_id,
+        "cut_output_id": cut.output_id,
+        "cut_path": cut.relative_path,
+        "cut_sha256": cut.content_sha256,
+        "timeline_store_version": cut.timeline_store_version,
+        "timeline_sha256": cut.timeline_sha256,
+    }
+    expected_fields = {*identity, "shot_outputs"}
+    if (set(manifest) != expected_fields
+            or any(manifest.get(key) != value for key, value in identity.items())):
+        raise _invalid(f"cut {cut.output_id!r} Shot input manifest does not match its receipt")
+    rows = manifest["shot_outputs"]
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise _invalid(f"cut {cut.output_id!r} Shot input manifest has invalid shot_outputs")
+    return manifest, relative, digest
 
 
 def _require_assembly_status(shot: Shot) -> None:
@@ -327,6 +468,7 @@ def _require_assembly_status(shot: Shot) -> None:
         ShotStatus.BLOCKING: "approve framing if required, then run render_master and degrade_media",
         ShotStatus.BUILDING: "finish render_master, then run degrade_media",
         ShotStatus.STALE: "revise the Shot, then run build_scene, render_master, and degrade_media",
+        ShotStatus.POST_STALE: "run degrade_media again from the current master, then review the result",
         ShotStatus.REJECTED: "revise the Shot, then run build_scene, render_master, and degrade_media",
         ShotStatus.FAILED: "retry the failed stage, then run degrade_media",
     }
@@ -380,8 +522,8 @@ def _ordered_shots(store: ProjectStore, episode: Episode, shot_ids: Sequence[str
     return next(iter(orderings))
 
 
-def _invalid(message: str) -> JobError:
-    return JobError(JobErrorKind.INVALID_MANIFEST, message)
+def _invalid(message: str, *, cause: BaseException | None = None) -> JobError:
+    return JobError(JobErrorKind.INVALID_MANIFEST, message, cause=cause)
 
 
 def _credit_cards(

@@ -55,6 +55,7 @@ from orchestrator.domain.entities import (
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.errors import JobError
 from orchestrator.service.approval import approve_shot
+from orchestrator.service.compose import derive_postprofile_spec_for_shot, postprofile_spec_sha256
 from orchestrator.service.dependencies import propose_shots
 from orchestrator.service.timeline import compose_timeline
 from orchestrator.store.json_store import ProjectStore, RecordNotFound, VersionConflict
@@ -155,6 +156,19 @@ def _profile(
     )
 
 
+def _camera_for_profile(camera_id: str, profile: PostProfile) -> CameraProfile:
+    width, height = profile.storage_resolution
+    display = Fraction(width, height) * Fraction(profile.sample_aspect_ratio.replace(":", "/"))
+    return CameraProfile(
+        camera_id=camera_id,
+        profile_name=f"fixture {camera_id}",
+        fps=float(profile.output_fps),
+        storage_resolution=(width, height),
+        display_aspect_ratio=f"{display.numerator}:{display.denominator}",
+        frame_drop_schedule=list(profile.artifact_schedule),
+    )
+
+
 def _approve_fixture_shot(store: ProjectStore, shot: Shot) -> Shot:
     for status in (
         ShotStatus.PLANNED,
@@ -241,6 +255,7 @@ def _fixture(
         if profile.name not in saved_profile_names:
             store.save(profile, expected_version=0)
             saved_profile_names.add(profile.name)
+    store.create(_camera_for_profile("dvr-2005", delivery))
 
     shot_rows = (
         ("shot-dvr", "dvr-2005", "beat-dvr"),
@@ -248,9 +263,12 @@ def _fixture(
         ("shot-consumer", "consumer-2002", "beat-consumer"),
     )
     for shot_id, profile_name, beat_id in shot_rows:
+        camera = _camera_for_profile(f"camera-{shot_id}", profiles[profile_name])
+        store.create(camera)
         shot = Shot(
             shot_id=shot_id,
             episode_id=_EPISODE_ID,
+            camera_profile=camera.camera_id,
             post_profile=profile_name,
             beat_id=beat_id,
             duration_sec=3,
@@ -266,7 +284,7 @@ def _fixture(
             run_id=f"timeline-scene-{shot_id}",
             degrade_seed=shot.degrade_seed,
             duration_sec=shot.duration_sec,
-            camera_profile=CameraProfile(camera_id=f"camera-{shot_id}", profile_name="fixture"),
+            camera_profile=camera,
             scene=synthetic_interior(),
         )
         scene_relative = f"scenes/{shot_id}/v{shot.version:04d}/timeline-fixture/scene.json"
@@ -293,6 +311,7 @@ def _fixture(
         relative_path = f"delivered/{shot_id}.mp4"
         clip_bytes = f"delivered clip for {shot_id}".encode()
         root.write_bytes(relative_path, clip_bytes)
+        _camera, _base, current_spec = derive_postprofile_spec_for_shot(store, shot)
         output_timing = {} if shot_id == legacy_output_for else {
             "frame_count": int(shot.duration_sec * profiles[profile_name].output_fps),
             "output_fps": profiles[profile_name].output_fps,
@@ -308,6 +327,7 @@ def _fixture(
                 content_sha256=hashlib.sha256(clip_bytes).hexdigest(),
                 profile_semver="1.0.0",
                 filter_graph_hash="a" * 64,
+                postprofile_spec_sha256=postprofile_spec_sha256(current_spec),
                 pinned_binaries={"ffmpeg": "fixture-build"},
                 **output_timing,
             ),

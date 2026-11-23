@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
@@ -65,12 +66,16 @@ class SnapshotFile:
     expected_sha256: str | None = None
 
 
-def plan_snapshot(store: ProjectStore) -> tuple[SnapshotFile, ...]:
-    """Read the native project closure while the caller holds its command fence."""
+def plan_snapshot(
+    store: ProjectStore, *, extra_files: Iterable[SnapshotFile] = (),
+) -> tuple[SnapshotFile, ...]:
+    """Read the native project closure and additional bound files under one fence."""
     snapshot = _Snapshot(store)
     try:
         snapshot.cascades()
         snapshot.collect()
+        for item in extra_files:
+            snapshot.add(item.relative_path, item.expected_sha256)
     except (ContainmentError, OSError, ValueError) as exc:
         raise _invalid(f"cannot read portable project snapshot: {exc}", cause=exc) from exc
     return tuple(snapshot.files[path] for path in sorted(snapshot.files))

@@ -245,8 +245,11 @@ class OperationContext:
         if operation == "create_camera_profile":
             profile = CameraProfile.model_validate(data["camera_profile"])
             _require_path_match(data, "camera_id", profile.camera_id)
-            created = create_camera_profile(self._store(data["project_id"]), profile)
-            return created.model_dump(mode="json")
+            created = create_camera_profile(
+                self._store(data["project_id"]), profile,
+                ffmpeg_exe=self.settings.binaries.ffmpeg_exe,
+            )
+            return created.profile.model_dump(mode="json") | {"overlay_fit": created.overlay_fit}
         if operation == "create_post_profile":
             profile = PostProfile.model_validate(data["post_profile"])
             _require_path_match(data, "profile_name", profile.name)
@@ -459,10 +462,12 @@ class OperationContext:
                 self._store(data["project_id"]),
                 camera_profile,
                 expected_version=data["expected_version"],
+                ffmpeg_exe=self.settings.binaries.ffmpeg_exe,
             )
             return {
                 "camera_profile": camera_profile.model_dump(mode="json"),
                 "invalidated": list(invalidated),
+                "overlay_fit": invalidated.overlay_fit,
             }
         if operation == "cancel_job":
             if self.job_runner is None:

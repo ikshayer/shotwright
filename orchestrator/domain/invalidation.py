@@ -83,11 +83,11 @@ class Invalidated:
         return bool(self.shot_ids)
 
 
-#: 10.2: "any shot moving to `stale` or `draft` revokes that cut approval".
+#: 10.2: a Shot moving to `stale`, `post_stale` or `draft` revokes its cut approval.
 #: The `draft` case is a rejected shot's successor re-entering the pipeline,
 #: which is a different route in but has the same effect on gate C.
 _REVOKES_CUT_APPROVAL: frozenset[ShotStatus] = frozenset(
-    {ShotStatus.STALE, ShotStatus.DRAFT}
+    {ShotStatus.STALE, ShotStatus.POST_STALE, ShotStatus.DRAFT}
 )
 
 
@@ -294,13 +294,24 @@ def revision_impact(
         candidates = (shot for shot in shots if before.location_id in shot.dependencies or shot.location_id == before.location_id)
     elif isinstance(before, CameraProfile):
         diff = diff_camera_profile(before, after)
-        if not diff.requires_rebuild:
+        def uses_camera(shot: Shot) -> bool:
+            return (
+                shot.camera_profile_version is None
+                and (shot.camera_id == before.camera_id or shot.camera_profile == before.camera_id)
+            )
+
+        if diff.requires_rebuild:
+            candidates = (shot for shot in shots if uses_camera(shot))
+        elif diff.post_only:
+            # This is a candidate selector only. The service additionally checks the
+            # latest degraded receipt's derived-spec hash before planning a post cascade.
+            candidates = (
+                shot for shot in shots
+                if uses_camera(shot)
+                and shot.status in {ShotStatus.REVIEW, ShotStatus.APPROVED}
+            )
+        else:
             return ()
-        candidates = (
-            shot for shot in shots
-            if shot.camera_profile_version is None
-            and (shot.camera_id == before.camera_id or shot.camera_profile == before.camera_id)
-        )
     elif isinstance(before, Shot):
         if before.shot_id != after.shot_id or before.episode_id != after.episode_id:
             raise ValueError("cannot compare different Shots")

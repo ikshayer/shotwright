@@ -30,7 +30,11 @@ from orchestrator.domain.entities import (
     ShotOutputKind,
 )
 from orchestrator.domain.invalidation import field_invalidation
-from orchestrator.domain.state import TransitionContext, TransitionError, check_transition
+from orchestrator.domain.state import (
+    TransitionContext,
+    TransitionError,
+    check_transition,
+)
 from orchestrator.jobs.journal import append_job, read_job
 from orchestrator.jobs.queue import JobQueue
 from orchestrator.platform.containment import ProjectRoot
@@ -236,6 +240,11 @@ class JobRunner:
             required_ram_gb=request.required_ram_gb, required_disk_gb=request.required_disk_gb,
         )
         store = self.store_for(project_id)
+        if request.kind is AdapterKind.DEGRADE:
+            from orchestrator.service.dependencies import _pending_error
+
+            with store.command():
+                _pending_error(store)
         if request.kind is AdapterKind.ASSEMBLE:
             episode_id = request.episode_id or request.record_id
             if request.record_id != episode_id:
@@ -280,6 +289,7 @@ class JobRunner:
                 shot_id=request.record_id,
                 episode_id=episode_id,
                 run_id=uuid.uuid4().hex,
+                ffmpeg_exe=self.settings.binaries.ffmpeg_exe,
             )
             if request.record_version != degradation.shot_version:
                 raise ValueError(
@@ -297,6 +307,10 @@ class JobRunner:
                 required_disk_gb=request.required_disk_gb,
             )
         with store.command():
+            if request.kind is AdapterKind.DEGRADE:
+                from orchestrator.service.dependencies import _pending_error
+
+                _pending_error(store)
             if request.kind is AdapterKind.AUDIO_REVIEW:
                 payload = request.payload
                 audio_review_id = payload["audio_review_id"]
@@ -570,7 +584,12 @@ class JobRunner:
                 store, job, request,
                 status="cancelled" if exc.kind is JobErrorKind.CANCELLED else "failed", error=exc,
             )
+            pending_cascade_refusal = (
+                exc.kind is JobErrorKind.INVALID_MANIFEST
+                and exc.message.startswith("pending cascade plan(s)")
+            )
             if (exc.kind is not JobErrorKind.CANCELLED
+                    and not pending_cascade_refusal
                     and request.kind not in _SIDECAR_KINDS
                     and request.kind not in {AdapterKind.ASSEMBLE, AdapterKind.AUDIO_REVIEW}):
                 lifecycle_error = _fail_shot_after_job_error(store, request)
@@ -767,9 +786,29 @@ class JobRunner:
                     kind=ShotOutputKind.DEGRADED,
                 )
                 if delivered and shot.status is ShotStatus.BUILDING:
-                    _transition_loaded_shot(
-                        store, shot, token, ShotStatus.REVIEW, job=job,
-                    )
+                    target = ShotStatus.REVIEW
+                    if kind is ShotOutputKind.DEGRADED:
+                        from orchestrator.service.compose import (
+                            derive_postprofile_spec_for_shot,
+                            postprofile_spec_sha256,
+                        )
+
+                        _camera, _profile, current_spec = derive_postprofile_spec_for_shot(
+                            store, shot,
+                        )
+                        current_hash = postprofile_spec_sha256(current_spec)
+                        if delivered[-1].postprofile_spec_sha256 != current_hash:
+                            target = ShotStatus.POST_STALE
+                    try:
+                        check_transition(shot.status, target)
+                    except TransitionError as exc:
+                        raise _lifecycle_job_error(exc, job) from exc
+                    updated = shot.model_copy(update={
+                        "status": target,
+                        **({"approval_review_id": None}
+                           if target is ShotStatus.POST_STALE else {}),
+                    })
+                    store.update(updated, expected_version=token)
 
     def _is_cancelled(self, key: tuple[str, str]) -> bool:
         with self._condition:
@@ -866,6 +905,10 @@ def _begin_shot_work(store: ProjectStore, request: AdapterRequest, job: Job) -> 
     if request.kind is AdapterKind.ASSEMBLE:
         return
     with store.command():
+        if request.kind is AdapterKind.DEGRADE:
+            from orchestrator.service.dependencies import _pending_error
+
+            _pending_error(store)
         try:
             shot, token = store.load_with_version(
                 Shot, request.record_id, episode_id=request.episode_id,
@@ -948,12 +991,18 @@ def _begin_shot_work(store: ProjectStore, request: AdapterRequest, job: Job) -> 
                 TransitionContext(framing_status=shot.framing_status),
                 job,
             )
-        elif request.kind is AdapterKind.DEGRADE and shot.status is not ShotStatus.BUILDING:
-            raise _job_error(
-                JobErrorKind.INVALID_MANIFEST,
-                f"degrade_media requires Shot status 'building'; found {shot.status.value}",
-                job,
-            )
+        elif request.kind is AdapterKind.DEGRADE:
+            if shot.status is ShotStatus.POST_STALE:
+                _transition_loaded_shot(
+                    store, shot, token, ShotStatus.BUILDING, job=job,
+                )
+            elif shot.status is not ShotStatus.BUILDING:
+                raise _job_error(
+                    JobErrorKind.INVALID_MANIFEST,
+                    "degrade_media requires Shot status 'building' or 'post_stale'; "
+                    f"found {shot.status.value}",
+                    job,
+                )
 
 
 def _transition_loaded_shot(

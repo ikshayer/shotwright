@@ -33,6 +33,7 @@ class ShotStatus(StrEnum):
     BUILDING = "building"
     REVIEW = "review"
     APPROVED = "approved"
+    POST_STALE = "post_stale"
     REJECTED = "rejected"
     FAILED = "failed"
     STALE = "stale"

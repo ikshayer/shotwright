@@ -58,6 +58,7 @@ from tests.adapters.export.test_portable_package import (
     _offline_media,
     _setup as _export_setup,
 )
+from tests.service.conftest import bind_cut_receipt
 from tests.service.test_approval_integrity_contract import approved_shot
 from tests.service.test_approval_integrity_contract import swap_first_two_shots
 from tests.service.test_timeline_assembly_contract import _FakeEncoder
@@ -197,6 +198,7 @@ def _append_cut(fixture: Any, output_id: str, data: bytes, *, like: EpisodeOutpu
     fixture.root.write_bytes(relative, data)
     cut = like.model_copy(update={"output_id": output_id, "relative_path": relative,
                                   "content_sha256": _digest(data)})
+    cut = bind_cut_receipt(fixture.store, cut)
     fixture.store.append_episode_output(
         cut, expected_version=len(fixture.store.list_episode_outputs(EXPORT_EPISODE)))
     return cut

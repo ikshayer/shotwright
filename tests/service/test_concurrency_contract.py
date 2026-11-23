@@ -10,6 +10,8 @@ from uuid import uuid4
 
 import pytest
 
+from tests.service.conftest import bind_cut_receipt
+
 from orchestrator.domain.base import FramingStatus, ShotStatus
 from orchestrator.domain.entities import (
     Beat,
@@ -22,6 +24,7 @@ from orchestrator.domain.entities import (
     Shot,
     StyleBible,
     Timeline,
+    TimelineEntry,
 )
 from orchestrator.domain.invalidation import revision_impact
 from orchestrator.domain.state import (
@@ -64,8 +67,13 @@ def add_episode(store, name="ep1"):
                        duration_target_sec=30), expected_version=0)
 
 
-def add_cut_output(store, episode_id="ep1", *, timeline_version=3):
-    timeline = Timeline(episode_id=episode_id, entries=[])
+def add_cut_output(store, episode_id="ep1", *, timeline_version=3, shot_ids=(), shot_rows=None):
+    timeline = Timeline(episode_id=episode_id, entries=[
+        TimelineEntry(
+            type="shot", ref=shot_id, start_sec=index * 5, duration_sec=5,
+        )
+        for index, shot_id in enumerate(shot_ids)
+    ])
     for expected_token in range(timeline_version):
         store.save(timeline, expected_version=expected_token)
     timeline = store.load(Timeline, episode_id)
@@ -80,7 +88,7 @@ def add_cut_output(store, episode_id="ep1", *, timeline_version=3):
         delivery_profile="test", storage_resolution=(64, 48), output_fps=12,
         sample_aspect_ratio="1/1", ffmpeg_identity="test",
     )
-    store.append_episode_output(receipt, expected_version=0)
+    store.append_episode_output(bind_cut_receipt(store, receipt, shot_rows=shot_rows), expected_version=0)
     return receipt
 
 
@@ -135,7 +143,7 @@ def setup_cascade(root, store, *, two_episodes=False):
 def assert_safe(store, episodes):
     for ep in episodes:
         shots = [store.load(Shot, name, episode_id=ep) for name in store.ids(Shot, episode_id=ep)]
-        if any(s.status in {ShotStatus.STALE, ShotStatus.DRAFT} for s in shots):
+        if any(s.status in {ShotStatus.STALE, ShotStatus.POST_STALE, ShotStatus.DRAFT} for s in shots):
             episode = store.load(Episode, ep)
             assert (episode.approved_cut_version, episode.approved_cut_output_id,
                     episode.approval_review_id) == (None, None, None)
@@ -281,7 +289,7 @@ def test_pure_dependency_fence_matches_exact_episode_shot_and_version():
     check_dependency_freshness(shot.model_copy(update=shot.next_version()), invalidated=[("ep1", "s1", 1)])
 
 
-@pytest.mark.parametrize("state", [ShotStatus.DRAFT, ShotStatus.STALE])
+@pytest.mark.parametrize("state", [ShotStatus.DRAFT, ShotStatus.STALE, ShotStatus.POST_STALE])
 def test_pure_cut_guard_rejects_current_draft_or_stale(state):
     shot = Shot(shot_id="s1", episode_id="ep1", duration_sec=5, status=state)
     with pytest.raises(ReviewApprovalError):
@@ -434,7 +442,7 @@ def test_completed_plan_fences_review_and_draft_until_successor_rebuild(project)
     assert (approved.version, approved.status) == (2, ShotStatus.APPROVED)
 
 
-@pytest.mark.parametrize("state", [ShotStatus.DRAFT, ShotStatus.STALE])
+@pytest.mark.parametrize("state", [ShotStatus.DRAFT, ShotStatus.STALE, ShotStatus.POST_STALE])
 def test_cut_approval_uses_all_current_episode_shots(project, state):
     _, store = project
     add_episode(store)
@@ -443,7 +451,11 @@ def test_cut_approval_uses_all_current_episode_shots(project, state):
     else:
         reviewable(store)
         approved = approve(store)
-        store.update(approved.model_copy(update={"status": ShotStatus.STALE}), expected_version=token(store, Shot, "s1", "ep1"))
+        store.update(approved.model_copy(update={
+            "status": state,
+            **({"approval_review_id": None} if state is ShotStatus.POST_STALE else {}),
+        }), expected_version=token(store, Shot, "s1", "ep1"))
+    # The bound cut is valid and excludes s1; the Episode-wide guard must still find it.
     cut = add_cut_output(store, timeline_version=3)
     persist_review(store, "gate", "ep1", 3, target_kind="episode_cut", episode_id="ep1")
     before = store.load_with_version(Episode, "ep1")
@@ -451,6 +463,7 @@ def test_cut_approval_uses_all_current_episode_shots(project, state):
         approve_episode(store, "ep1", cut_output_id=cut.output_id,
                         review_id="gate", expected_version=before[1])
     assert caught.value.kind is JobErrorKind.INVALID_MANIFEST
+    assert f"Shot s1 in {state.value} state" in str(caught.value)
     assert store.load_with_version(Episode, "ep1") == before
 
 

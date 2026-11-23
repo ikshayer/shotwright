@@ -11,10 +11,18 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from orchestrator.domain.entities import Episode, EpisodeOutput, Export, Project, Review, Timeline
-from orchestrator.domain.state import ReviewApprovalError, check_review_approval
+from orchestrator.domain.state import (
+    ReviewApprovalError,
+    check_cut_approval,
+    check_review_approval,
+)
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.platform.settings import Settings
+from orchestrator.service.timeline import (
+    validate_cut_input_manifest,
+    validate_cut_input_manifest_identity,
+)
 from orchestrator.store.json_store import ProjectStore, RecordNotFound, VersionConflict
 
 from .package_media import DeliveryEvidence, encode_delivery
@@ -30,6 +38,8 @@ class BoundCut:
     timeline_version: int
     output: EpisodeOutput
     review: Review
+    input_manifest_path: str
+    input_manifest_sha256: str
 
 
 def export_project(
@@ -48,8 +58,17 @@ def export_project(
         )
         if project.project_id != selected.episode.project_id:
             raise _invalid("the selected Episode belongs to a different Project")
-        files = plan_snapshot(store)
-    _validate_snapshot_plan(files, selected.output)
+        retained_cut_sidecars = tuple(
+            (cut, SnapshotFile(cut.input_manifest_path, cut.input_manifest_sha256))
+            for retained_episode_id in store.episode_ids()
+            for cut in store.list_episode_outputs(retained_episode_id)
+            if cut.input_manifest_path is not None
+            and cut.input_manifest_sha256 is not None
+        )
+        files = plan_snapshot(store, extra_files=(item for _, item in retained_cut_sidecars))
+        for cut, _item in retained_cut_sidecars:
+            validate_cut_input_manifest_identity(store, cut)
+    _validate_snapshot_plan(files, selected)
 
     export_id = uuid.uuid4().hex
     package = f"exports/{export_id}"
@@ -208,19 +227,33 @@ def _bind_cut(
         )
     except ReviewApprovalError as exc:
         raise _invalid(f"gate-C approval Review does not match the selected cut: {exc}") from exc
-    return BoundCut(episode, timeline, timeline_version, selected, review)
+    _shots, input_manifest_path, input_manifest_sha256 = validate_cut_input_manifest(
+        store, selected, timeline,
+    )
+    try:
+        check_cut_approval(pending=False, shots=_shots)
+    except ReviewApprovalError as exc:
+        raise _invalid(f"gate-C approval is blocked by a Shot state: {exc}") from exc
+    return BoundCut(
+        episode, timeline, timeline_version, selected, review,
+        input_manifest_path, input_manifest_sha256,
+    )
 
 
-def _validate_snapshot_plan(files: tuple[SnapshotFile, ...], source: EpisodeOutput) -> None:
+def _validate_snapshot_plan(files: tuple[SnapshotFile, ...], source: BoundCut) -> None:
     planned = {item.relative_path.casefold(): item for item in files}
     if len(planned) != len(files) or _DELIVERY.casefold() in planned:
         raise _invalid("snapshot contains duplicate paths or occupies the reserved delivery.mp4 path")
     project = planned.get("project.json")
-    cut = planned.get(source.relative_path.replace("\\", "/").casefold())
+    cut = planned.get(source.output.relative_path.replace("\\", "/").casefold())
     if project is None or not project.expected_sha256:
         raise _invalid("snapshot is missing the project manifest or its SHA-256")
-    if cut is None or cut.expected_sha256 != source.content_sha256:
+    if cut is None or cut.expected_sha256 != source.output.content_sha256:
         raise _invalid("snapshot did not bind the selected cut and its SHA-256")
+    input_manifest = planned.get(source.input_manifest_path.replace("\\", "/").casefold())
+    if (input_manifest is None
+            or input_manifest.expected_sha256 != source.input_manifest_sha256):
+        raise _invalid("snapshot did not bind the cut's Shot input manifest and its SHA-256")
 
 
 def _canonical_path(root: ProjectRoot, relative: str) -> Path:
@@ -307,6 +340,8 @@ def _manifest(
             "cut_output_id": cut.output.output_id,
             "cut_path": cut.output.relative_path,
             "cut_sha256": cut.output.content_sha256,
+            "cut_inputs_path": cut.input_manifest_path,
+            "cut_inputs_sha256": cut.input_manifest_sha256,
             "delivery_profile": cut.output.delivery_profile,
             "cut_ffmpeg_identity": cut.output.ffmpeg_identity,
         },

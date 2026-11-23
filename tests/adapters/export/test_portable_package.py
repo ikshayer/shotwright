@@ -26,6 +26,8 @@ from orchestrator.domain.entities import (
     EpisodeOutput,
     Export,
     Location,
+    PostProfile,
+    PostProfileEncode,
     Project,
     Review,
     Script,
@@ -40,7 +42,9 @@ from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.platform.settings import Settings
 from orchestrator.service.approval import approve_episode
+from orchestrator.service.compose import derive_postprofile_spec_for_shot, postprofile_spec_sha256
 from orchestrator.store.json_store import ProjectStore
+from tests.service.conftest import bind_cut_receipt
 from tests.service.test_timeline_assembly_contract import _approve_fixture_shot
 
 _PROJECT = "portable"
@@ -140,13 +144,25 @@ def _setup(tmp_path: Path, cut_bytes: bytes, *, intended_audio: bool = True) -> 
     tmp = ProjectRoot(tmp_path)
     root = ProjectRoot(tmp.make_dir(_PROJECT))
     store = ProjectStore(root)
-    store.save(Project(project_id=_PROJECT, title="AT-09 portable episode"), expected_version=0)
+    store.save(Project(
+        project_id=_PROJECT, title="AT-09 portable episode", output_profile="dvr-2005",
+    ), expected_version=0)
     _legacy_json(root, "project.json", json.loads(root.read_text("project.json")))
     store.save(Episode(
         episode_id=_EPISODE, project_id=_PROJECT, number=1, duration_target_sec=1,
         shot_ids=list(_SHOTS),
     ), expected_version=0)
-    store.create(CameraProfile(camera_id="room-rig", profile_name="Room rig"))
+    store.create(CameraProfile(
+        camera_id="room-rig", profile_name="Room rig", fps=12,
+        storage_resolution=(64, 48), display_aspect_ratio="4:3",
+    ))
+    store.save(PostProfile(
+        name="dvr-2005", semver="1.0.0", output_fps=12,
+        storage_resolution=(64, 48), sample_aspect_ratio="1/1",
+        encode=PostProfileEncode(
+            codec="libx264", preset="fast", crf=30, pix_fmt="yuv420p", threads=1,
+        ),
+    ), expected_version=0)
     location = Location(location_id="room")
     store.create(location)
     store.revise(location.model_copy(update={**location.next_version(), "scene_look": "low_key"}),
@@ -194,6 +210,18 @@ def _setup(tmp_path: Path, cut_bytes: bytes, *, intended_audio: bool = True) -> 
             content_sha256=_digest(cut_bytes), engine_id="BLENDER_EEVEE",
             engine_build="fixture-build", camera_profile_id="room-rig", camera_profile_version=1,
         ), expected_version=0)
+        degraded = f"post/{shot_id}/v0001/degraded.mp4"
+        root.write_bytes(degraded, cut_bytes)
+        shot = store.load(Shot, shot_id, episode_id=_EPISODE)
+        _camera, _base, current_spec = derive_postprofile_spec_for_shot(store, shot)
+        store.append_shot_output(ShotOutput(
+            output_id=f"degraded-{shot_id}", episode_id=_EPISODE, shot_id=shot_id,
+            record_version=1, kind=ShotOutputKind.DEGRADED, relative_path=degraded,
+            content_sha256=_digest(cut_bytes), profile_semver="1.0.0",
+            filter_graph_hash="a" * 64,
+            postprofile_spec_sha256=postprofile_spec_sha256(current_spec),
+            pinned_binaries={"ffmpeg": "fixture-build"}, frame_count=6, output_fps=12,
+        ), expected_version=1)
 
     timeline = Timeline(
         episode_id=_EPISODE,
@@ -219,6 +247,7 @@ def _setup(tmp_path: Path, cut_bytes: bytes, *, intended_audio: bool = True) -> 
         content_sha256=_digest(cut_bytes), delivery_profile="dvr-2005", output_fps=12,
         storage_resolution=(64, 48), sample_aspect_ratio="1/1", ffmpeg_identity="fixture",
     )
+    cut = bind_cut_receipt(store, cut)
     store.append_episode_output(cut, expected_version=0)
     _legacy_json(root, _CUT_LEDGER, json.loads(root.read_text(_CUT_LEDGER)))
     store.save(Review(
@@ -331,8 +360,11 @@ def test_api_exports_a_project_that_reopens_after_relocation(tmp_path: Path) -> 
         approved = reopened.load(Shot, shot_id, episode_id=_EPISODE, version=1)
         assert approved.status == ShotStatus.APPROVED
         assert approved.approval_review_id == f"review-{shot_id}"
-        master, = reopened.list_shot_outputs(shot_id, episode_id=_EPISODE)
+        shot_outputs = reopened.list_shot_outputs(shot_id, episode_id=_EPISODE)
+        master = next(output for output in shot_outputs if output.kind is ShotOutputKind.MASTER)
+        degraded = next(output for output in shot_outputs if output.kind is ShotOutputKind.DEGRADED)
         assert master.content_sha256 == _digest(package_files[master.relative_path])
+        assert degraded.content_sha256 == _digest(package_files[degraded.relative_path])
         attempt = Path(master.relative_path).parent.as_posix()
         for name in ("scene.blend", "worker.py"):
             relative = f"{attempt}/{name}"
@@ -373,6 +405,43 @@ def test_export_rejects_inconsistent_requests_without_a_bundle(tmp_path: Path, f
     else:
         assert response.status_code in {400, 404, 409, 422}, response.text
         assert "missing_adapter" not in response.text
+    assert _read_files(fixture.root) == before
+
+
+def test_export_rejects_a_retained_cut_sidecar_at_a_private_reference_path(
+    tmp_path: Path,
+) -> None:
+    fixture = _setup(tmp_path, b"registered local cut fixture")
+    cut_bytes = fixture.root.read_bytes(fixture.cut.relative_path)
+    relative = "episodes/ep1/outputs/cuts/unselected-cut.mp4"
+    fixture.root.write_bytes(relative, cut_bytes)
+    sidecar = json.loads(fixture.root.read_text(fixture.cut.input_manifest_path))
+    sidecar.update({
+        "cut_output_id": "unselected-cut",
+        "cut_path": relative,
+        "cut_sha256": _digest(cut_bytes),
+    })
+    sidecar_bytes = (
+        json.dumps(sidecar, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    ).encode("utf-8")
+    fixture.root.write_bytes(_REFERENCE_ASSET, sidecar_bytes)
+    unselected = fixture.cut.model_copy(update={
+        "output_id": "unselected-cut",
+        "relative_path": relative,
+        "content_sha256": _digest(cut_bytes),
+        "input_manifest_path": _REFERENCE_ASSET,
+        "input_manifest_sha256": _digest(sidecar_bytes),
+    })
+    fixture.store.append_episode_output(
+        unselected,
+        expected_version=len(fixture.store.list_episode_outputs(_EPISODE)),
+    )
+    before = _read_files(fixture.root)
+
+    response = fixture.export()
+
+    assert response.status_code in {400, 409, 422}, response.text
+    assert "private reference" in response.text
     assert _read_files(fixture.root) == before
 
 
