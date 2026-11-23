@@ -76,6 +76,25 @@ file list. **Test author:** only a new `tests/adapters/tts/test_weight_pins_cont
 injected pin table; plus one test that the real table has the R1 published values).
 **Do not touch:** `spikes/**`, the weights themselves.
 
+## Verified (2026-11-22)
+
+- **Real GPU take.** On the `_work/cf_real` scratch project, a take generated with
+  verification on completed in 136 s end to end; the scratch per-shot GPU-minute ceiling
+  was raised because the copied shot had already spent 134 minutes. The GenerationRun's
+  `tool_version` ends in `weights sha256
+  856510dabd8007753fd647d7169bc1752378f96d930f6db672672af84c5bda32`, the real table's
+  digest.
+- **Cold verification.** It measured 14.7 s for 8.9 GB, inside the GPU lease, against the
+  300 s startup allowance.
+- **Pin list.** It has 22 entries. The review proposed unpinning Qwen's
+  `added_tokens.json` and `special_tokens_map.json`. That was rejected: transformers'
+  `from_pretrained` still opens `special_tokens_map.json` when present, and an extra pin
+  can only fail closed.
+- **Accepted limits.**
+  - A cached file can be swapped while keeping its size and mtime.
+  - Files can change between verification and the worker loading them.
+  - The symlink-rejection tests skip on this account, which lacks the symlink privilege.
+
 ## Done when
 
 Every requirement has a test; the full suite passes; ruff clean against `main`; one real
