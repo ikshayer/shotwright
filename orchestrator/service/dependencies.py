@@ -33,6 +33,16 @@ from orchestrator.platform.containment import ContainmentError
 from orchestrator.platform.ffmpeg_identity import normalize_ffmpeg_identity
 from orchestrator.store.json_store import ProjectStore, RecordNotFound, VersionConflict
 
+DEFAULT_OVERLAY_FONT_PATH = (
+    Path(__file__).resolve().parents[1] / "assets" / "fonts" / "DejaVuSansMono.ttf"
+)
+DEFAULT_OVERLAY_FONT_LICENSE_PATH = (
+    Path(__file__).resolve().parents[1] / "assets" / "fonts" / "LICENSE"
+)
+DEFAULT_OVERLAY_FONT_SHA256 = "b4a6c3e4faab8773f4ff761d56451646409f29abedd68f05d38c2df667d3c582"
+DEFAULT_OVERLAY_FONT_RELATIVE = "assets/fonts/overlay.ttf"
+DEFAULT_OVERLAY_FONT_PROJECT_LICENSE = "assets/fonts/LICENSE-DejaVu.txt"
+
 _ENTITY_TYPES = {"Script": Script, "Location": Location, "CameraProfile": CameraProfile, "Shot": Shot}
 
 
@@ -150,15 +160,19 @@ def _shots(store: ProjectStore, episode_ids: Iterable[str]) -> list[Shot]:
 def _camera_profile_overlay_fit(
     store: ProjectStore, camera: CameraProfile, *, ffmpeg_exe: Path | str,
 ) -> dict[str, Any]:
-    """Check in-recording overlays for existing Shots that use ``camera``."""
+    """Check recording overlays at storage size and playback clocks at cut size."""
     from orchestrator.adapters.postprofile.overlay_fit import (
         OverlayFitError,
+        has_on_playback_overlays,
         has_in_recording_overlays,
         validate_in_recording_overlays,
+        validate_on_playback_overlays,
     )
     from orchestrator.service.compose import (
+        compose_post_profile_spec,
         derive_postprofile_spec_for_shot,
     )
+    from orchestrator.service.runner import postprofile_spec_from_camera
 
     notes: list[str] = []
     checked: list[str] = []
@@ -168,11 +182,20 @@ def _camera_profile_overlay_fit(
             "camera_id_text", "clock_epoch", "clock_format", "fontsize", "x", "y", "placement",
         )
     )
+    active_playback_overlay = camera.overlay_model.placement == "on_playback"
+    try:
+        default_profile = compose_post_profile_spec(store)
+        cut_resolution = default_profile.storage_resolution
+    except (RecordNotFound, ValueError):
+        default_profile = None
+        cut_resolution = None
+    matching_shots = 0
     for episode_id in store.episode_directories():
         for shot_id in store.ids(Shot, episode_id=episode_id):
             shot = store.load(Shot, shot_id, episode_id=episode_id)
             if shot.camera_profile != camera.camera_id:
                 continue
+            matching_shots += 1
             try:
                 _resolved, base, derived = derive_postprofile_spec_for_shot(
                     store, shot, profile_override=camera,
@@ -190,7 +213,14 @@ def _camera_profile_overlay_fit(
                         "has no clock overlay"
                     )
                 continue
-            if not has_in_recording_overlays(derived):
+            recording_overlay = has_in_recording_overlays(derived)
+            playback_overlay = has_on_playback_overlays(derived)
+            if not recording_overlay and not playback_overlay:
+                if active_overlay_model:
+                    notes.append(
+                        f"Shot {shot.shot_id!r}: overlay fit undecidable because the derived "
+                        "PostProfile has no matching clock overlay stage"
+                    )
                 continue
             font_relative = base.identity.overlay.font_relative
             if not font_relative:
@@ -222,14 +252,31 @@ def _camera_profile_overlay_fit(
                 )
                 continue
             try:
-                validate_in_recording_overlays(
-                    derived,
-                    font_path,
-                    font_filter_path=font_relative,
-                    working_directory=store._root.path,
-                    ffmpeg_exe=ffmpeg_exe,
-                    duration_sec=shot.duration_sec,
-                )
+                if recording_overlay:
+                    validate_in_recording_overlays(
+                        derived,
+                        font_path,
+                        font_filter_path=font_relative,
+                        working_directory=store._root.path,
+                        ffmpeg_exe=ffmpeg_exe,
+                        duration_sec=shot.duration_sec,
+                    )
+                if playback_overlay:
+                    if cut_resolution is None:
+                        notes.append(
+                            f"Shot {shot.shot_id!r}: on_playback overlay fit undecidable because "
+                            "the project's cut resolution cannot be resolved"
+                        )
+                        continue
+                    validate_on_playback_overlays(
+                        derived,
+                        font_path,
+                        target_resolution=cut_resolution,
+                        font_filter_path=font_relative,
+                        working_directory=store._root.path,
+                        ffmpeg_exe=ffmpeg_exe,
+                        duration_sec=shot.duration_sec,
+                    )
             except OverlayFitError as exc:
                 raise JobError(JobErrorKind.INVALID_MANIFEST, str(exc), cause=exc) from exc
             except (OSError, ValueError) as exc:
@@ -239,6 +286,72 @@ def _camera_profile_overlay_fit(
                 )
                 continue
             checked.append(shot.shot_id)
+    if active_playback_overlay and matching_shots == 0:
+        if default_profile is None:
+            notes.append(
+                f"CameraProfile {camera.camera_id!r}: on_playback overlay fit undecidable because "
+                "the project's default PostProfile and cut resolution cannot be resolved"
+            )
+        else:
+            try:
+                derived = postprofile_spec_from_camera(camera, default_profile)
+            except (RecordNotFound, ValueError) as exc:
+                notes.append(
+                    f"CameraProfile {camera.camera_id!r}: on_playback overlay fit undecidable "
+                    f"because the project default PostProfile cannot derive its clock ({exc})"
+                )
+            else:
+                font_relative = (
+                    derived.identity.overlay.font_relative
+                    if derived.identity.overlay is not None else None
+                )
+                if not has_on_playback_overlays(derived):
+                    notes.append(
+                        f"CameraProfile {camera.camera_id!r}: on_playback overlay fit undecidable "
+                        "because the project default PostProfile has no matching clock stage"
+                    )
+                elif not font_relative:
+                    notes.append(
+                        f"CameraProfile {camera.camera_id!r}: on_playback overlay fit undecidable "
+                        "because the project default PostProfile has no font path"
+                    )
+                else:
+                    try:
+                        font_path = store._root.resolve(font_relative)
+                    except ContainmentError as exc:
+                        raise JobError(
+                            JobErrorKind.INVALID_MANIFEST,
+                            f"PostProfile font path {font_relative!r} is invalid: {exc}",
+                            cause=exc,
+                        ) from exc
+                    try:
+                        if not font_path.is_file():
+                            notes.append(
+                                f"CameraProfile {camera.camera_id!r}: on_playback overlay fit "
+                                f"undecidable because project font {font_relative!r} is missing"
+                            )
+                        elif cut_resolution is None:
+                            notes.append(
+                                f"CameraProfile {camera.camera_id!r}: on_playback overlay fit "
+                                "undecidable because the project's cut resolution cannot be resolved"
+                            )
+                        else:
+                            validate_on_playback_overlays(
+                                derived,
+                                font_path,
+                                target_resolution=cut_resolution,
+                                font_filter_path=font_relative,
+                                working_directory=store._root.path,
+                                ffmpeg_exe=ffmpeg_exe,
+                            )
+                    except OverlayFitError as exc:
+                        raise JobError(JobErrorKind.INVALID_MANIFEST, str(exc), cause=exc) from exc
+                    except (OSError, ValueError) as exc:
+                        notes.append(
+                            f"CameraProfile {camera.camera_id!r}: on_playback overlay fit "
+                            f"undecidable because project font {font_relative!r} could not be "
+                            f"measured ({exc})"
+                        )
     return {
         "status": "undecidable" if notes else "checked",
         "checked_shot_ids": sorted(set(checked)),
@@ -499,6 +612,9 @@ def revise_camera_profile(
     with store.command():
         _pending_error(store)
         store.validate_revision(revised, expected_version=expected_version)
+        # validate_revision checks a model_copy payload, but returns only the head and
+        # token. Revalidate into a typed instance before reading nested overlay fields.
+        revised = store.validate_entity_payload(revised)
         overlay_fit = _camera_profile_overlay_fit(store, revised, ffmpeg_exe=ffmpeg_exe)
         invalidated = _revise(store, revised, expected_version, store.episode_directories())
         return CameraProfileRevisionResult(invalidated, overlay_fit)
@@ -766,8 +882,73 @@ def _unmeasured_consumer_2002_defaults(*, ffmpeg_identity: str) -> tuple[CameraP
     return camera_profile, post_profile
 
 
+def _default_overlay_font_payload() -> tuple[bytes, bytes]:
+    font_bytes = DEFAULT_OVERLAY_FONT_PATH.read_bytes()
+    digest = hashlib.sha256(font_bytes).hexdigest()
+    if digest != DEFAULT_OVERLAY_FONT_SHA256:
+        raise ValueError(
+            "bundled DejaVu Sans Mono failed its pinned SHA-256 check: "
+            f"expected {DEFAULT_OVERLAY_FONT_SHA256}, got {digest}"
+        )
+    return font_bytes, DEFAULT_OVERLAY_FONT_LICENSE_PATH.read_bytes()
+
+
+def _write_default_overlay_font(store: ProjectStore, font_bytes: bytes, license_bytes: bytes) -> dict[str, str]:
+    root = store._root
+    files = (
+        (DEFAULT_OVERLAY_FONT_RELATIVE, font_bytes),
+        (DEFAULT_OVERLAY_FONT_PROJECT_LICENSE, license_bytes),
+    )
+    for relative, _data in files:
+        path = root.resolve(relative)
+        if path.exists():
+            existing = hashlib.sha256(root.read_bytes(relative)).hexdigest()
+            raise ValueError(
+                f"refusing to overwrite {relative}; existing SHA-256 is {existing}"
+            )
+
+    root.make_dir("assets/fonts")
+    for relative, data in files:
+        def write_exclusive(target: Path, payload: bytes = data) -> None:
+            with target.open("xb") as stream:
+                stream.write(payload)
+
+        try:
+            root.write_with(relative, write_exclusive)
+        except FileExistsError as exc:
+            existing = hashlib.sha256(root.read_bytes(relative)).hexdigest()
+            raise ValueError(
+                f"refusing to overwrite {relative}; existing SHA-256 is {existing}"
+            ) from exc
+
+    installed_font = root.read_bytes(DEFAULT_OVERLAY_FONT_RELATIVE)
+    installed_license = root.read_bytes(DEFAULT_OVERLAY_FONT_PROJECT_LICENSE)
+    digest = hashlib.sha256(installed_font).hexdigest()
+    if digest != DEFAULT_OVERLAY_FONT_SHA256:
+        raise ValueError(
+            f"installed overlay font failed its pinned SHA-256 check: expected "
+            f"{DEFAULT_OVERLAY_FONT_SHA256}, got {digest}"
+        )
+    if installed_license != license_bytes:
+        raise ValueError("installed DejaVu Sans Mono licence does not match the bundled licence")
+    return {
+        "font_relative": DEFAULT_OVERLAY_FONT_RELATIVE,
+        "font_sha256": digest,
+        "license_relative": DEFAULT_OVERLAY_FONT_PROJECT_LICENSE,
+    }
+
+
+def install_default_overlay_font(store: ProjectStore) -> dict[str, str]:
+    """Install the pinned default font into an existing project without replacing files."""
+    font_bytes, license_bytes = _default_overlay_font_payload()
+    with store.command():
+        store.load(Project)
+        return _write_default_overlay_font(store, font_bytes, license_bytes)
+
+
 def create_project(store: ProjectStore, project: Project) -> Project:
     """Create a project with the measured DVR and unmeasured Low-light/Consumer pairs."""
+    font_bytes, license_bytes = _default_overlay_font_payload()
     camera_profile, post_profile = _measured_dvr_2005_defaults()
     low_light_camera, low_light_post = _unmeasured_low_light_bw_defaults(
         ffmpeg_identity=post_profile.pinned_binaries["ffmpeg"],
@@ -784,7 +965,7 @@ def create_project(store: ProjectStore, project: Project) -> Project:
         store.save(low_light_post, expected_version=0)
         store.create(consumer_camera)
         store.save(consumer_post, expected_version=0)
-        store._root.make_dir("assets/fonts")
+        _write_default_overlay_font(store, font_bytes, license_bytes)
         return project
 
 

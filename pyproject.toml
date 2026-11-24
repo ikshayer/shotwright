@@ -28,6 +28,7 @@ include = ["orchestrator*"]
 
 [tool.setuptools.package-data]
 "orchestrator.api" = ["mcp_resources/*.md"]
+"orchestrator" = ["assets/fonts/*.ttf", "assets/fonts/LICENSE"]
 
 [project.optional-dependencies]
 # httpx2 backs starlette.testclient (Starlette 1.x); without it the API tests fail to collect.

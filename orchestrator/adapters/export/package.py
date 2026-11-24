@@ -272,6 +272,12 @@ def _copy_file(source_root: ProjectRoot, destination_root: ProjectRoot, item: Sn
 
     def copy(target: Path) -> None:
         nonlocal count
+        if item.embedded_content is not None:
+            with target.open("xb") as staged:
+                staged.write(item.embedded_content)
+            count = len(item.embedded_content)
+            digest.update(item.embedded_content)
+            return
         with source.open("rb") as stream, target.open("xb") as staged:
             before = os.fstat(stream.fileno())
             while chunk := stream.read(1024 * 1024):
@@ -282,7 +288,7 @@ def _copy_file(source_root: ProjectRoot, destination_root: ProjectRoot, item: Sn
             if before.st_size != count or before.st_mtime_ns != after.st_mtime_ns or after.st_size != count:
                 raise _invalid(f"source artifact {item.relative_path!r} changed while being copied")
 
-    if not source.is_file():
+    if item.embedded_content is None and not source.is_file():
         raise JobError(JobErrorKind.CORRUPT_ARTIFACT, f"package source file is missing: {item.relative_path}")
     destination_root.write_with(item.relative_path, copy)
     sha256 = digest.hexdigest()

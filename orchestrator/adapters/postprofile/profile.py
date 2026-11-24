@@ -574,15 +574,6 @@ def validate_profile(
         require_camera_stage_in_recording(sharpen_stage, "sharpening")
 
     overlay_model = camera.overlay_model
-    if (
-        profile.overlay is not None
-        and profile.overlay.placement == "on_playback"
-        and profile.overlay.clock_format is not None
-    ):
-        raise ProfileValidationError(
-            "clock_format is ignored by the delivery builder; on_playback clock_format "
-            "is unsupported until step 3b implements playback compositing"
-        )
     if any(getattr(overlay_model, key) is not None for key in (
         "camera_id_text", "clock_epoch", "clock_format", "fontsize", "x", "y", "placement",
     )):
@@ -726,15 +717,7 @@ def validate_profile(
             raise ProfileValidationError(f"freeze at {freeze.start_frame} has no surviving previous frame") from exc
         output_to_source[position + 1:position + 1] = [held] * freeze.count
     predicted = len(output_to_source)
-    clock_steps: list[tuple[int, int]] = []
-    cumulative = 0
-    for drop in drops:
-        first_after = drop.start_frame + drop.count
-        boundary = next((out_idx for out_idx, src_idx in enumerate(output_to_source) if src_idx >= first_after), None)
-        if boundary is None:
-            raise ProfileValidationError("drop schedule has no clock boundary after the dropped interval")
-        cumulative += drop.count
-        clock_steps.append((boundary, cumulative))
+    clock_steps = list(schedule_clock_steps(events, decimated_frames=decimated))
 
     sar = profile.sample_aspect_ratio
     if sar not in ("1/1", "1:1", "12/11"):
@@ -812,6 +795,44 @@ def serialize_drawtext_filter(
     )
 
 
+def serialize_clock_drawtext_filter(
+    *,
+    font_path: str,
+    overlay: OverlaySpec,
+    x: int | str | None = None,
+    y: int | str | None = None,
+    fontsize: int | None = None,
+    clock_epoch: int | None = None,
+) -> str:
+    """Serialize a clock with the same legacy/two-layer escaping used by degradation."""
+    epoch = overlay.clock_epoch if clock_epoch is None else clock_epoch
+    position_x = overlay.x if x is None else x
+    position_y = overlay.y if y is None else y
+    size = overlay.fontsize if fontsize is None else fontsize
+    if overlay.clock_format is None and _LEGACY_DRAWTEXT_TEXT.fullmatch(overlay.camera_id):
+        # Preserve the quoted legacy graph bytes for values that need no escaping.
+        text = _escape_filter_value(overlay.camera_id)
+        content = f"{text}  %{{pts\\:gmtime\\:{epoch}}}"
+        quote_text = True
+    else:
+        text = _escape_drawtext_literal(overlay.camera_id)
+        if overlay.clock_format is None:
+            clock_expansion = f"%{{pts:gmtime:{epoch}}}"
+        else:
+            format_argument = overlay.clock_format.replace(":", r"\:")
+            clock_expansion = f"%{{pts:gmtime:{epoch}:{format_argument}}}"
+        content = f"{text}  {_escape_drawtext_layers(clock_expansion)}"
+        quote_text = False
+    return serialize_drawtext_filter(
+        font_path=font_path,
+        content=content,
+        x=position_x,
+        y=position_y,
+        fontsize=size,
+        quote_text=quote_text,
+    )
+
+
 def serialize_drawtext_literal_filter(
     *,
     font_path: str,
@@ -853,11 +874,74 @@ def serialize_drawtext_literal_filter(
     )
 
 
-def _clock_expr(steps: tuple[tuple[int, int], ...]) -> str:
+def schedule_clock_steps(
+    schedule: Iterable[ArtifactScheduleEntry], *, decimated_frames: int | None = None,
+) -> tuple[tuple[int, int], ...]:
+    """Derive schedule-clock jumps on the post-loop output frame index.
+
+    Schedule positions are post-decimation frame indices. ``select`` removes both
+    drop and freeze windows, then ``loop`` inserts held freeze frames before
+    ``clock_timebase`` evaluates N. Thus freezes move a later drop boundary, while
+    only drop windows add missing frame counts to the clock.
+    """
+    events = tuple(sorted(schedule, key=lambda event: (event.start_frame, event.type)))
+    frame_count = decimated_frames
+    if frame_count is None:
+        frame_count = max((event.start_frame + event.count for event in events), default=0) + 1
+    occupied: set[int] = set()
+    drops: list[ArtifactScheduleEntry] = []
+    freezes: list[ArtifactScheduleEntry] = []
+    for event in events:
+        indices = set(range(event.start_frame, event.start_frame + event.count))
+        if event.start_frame + event.count > frame_count:
+            raise ProfileValidationError(
+                f"{event.type} window {event.start_frame}-{event.start_frame + event.count - 1} "
+                f"falls outside decimated range 0-{frame_count - 1}"
+            )
+        if occupied & indices:
+            raise ProfileValidationError("drop/freeze schedule windows may not overlap")
+        occupied.update(indices)
+        (drops if event.type == "drop" else freezes).append(event)
+
+    output_to_source = [index for index in range(frame_count) if index not in occupied]
+    for freeze in freezes:
+        held = freeze.start_frame - 1
+        try:
+            position = output_to_source.index(held)
+        except ValueError as exc:
+            raise ProfileValidationError(
+                f"freeze at {freeze.start_frame} has no surviving previous frame"
+            ) from exc
+        output_to_source[position + 1:position + 1] = [held] * freeze.count
+
+    steps: list[tuple[int, int]] = []
+    cumulative = 0
+    for drop in drops:
+        first_after = drop.start_frame + drop.count
+        boundary = next(
+            (index for index, source_index in enumerate(output_to_source)
+             if source_index >= first_after),
+            None,
+        )
+        if boundary is None:
+            raise ProfileValidationError("drop schedule has no clock boundary after the dropped interval")
+        cumulative += drop.count
+        steps.append((boundary, cumulative))
+    return tuple(steps)
+
+
+def _clock_expr(steps: tuple[tuple[int, int], ...], frame_index: str = "N") -> str:
     expr = "0"
     for boundary, cumulative in steps:
-        expr = f"if(gte(N,{boundary}),{cumulative},{expr})"
+        expr = f"if(gte({frame_index},{boundary}),{cumulative},{expr})"
     return expr
+
+
+def clock_pts_expression(
+    schedule: Iterable[ArtifactScheduleEntry], *, frame_index: str = "N",
+) -> str:
+    """Return the same clock_timebase PTS expression for a caller-supplied frame index."""
+    return f"{frame_index}+{_clock_expr(schedule_clock_steps(schedule), frame_index)}"
 
 
 def _ffmpeg_number(value: int | float) -> str:
@@ -947,7 +1031,6 @@ def build_filter_graph(
             if font_path is None:
                 raise ProfileValidationError("drawtext stage requires a contained overlay font path")
             element = p.get("element", "clock")
-            quote_text = True
             if element == "clock":
                 if overlay.placement == "on_playback":
                     # Unreachable for a well-formed profile: the loop skips on_playback
@@ -957,30 +1040,20 @@ def build_filter_graph(
                         "clock overlay is placed on_playback but its stage is not marked "
                         "composite_stage='on_playback'"
                     )
-                if overlay.clock_format is None and _LEGACY_DRAWTEXT_TEXT.fullmatch(overlay.camera_id):
-                    # Preserve main's graph bytes (and so its filter_graph_hash) for text
-                    # main's serializer rendered correctly: characters it never escaped.
-                    text = _escape_filter_value(overlay.camera_id)
-                    content = f"{text}  %{{pts\\:gmtime\\:{overlay.clock_epoch}}}"
-                else:
-                    # Everything else (custom clock formats, and text main refused or
-                    # mis-serialized) takes the two-layer escaping.
-                    quote_text = False
-                    text = _escape_drawtext_literal(overlay.camera_id)
-                    if overlay.clock_format is None:
-                        clock_expansion = f"%{{pts:gmtime:{overlay.clock_epoch}}}"
-                    else:
-                        format_argument = overlay.clock_format.replace(":", r"\:")
-                        clock_expansion = (
-                            f"%{{pts:gmtime:{overlay.clock_epoch}:{format_argument}}}"
-                        )
-                    content = f"{text}  {_escape_drawtext_layers(clock_expansion)}"
-                x, y, fontsize = overlay.x, overlay.y, overlay.fontsize
+                parts.append(serialize_clock_drawtext_filter(
+                    font_path=font_path,
+                    overlay=overlay,
+                    x=overlay.x,
+                    y=overlay.y,
+                    fontsize=overlay.fontsize,
+                ))
+                continue
             elif element == "battery_rec":
                 indicator = overlay.indicator
                 if indicator is None:
                     raise ProfileValidationError("battery_rec drawtext stage requires an indicator specification")
                 content = _escape_filter_value("REC [||||]")
+                quote_text = True
                 x, y, fontsize = indicator.x, indicator.y, indicator.fontsize
             else:  # checked when the persisted profile is validated
                 raise ProfileValidationError(f"unsupported drawtext element {element!r}")

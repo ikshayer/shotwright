@@ -90,6 +90,7 @@ from orchestrator.service.dependencies import (
     create_location,
     create_post_profile,
     create_project,
+    install_default_overlay_font,
     draft_script,
     propose_shots,
     resume_invalidations,
@@ -242,6 +243,8 @@ class OperationContext:
             return projects
         if operation == "load_project":
             return self._store(data["project_id"]).load(Project).model_dump(mode="json")
+        if operation == "install_default_overlay_font":
+            return install_default_overlay_font(self._store(data["project_id"]))
         if operation == "create_camera_profile":
             profile = CameraProfile.model_validate(data["camera_profile"])
             _require_path_match(data, "camera_id", profile.camera_id)

@@ -29,7 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 from orchestrator.adapters.postprofile.profile import (
     OverlaySpec,
     ProfileValidationError,
-    _escape_filter_value,
+    serialize_clock_drawtext_filter,
 )
 from orchestrator.platform.containment import ProjectRoot
 
@@ -125,19 +125,19 @@ def build_delivery_filter(request: DeliveryRequest, *, font_path: str | None) ->
     if overlay is not None:
         if font_path is None:
             raise ProfileValidationError("overlay compositing requires a contained font path")
-        font = _escape_filter_value(font_path)
-        text = _escape_filter_value(overlay.camera_id)
         # CONTRACT S3/D4b: the clock is data, recomputed here from `clock_epoch` plus the
         # caller-stated offset into the recording. It is never carried through a
         # generative stage as pixels.
         epoch = overlay.clock_epoch + int(request.clock_offset_seconds)
-        content = f"{text}  %{{pts\\:gmtime\\:{epoch}}}"
         fontsize = request.fontsize or overlay.fontsize
-        parts.append(
-            f"drawtext=fontfile='{font}':text='{content}':"
-            f"x={overlay.x}:y={overlay.y}:fontsize={fontsize}:"
-            f"fontcolor=white:box=1:boxcolor=black@0.4"
-        )
+        parts.append(serialize_clock_drawtext_filter(
+            font_path=font_path,
+            overlay=overlay,
+            x=overlay.x,
+            y=overlay.y,
+            fontsize=fontsize,
+            clock_epoch=epoch,
+        ))
 
     return ",".join(parts)
 

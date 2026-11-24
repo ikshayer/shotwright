@@ -167,7 +167,10 @@ class PostProfileAdapter:
             raise JobError(JobErrorKind.MISSING_MODEL_ARTIFACT, f"master input is missing: {request.master_relative}",
                            shot_id=request.shot_id, run_id=request.run_id)
         if has_drawtext and (font is None or not font.is_file()):
-            raise JobError(JobErrorKind.MISSING_MODEL_ARTIFACT, f"overlay font is missing: {request.font_relative}",
+            raise JobError(
+                           JobErrorKind.MISSING_MODEL_ARTIFACT,
+                           f"overlay font is missing: {request.font_relative}; run "
+                           "install_default_overlay_font or set the PostProfile to a project-local font",
                            shot_id=request.shot_id, run_id=request.run_id)
         identity = normalize_ffmpeg_identity(
             self._capture([str(self.ffmpeg_exe), "-hide_banner", "-version"], request)

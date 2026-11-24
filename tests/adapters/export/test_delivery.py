@@ -126,4 +126,6 @@ def test_filter_values_are_escaped():
     graph = build_delivery_filter(
         _request(overlay=_overlay(camera_id="CAM:03,X")), font_path="f.ttf"
     )
-    assert "CAM\\:03\\,X" in graph
+    # Export now reuses the PostProfile two-layer drawtext serializer so playback
+    # escaping matches the in-recording overlay path exactly.
+    assert "CAM\\\\:03\\,X" in graph

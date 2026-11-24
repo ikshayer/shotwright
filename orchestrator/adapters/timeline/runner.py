@@ -13,9 +13,14 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Protocol
 
-from orchestrator.adapters.postprofile.profile import PostProfileSpec
+from orchestrator.adapters.postprofile.profile import (
+    OverlaySpec,
+    PostProfileSpec,
+    clock_pts_expression,
+    serialize_clock_drawtext_filter,
+)
 from orchestrator.domain.entities import ShotOutput, ShotOutputKind, Timeline
-from orchestrator.platform.containment import ProjectRoot
+from orchestrator.platform.containment import ContainmentError, ProjectRoot
 from orchestrator.platform.errors import JobError, JobErrorKind
 from orchestrator.platform.ffmpeg_identity import normalize_ffmpeg_identity
 from orchestrator.platform.settings import Settings
@@ -79,6 +84,8 @@ def build_assembly_command(
     media_info: Mapping[str, MediaInfo],
     source_paths: Mapping[str, Path],
     profile: PostProfileSpec,
+    shot_profiles: Mapping[str, PostProfileSpec] | None = None,
+    clock_offset_seconds: float = 0.0,
     output: Path,
     font_path: Path | None = None,
     card_text_files: Mapping[int, tuple[Path, int]] | None = None,
@@ -93,6 +100,8 @@ def build_assembly_command(
         raise _invalid("Timeline.audio_tracks is out of scope; episode audio is planned for Phase 2")
     if not timeline.entries:
         raise _invalid(f"Timeline for episode {timeline.episode_id!r} has no entries")
+    if not math.isfinite(clock_offset_seconds) or clock_offset_seconds < 0:
+        raise _invalid("clock_offset_seconds must be finite and nonnegative")
 
     segments: list[_Segment] = []
     cursor = Fraction(0)
@@ -174,6 +183,41 @@ def build_assembly_command(
         if segment.kind == "shot":
             assert segment.media is not None and segment.shot_id is not None
             chain.extend(_conform_filters(segment.media, width, height, target_sar))
+            shot_profile = (shot_profiles or {}).get(segment.shot_id)
+            if shot_profile is not None and _on_playback_overlay(shot_profile) is not None:
+                overlay = _on_playback_overlay(shot_profile)
+                assert overlay is not None
+                if output_receipt.frame_count is None or output_receipt.frame_count < 1:
+                    raise _invalid(
+                        f"Shot {segment.shot_id!r} DEGRADED receipt has no positive frame_count; "
+                        "cannot map its on_playback clock through EOF"
+                    )
+                font_relative = (
+                    shot_profile.identity.overlay.font_relative
+                    if shot_profile.identity.overlay is not None else None
+                )
+                if not font_relative:
+                    raise _invalid(
+                        f"Shot {segment.shot_id!r} on_playback clock has no project font; "
+                        "run install_default_overlay_font or set a licensed font_relative"
+                    )
+                chain.extend(_playback_clock_filters(
+                    shot_profile,
+                    source_rate=segment.media.frame_rate,
+                    cut_rate=Fraction(fps, 1),
+                    source_frame_count=output_receipt.frame_count,
+                    clock_offset_seconds=clock_offset_seconds,
+                ))
+                chain.append(serialize_clock_drawtext_filter(
+                    font_path=font_relative,
+                    overlay=overlay,
+                    x=overlay.x,
+                    y=overlay.y,
+                    fontsize=overlay.fontsize,
+                ))
+                # concat requires every input segment to start at PTS zero. Restore a
+                # cut-local timebase after drawtext has consumed the schedule timebase.
+                chain.extend((f"settb=1/{fps}", "setpts=N"))
         else:
             chain.append(f"setsar={_ratio_text(target_sar)}")
             if segment.kind == "card":
@@ -241,6 +285,60 @@ def _conform_filters(
     return filters
 
 
+def _on_playback_overlay(profile: PostProfileSpec) -> OverlaySpec | None:
+    overlay = profile.overlay
+    return overlay if overlay is not None and overlay.placement == "on_playback" else None
+
+
+def _playback_clock_filters(
+    profile: PostProfileSpec,
+    *,
+    source_rate: Fraction,
+    cut_rate: Fraction,
+    source_frame_count: int,
+    clock_offset_seconds: float,
+) -> list[str]:
+    """Map each conformed segment frame back to clock_timebase's degraded frame index."""
+    expected_source_rate = Fraction(profile.output_fps, 1)
+    if source_rate != expected_source_rate:
+        raise _invalid(
+            f"Shot clock source rate {_ratio_text(source_rate)} does not match its derived "
+            f"PostProfile output rate {profile.output_fps}; cannot reproduce clock_timebase"
+        )
+    if source_rate == cut_rate:
+        local_source_index = "N"
+    else:
+        ratio = source_rate / cut_rate
+        # The fps filter holds each source frame until the next source timestamp,
+        # so output frame N uses floor(N * source_rate / cut_rate). Nearest-frame
+        # rounding advances the clock before FFmpeg advances the video (for example
+        # output frame 23 at 12 -> 24 fps).
+        selected = (
+            f"floor(N*{ratio.numerator}/{ratio.denominator})"
+        )
+        # fps holds the final available frame at EOF. The receipt's frame count is
+        # authoritative here; duration-based estimates can be off by one frame.
+        local_source_index = f"min({source_frame_count - 1},max(0,{selected}))"
+    offset = _format_seconds(Fraction(str(clock_offset_seconds)))
+    global_source_index = (
+        f"({local_source_index}+({offset}*{source_rate.numerator}/{source_rate.denominator}))"
+    )
+    schedule_pts = clock_pts_expression(
+        profile.artifact_schedule,
+        frame_index=global_source_index,
+    )
+    # Keep the entire PTS expression in the numerator. Without these inner
+    # parentheses FFmpeg's multiplication precedence scales only the drop
+    # correction, treating the frame index itself as seconds.
+    seconds = (
+        f"(({schedule_pts})*{source_rate.denominator}/{source_rate.numerator})"
+    )
+    return [
+        "settb=1/1000000",
+        f"setpts='round({seconds}*1000000)'",
+    ]
+
+
 class TimelineAssembler:
     """Probe, conform, encode, and hash a cut while FFmpeg stays supervised."""
 
@@ -268,6 +366,8 @@ class TimelineAssembler:
         timeline: Timeline,
         shot_outputs: Mapping[str, ShotOutput],
         profile: PostProfileSpec,
+        shot_profiles: Mapping[str, PostProfileSpec] | None = None,
+        clock_offset_seconds: float = 0.0,
         output_relative: str,
         log_relative: str,
         font_relative: str | None = None,
@@ -283,6 +383,8 @@ class TimelineAssembler:
         )
         if not math.isfinite(budget) or budget <= 0:
             raise _invalid("timeline assembly budget must be a finite positive number")
+        if not math.isfinite(clock_offset_seconds) or clock_offset_seconds < 0:
+            raise _invalid("clock_offset_seconds must be finite and nonnegative")
         deadline = self.clock() + budget
         output_path = self.root.resolve(output_relative)
         log_path = self.root.resolve(log_relative)
@@ -291,6 +393,54 @@ class TimelineAssembler:
         if log_path.exists():
             raise _invalid(f"episode FFmpeg log already exists: {log_relative}")
         font_path = self._font_path(font_relative, validated, profile)
+        shot_profiles = shot_profiles or {}
+        shot_durations: dict[str, float] = {}
+        for entry in validated.entries:
+            if entry.type != "shot" or not entry.ref:
+                continue
+            shot_durations[entry.ref] = max(shot_durations.get(entry.ref, 0.0), entry.duration_sec)
+        for shot_id, duration_sec in shot_durations.items():
+            shot_profile = shot_profiles.get(shot_id)
+            if shot_profile is None or _on_playback_overlay(shot_profile) is None:
+                continue
+            overlay_record = shot_profile.identity.overlay
+            font_relative = overlay_record.font_relative if overlay_record is not None else None
+            if not font_relative:
+                raise _invalid(
+                    f"Shot {entry.ref!r} on_playback clock has no project font; "
+                    "run install_default_overlay_font or set a licensed font_relative"
+                )
+            try:
+                shot_font = self.root.resolve(font_relative)
+            except ContainmentError as exc:
+                raise _invalid(f"Shot {shot_id!r} overlay font path is invalid: {exc}") from exc
+            if not shot_font.is_file():
+                raise _invalid(
+                    f"Shot {shot_id!r} overlay font is missing: {font_relative}; run "
+                    "install_default_overlay_font or set a licensed font_relative"
+                )
+            try:
+                from orchestrator.adapters.postprofile.overlay_fit import (
+                    OverlayFitError,
+                    validate_on_playback_overlays,
+                )
+
+                validate_on_playback_overlays(
+                    shot_profile,
+                    shot_font,
+                    target_resolution=profile.storage_resolution,
+                    font_filter_path=font_relative,
+                    working_directory=self.root.path,
+                    ffmpeg_exe=self.ffmpeg_exe,
+                    duration_sec=duration_sec,
+                    clock_offset_seconds=clock_offset_seconds,
+                )
+            except OverlayFitError as exc:
+                raise _invalid(str(exc)) from exc
+            except (OSError, ValueError) as exc:
+                raise _invalid(
+                    f"Shot {shot_id!r} on_playback overlay fit is undecidable: {exc}"
+                ) from exc
         resolved_card_files: dict[int, tuple[Path, int]] = {}
         for index, item in (card_text_files or {}).items():
             if type(index) is not int or index < 0 or index >= len(validated.entries) or validated.entries[index].type != "card":
@@ -328,6 +478,7 @@ class TimelineAssembler:
             command = build_assembly_command(
                 self.ffmpeg_exe, timeline=validated, shot_outputs=shot_outputs,
                 media_info=media, source_paths=source_paths, profile=profile,
+                shot_profiles=shot_profiles, clock_offset_seconds=clock_offset_seconds,
                 output=path, font_path=font_path, card_text_files=resolved_card_files,
             )
             command_box.append(command)

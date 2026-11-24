@@ -1290,11 +1290,6 @@ def postprofile_spec_from_camera(camera: CameraProfile, spec: PostProfileSpec) -
 
     if "overlay_model" in tagged:
         overlay_model = camera.overlay_model
-        if overlay_model.placement == "on_playback" and overlay_model.clock_format is not None:
-            raise ProfileValidationError(
-                "CameraProfile.overlay_model.clock_format is ignored by the delivery builder; "
-                "on_playback clock_format is unsupported until step 3b implements playback compositing"
-            )
         if spec.overlay is None and any(
             getattr(overlay_model, name) is not None
             for name in ("camera_id_text", "clock_epoch", "clock_format", "fontsize", "x", "y", "placement")

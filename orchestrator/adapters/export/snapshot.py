@@ -33,7 +33,12 @@ from orchestrator.domain.entities import (
 )
 from orchestrator.platform.containment import ContainmentError
 from orchestrator.platform.errors import JobError, JobErrorKind
-from orchestrator.service.dependencies import validated_cascades
+from orchestrator.service.dependencies import (
+    DEFAULT_OVERLAY_FONT_PROJECT_LICENSE,
+    DEFAULT_OVERLAY_FONT_LICENSE_PATH,
+    DEFAULT_OVERLAY_FONT_SHA256,
+    validated_cascades,
+)
 from orchestrator.store.json_store import ProjectStore
 
 E = TypeVar("E", bound=Entity)
@@ -64,6 +69,7 @@ _ADMIN_DIRS = frozenset({
 class SnapshotFile:
     relative_path: str
     expected_sha256: str | None = None
+    embedded_content: bytes | None = None
 
 
 def plan_snapshot(
@@ -75,7 +81,10 @@ def plan_snapshot(
         snapshot.cascades()
         snapshot.collect()
         for item in extra_files:
-            snapshot.add(item.relative_path, item.expected_sha256)
+            if item.embedded_content is None:
+                snapshot.add(item.relative_path, item.expected_sha256)
+            else:
+                snapshot.add_content(item.relative_path, item.embedded_content)
     except (ContainmentError, OSError, ValueError) as exc:
         raise _invalid(f"cannot read portable project snapshot: {exc}", cause=exc) from exc
     return tuple(snapshot.files[path] for path in sorted(snapshot.files))
@@ -182,7 +191,25 @@ class _Snapshot:
         self.records(Review, "reviews")
         for profile in self.records(PostProfile, "post_profiles"):
             if profile.overlay is not None and profile.overlay.font_relative is not None:
-                self.add(profile.overlay.font_relative)
+                font_relative = profile.overlay.font_relative
+                font_sha256 = hashlib.sha256(self.root.read_bytes(font_relative)).hexdigest()
+                self.add(font_relative, font_sha256)
+                if font_sha256 == DEFAULT_OVERLAY_FONT_SHA256:
+                    license_bytes = DEFAULT_OVERLAY_FONT_LICENSE_PATH.read_bytes()
+                    license_path = self.root.resolve(DEFAULT_OVERLAY_FONT_PROJECT_LICENSE)
+                    if license_path.is_file():
+                        existing_license = self.root.read_bytes(DEFAULT_OVERLAY_FONT_PROJECT_LICENSE)
+                        if existing_license != license_bytes:
+                            raise _invalid(
+                                f"project font licence {DEFAULT_OVERLAY_FONT_PROJECT_LICENSE!r} "
+                                "conflicts with the bundled DejaVu Sans Mono licence"
+                            )
+                        self.add(
+                            DEFAULT_OVERLAY_FONT_PROJECT_LICENSE,
+                            hashlib.sha256(license_bytes).hexdigest(),
+                        )
+                    else:
+                        self.add_content(DEFAULT_OVERLAY_FONT_PROJECT_LICENSE, license_bytes)
         self.records(AudioPostProfile, "audio_post_profiles")
         for stem in stems:
             self.audio(stem)
@@ -358,6 +385,20 @@ class _Snapshot:
         if digest is not None and existing_hash is not None and digest != existing_hash:
             raise _invalid(f"conflicting SHA-256 receipts for source package file {relative!r}")
         self.files[normalized] = SnapshotFile(normalized, digest or existing_hash)
+        return normalized
+
+    def add_content(self, relative: str, content: bytes) -> str:
+        """Add package-only bytes without writing them into the source project."""
+        normalized, _path = self.resolve(relative)
+        reason = self.reason_excluded(normalized)
+        if reason is not None:
+            raise _invalid(f"required package file {relative!r} is excluded as {reason}")
+        digest = hashlib.sha256(content).hexdigest()
+        key = normalized.casefold()
+        prior_name = self.casefolded.setdefault(key, normalized)
+        if prior_name != normalized:
+            raise _invalid(f"source package paths {prior_name!r} and {normalized!r} collide")
+        self.files[normalized] = SnapshotFile(normalized, digest, content)
         return normalized
 
     def audio(self, stem: str) -> None:

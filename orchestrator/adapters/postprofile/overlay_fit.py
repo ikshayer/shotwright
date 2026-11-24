@@ -1,4 +1,4 @@
-"""FFmpeg drawtext measurement and frame-fit checks for in-recording overlays."""
+"""FFmpeg drawtext measurement and frame-fit checks for recorded and playback overlays."""
 
 from __future__ import annotations
 
@@ -120,6 +120,18 @@ def has_in_recording_overlays(profile: PostProfileSpec) -> bool:
     return False
 
 
+def has_on_playback_overlays(profile: PostProfileSpec) -> bool:
+    """Whether the composed spec places its clock in the playback/cut layer."""
+    return any(
+        stage.filter == "drawtext"
+        and stage.params.get("element", "clock") == "clock"
+        and stage.composite_stage == "on_playback"
+        and profile.overlay is not None
+        and profile.overlay.placement == "on_playback"
+        for stage in profile.identity.stages
+    )
+
+
 def validate_in_recording_overlays(
     profile: PostProfileSpec,
     font_path: Path | str,
@@ -128,26 +140,34 @@ def validate_in_recording_overlays(
     working_directory: Path | str | None = None,
     ffmpeg_exe: Path | str = "ffmpeg",
     duration_sec: float | None = None,
+    clock_offset_seconds: float = 0.0,
+    _placement: str = "in_recording",
+    _target_resolution: tuple[int, int] | None = None,
 ) -> None:
-    """Refuse every in-recording clock or REC box that leaves the storage frame."""
-    if not has_in_recording_overlays(profile):
+    """Refuse an overlay that leaves its storage or explicitly supplied cut frame."""
+    has_overlays = (
+        has_in_recording_overlays(profile)
+        if _placement == "in_recording"
+        else has_on_playback_overlays(profile)
+    )
+    if not has_overlays:
         return
     overlay = profile.overlay
     if overlay is None:
-        raise OverlayFitError("in-recording drawtext has no PostProfile overlay settings")
+        raise OverlayFitError(f"{_placement} drawtext has no PostProfile overlay settings")
     path = Path(font_path)
     if not path.is_file():
         raise _font_error(path, "font file is missing")
 
-    width, height = profile.storage_resolution
+    width, height = _target_resolution or profile.storage_resolution
     overlays: list[_Overlay] = []
     for stage in profile.identity.stages:
-        if stage.filter != "drawtext" or stage.composite_stage == "on_playback":
+        if stage.filter != "drawtext" or (stage.composite_stage or "in_recording") != _placement:
             continue
         element = stage.params.get("element", "clock")
         params = stage.params
         if element == "clock":
-            if overlay.placement == "on_playback":
+            if overlay.placement != _placement:
                 continue
             camera_id = overlay.camera_id
             clock_format = overlay.clock_format
@@ -160,6 +180,7 @@ def validate_in_recording_overlays(
                 duration_sec=duration_sec,
                 output_fps=profile.output_fps,
                 artifact_schedule=profile.artifact_schedule,
+                clock_offset_seconds=clock_offset_seconds,
             )
             overlays.append(_Overlay(
                 element="clock",
@@ -259,6 +280,7 @@ def validate_in_recording_overlays(
             duration_sec=duration_sec,
             output_fps=profile.output_fps,
             artifact_schedule=profile.artifact_schedule,
+            clock_offset_seconds=clock_offset_seconds,
         )
         request, (box_width, box_height), position_x, position_y, position_error = failure
         position = (
@@ -279,6 +301,31 @@ def validate_in_recording_overlays(
         )
 
 
+def validate_on_playback_overlays(
+    profile: PostProfileSpec,
+    font_path: Path | str,
+    *,
+    target_resolution: tuple[int, int],
+    font_filter_path: str | None = None,
+    working_directory: Path | str | None = None,
+    ffmpeg_exe: Path | str = "ffmpeg",
+    duration_sec: float | None = None,
+    clock_offset_seconds: float = 0.0,
+) -> None:
+    """Measure playback clocks at the cut resolution with FFmpeg before assembly."""
+    validate_in_recording_overlays(
+        profile,
+        font_path,
+        font_filter_path=font_filter_path,
+        working_directory=working_directory,
+        ffmpeg_exe=ffmpeg_exe,
+        duration_sec=duration_sec,
+        clock_offset_seconds=clock_offset_seconds,
+        _placement="on_playback",
+        _target_resolution=target_resolution,
+    )
+
+
 def _largest_text(value: int | None) -> str:
     return str(value) if value is not None else "none (no size from 6 through 96 fits)"
 
@@ -295,6 +342,7 @@ def _largest_fitting_size(
     duration_sec: float | None,
     output_fps: int,
     artifact_schedule: Sequence[Any],
+    clock_offset_seconds: float,
 ) -> int | None:
     """Return the largest size from 6 through 96 at which every candidate fits.
 
@@ -309,6 +357,7 @@ def _largest_fitting_size(
         ffmpeg_exe=ffmpeg_exe, font_filter_path=font_filter_path,
         working_directory=working_directory, duration_sec=duration_sec,
         output_fps=output_fps, artifact_schedule=artifact_schedule,
+        clock_offset_seconds=clock_offset_seconds,
     )
     def exhaustive() -> int | None:
         fits_by_size = sizes_fit(range(6, 97))
@@ -348,6 +397,7 @@ def _sizes_fit(
     duration_sec: float | None,
     output_fps: int,
     artifact_schedule: Sequence[Any],
+    clock_offset_seconds: float,
 ) -> dict[int, bool]:
     """Measure every candidate at each size (one batched FFmpeg pass) and report fit."""
     sizes = list(sizes)
@@ -363,6 +413,7 @@ def _sizes_fit(
                 duration_sec=duration_sec,
                 output_fps=output_fps,
                 artifact_schedule=artifact_schedule,
+                clock_offset_seconds=clock_offset_seconds,
             )
             if overlay.element == "clock"
             else list(overlay.text_candidates)
@@ -426,6 +477,7 @@ def _clock_candidates(
     duration_sec: float | None,
     output_fps: int,
     artifact_schedule: Sequence[Any],
+    clock_offset_seconds: float,
 ) -> list[str]:
     fmt = clock_format or "%Y-%m-%d %H:%M:%S"
     derivable = (
@@ -434,6 +486,8 @@ def _clock_candidates(
         and duration_sec >= 0
         and output_fps > 0
     )
+    if not math.isfinite(clock_offset_seconds) or clock_offset_seconds < 0:
+        raise OverlayFitError("clock_offset_seconds must be finite and nonnegative")
     offsets = {0}
     frame_count = 0
     if derivable:
@@ -457,9 +511,10 @@ def _clock_candidates(
         )
         samples: set[int] = set()
         for offset_frames in offsets:
-            first_second = math.floor(offset_frames / output_fps)
+            frame_offset_seconds = offset_frames / output_fps + clock_offset_seconds
+            first_second = math.floor(frame_offset_seconds)
             last_second = math.floor(
-                (frame_count - 1) / output_fps + offset_frames / output_fps
+                (frame_count - 1) / output_fps + frame_offset_seconds
             )
             samples.update(range(first_second, last_second + 1, step))
             samples.add(last_second)

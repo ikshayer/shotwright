@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
@@ -26,8 +27,13 @@ from orchestrator.domain.entities import (
     TimelineEntry,
 )
 from orchestrator.platform.errors import JobError, JobErrorKind
+from orchestrator.platform.containment import ContainmentError
 from orchestrator.platform.ffmpeg_identity import normalize_ffmpeg_identity
-from orchestrator.service.compose import current_degraded_output, compose_post_profile_spec
+from orchestrator.service.compose import (
+    compose_post_profile_spec,
+    current_degraded_output,
+    derive_postprofile_spec_for_shot,
+)
 from orchestrator.service.credits import collect_credits_for_shots
 from orchestrator.store.json_store import ProjectStore, RecordNotFound, VersionConflict
 
@@ -45,6 +51,8 @@ class TimelineEncoder(Protocol):
         budget_seconds: float | None = None,
         card_text_files: dict[int, tuple[str, int]] | None = None,
         narrative_duration_sec: float | None = None,
+        shot_profiles: dict[str, PostProfileSpec] | None = None,
+        clock_offset_seconds: float = 0.0,
     ) -> TimelineAssemblyResult: ...
 
 
@@ -87,6 +95,7 @@ def assemble_episode(
     budget_seconds: float | None = None,
     credit_card_duration_sec: float = 5.0,
     output_id: str | None = None,
+    clock_offset_seconds: float = 0.0,
 ) -> EpisodeOutput:
     """Persist the narrative cut and rights snapshot, encode appended credit cards, then receipt."""
     episode, episode_token = store.load_with_version(Episode, episode_id)
@@ -106,6 +115,8 @@ def assemble_episode(
     # Five seconds is a creator-facing presentation default, not a measured runtime limit.
     if not math.isfinite(credit_card_duration_sec) or credit_card_duration_sec <= 0:
         raise _invalid("credit_card_duration_sec must be finite and positive")
+    if not math.isfinite(clock_offset_seconds) or clock_offset_seconds < 0:
+        raise _invalid("clock_offset_seconds must be finite and nonnegative")
 
     # Keep the persisted Timeline narrative-only. Credit cards are an adapter render
     # extension over the exact selected Shot versions and never mutate that source.
@@ -120,6 +131,13 @@ def assemble_episode(
         selected_shots.append(store.load(
             Shot, shot_id, episode_id=episode_id, version=delivered.record_version,
         ))
+    shot_profiles = {
+        shot.shot_id: derive_postprofile_spec_for_shot(store, shot)[2]
+        for shot in selected_shots
+    }
+    playback_overlay_fonts = _playback_overlay_font_bindings(
+        store, selected_shots, shot_profiles=shot_profiles,
+    )
     credits = collect_credits_for_shots(store, selected_shots)
     if credits["publication_blockers"]:
         raise _invalid("episode has publication-blocking rights metadata: " + "; ".join(credits["publication_blockers"]))
@@ -224,6 +242,14 @@ def assemble_episode(
         "font_relative": font_relative,
         "budget_seconds": budget_seconds,
     }
+    if any(
+        shot_profile.overlay is not None
+        and shot_profile.overlay.placement == "on_playback"
+        for shot_profile in shot_profiles.values()
+    ):
+        encode_kwargs["shot_profiles"] = shot_profiles
+    if clock_offset_seconds:
+        encode_kwargs["clock_offset_seconds"] = clock_offset_seconds
     if card_text_files:
         encode_kwargs["card_text_files"] = card_text_files
         encode_kwargs["narrative_duration_sec"] = cut.total_duration_sec
@@ -233,14 +259,20 @@ def assemble_episode(
             JobErrorKind.CORRUPT_ARTIFACT,
             f"timeline encoder wrote {result.relative_path!r}; expected {output_relative!r}",
         )
+    if _playback_overlay_font_bindings(
+        store, selected_shots, shot_profiles=shot_profiles,
+    ) != playback_overlay_fonts:
+        raise _invalid("a playback overlay font changed during cut assembly; reassemble the cut")
     input_manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "episode_id": episode_id,
         "cut_output_id": output_id,
         "cut_path": result.relative_path,
         "cut_sha256": result.content_sha256,
         "timeline_store_version": timeline_token,
         "timeline_sha256": cut.content_sha256,
+        "clock_offset_seconds": clock_offset_seconds,
+        "playback_overlay_fonts": playback_overlay_fonts,
         "shot_outputs": [
             _shot_output_binding(shot_id, delivered)
             for shot_id, delivered in sorted(outputs.items())
@@ -358,6 +390,54 @@ def _shot_output_binding(shot_id: str, output: ShotOutput) -> dict[str, object]:
     }
 
 
+def _playback_overlay_font_bindings(
+    store: ProjectStore,
+    shots: Sequence[Shot],
+    *,
+    shot_profiles: dict[str, PostProfileSpec] | None = None,
+) -> list[dict[str, str]]:
+    """Bind the bytes used by each on-playback clock to a cut input manifest."""
+    from orchestrator.adapters.postprofile.overlay_fit import has_on_playback_overlays
+
+    bindings: list[dict[str, str]] = []
+    for shot in sorted(shots, key=lambda item: item.shot_id):
+        profile = (shot_profiles or {}).get(shot.shot_id)
+        if profile is None:
+            profile = derive_postprofile_spec_for_shot(store, shot)[2]
+        if not has_on_playback_overlays(profile):
+            continue
+        overlay = profile.identity.overlay
+        font_relative = overlay.font_relative if overlay is not None else None
+        if not font_relative:
+            raise _invalid(
+                f"Shot {shot.shot_id!r} on_playback overlay has no project font path"
+            )
+        try:
+            font_path = store._root.resolve(font_relative)
+            if not font_path.is_file():
+                raise _invalid(
+                    f"Shot {shot.shot_id!r} on_playback overlay font is missing: {font_relative}; "
+                    "run install_default_overlay_font or set a licensed font_relative"
+                )
+            font_sha256 = hashlib.sha256(store._root.read_bytes(font_relative)).hexdigest()
+        except ContainmentError as exc:
+            raise _invalid(
+                f"Shot {shot.shot_id!r} on_playback overlay font path is invalid: {exc}",
+                cause=exc,
+            ) from exc
+        except OSError as exc:
+            raise _invalid(
+                f"Shot {shot.shot_id!r} on_playback overlay font cannot be read: {font_relative}",
+                cause=exc,
+            ) from exc
+        bindings.append({
+            "shot_id": shot.shot_id,
+            "font_relative": font_relative,
+            "font_sha256": font_sha256,
+        })
+    return bindings
+
+
 def _write_cut_input_manifest(store: ProjectStore, relative: str, content: bytes) -> None:
     """Persist a new contained manifest without replacing an earlier receipt binding."""
     if store._root.resolve(relative).exists():
@@ -397,6 +477,18 @@ def validate_cut_input_manifest(
                 f"Shot {shot_id!r}; reassemble and approve the current cut"
             )
         shots.append(shot)
+    playback_overlay_fonts = _playback_overlay_font_bindings(store, shots)
+    if manifest["schema_version"] == 1:
+        if playback_overlay_fonts:
+            raise _invalid(
+                f"cut {cut.output_id!r} predates playback overlay dependencies; "
+                "reassemble it with assemble_cut"
+            )
+    elif manifest["playback_overlay_fonts"] != playback_overlay_fonts:
+        raise _invalid(
+            f"cut {cut.output_id!r} playback overlay font dependencies changed; "
+            "reassemble and approve the current cut"
+        )
     return tuple(shots), relative, digest
 
 
@@ -441,7 +533,6 @@ def _read_cut_input_manifest(
     if not isinstance(manifest, dict):
         raise _invalid(f"cut {cut.output_id!r} Shot input manifest must be a JSON object")
     identity = {
-        "schema_version": 1,
         "episode_id": cut.episode_id,
         "cut_output_id": cut.output_id,
         "cut_path": cut.relative_path,
@@ -449,10 +540,41 @@ def _read_cut_input_manifest(
         "timeline_store_version": cut.timeline_store_version,
         "timeline_sha256": cut.timeline_sha256,
     }
-    expected_fields = {*identity, "shot_outputs"}
+    schema_version = manifest.get("schema_version")
+    if type(schema_version) is not int:
+        raise _invalid(f"cut {cut.output_id!r} Shot input manifest has an invalid schema_version")
+    if schema_version == 1:
+        expected_fields = {"schema_version", *identity, "shot_outputs"}
+    elif schema_version == 2:
+        expected_fields = {
+            "schema_version", *identity, "shot_outputs", "clock_offset_seconds",
+            "playback_overlay_fonts",
+        }
+    else:
+        raise _invalid(f"cut {cut.output_id!r} Shot input manifest has an unsupported schema_version")
     if (set(manifest) != expected_fields
             or any(manifest.get(key) != value for key, value in identity.items())):
         raise _invalid(f"cut {cut.output_id!r} Shot input manifest does not match its receipt")
+    if schema_version == 2:
+        offset = manifest["clock_offset_seconds"]
+        if (type(offset) not in (int, float) or not math.isfinite(offset) or offset < 0):
+            raise _invalid(
+                f"cut {cut.output_id!r} Shot input manifest has an invalid clock_offset_seconds"
+            )
+        playback_fonts = manifest["playback_overlay_fonts"]
+        if (not isinstance(playback_fonts, list)
+                or any(not isinstance(row, dict) for row in playback_fonts)
+                or any(
+                    set(row) != {"shot_id", "font_relative", "font_sha256"}
+                    or not isinstance(row.get("shot_id"), str)
+                    or not isinstance(row.get("font_relative"), str)
+                    or not isinstance(row.get("font_sha256"), str)
+                    or re.fullmatch(r"[0-9a-f]{64}", row["font_sha256"]) is None
+                    for row in playback_fonts
+                )):
+            raise _invalid(
+                f"cut {cut.output_id!r} Shot input manifest has invalid playback_overlay_fonts"
+            )
     rows = manifest["shot_outputs"]
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         raise _invalid(f"cut {cut.output_id!r} Shot input manifest has invalid shot_outputs")

@@ -1567,13 +1567,13 @@ def test_a_noise_stage_using_one_parameter_family_is_accepted(params):
 
 # ---- 7: on_playback overlay with a clock_format -------------------------------------------
 
-def test_on_playback_overlay_with_clock_format_is_refused_until_step_3b():
-    def build():
-        camera = _camera(overlay_model={"placement": "on_playback", "clock_format": "%H:%M:%S"})
-        _checked(_derive(camera, overlay=True), camera)
-
-    message = _refused_message(build)
-    assert "playback" in message or "3b" in message
+def test_on_playback_overlay_with_clock_format_is_accepted_in_step_3b():
+    camera = _camera(overlay_model={"placement": "on_playback", "clock_format": "%H:%M:%S"})
+    derived = _derive(camera, overlay=True)
+    assert derived.overlay is not None
+    assert derived.overlay.placement == "on_playback"
+    assert derived.overlay.clock_format == "%H:%M:%S"
+    _checked(derived, camera)
 
 
 def test_on_playback_overlay_without_clock_format_is_still_accepted():

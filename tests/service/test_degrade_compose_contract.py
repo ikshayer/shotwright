@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 import orchestrator.service.compose as compose_module
-from orchestrator.adapters.postprofile.runner import DegradeRequest, PostProfileAdapter
+from orchestrator.adapters.postprofile.runner import DegradeRequest
 from orchestrator.domain.entities import (
     CameraProfile,
     Episode,
@@ -28,7 +28,6 @@ from orchestrator.domain.entities import (
 )
 from orchestrator.platform.containment import ProjectRoot
 from orchestrator.platform.errors import JobError, JobErrorKind
-from orchestrator.platform.settings import Settings
 from orchestrator.service.dependencies import create_project
 from orchestrator.store.json_store import ProjectStore, RecordNotFound
 
@@ -276,7 +275,7 @@ def test_degrade_composition_rejects_a_profile_without_its_font(
     ) in message, f"fontless profile error omitted the explicit repair: {message!r}"
 
 
-def test_new_project_reaches_adapter_missing_its_creator_supplied_font(tmp_path: Path) -> None:
+def test_new_project_installs_and_composes_its_default_font(tmp_path: Path) -> None:
     root = ProjectRoot(tmp_path)
     store = ProjectStore(root)
     project = create_project(store, Project(project_id="p1", title="New project"))
@@ -309,19 +308,13 @@ def test_new_project_reaches_adapter_missing_its_creator_supplied_font(tmp_path:
     assert profile.overlay is not None
     assert profile.overlay.font_relative == font_relative
     assert root.resolve("assets/fonts").is_dir()
-    assert not root.resolve(font_relative).exists()
+    assert root.resolve(font_relative).is_file()
 
     request = _compose(store, shot)
     assert isinstance(request, DegradeRequest), (
         f"new project's font path was rejected during composition: {request!r}"
     )
     assert request.font_relative == font_relative
-
-    with pytest.raises(JobError) as caught:
-        PostProfileAdapter(root, Settings(project_root=root.path)).degrade(request)
-
-    assert caught.value.kind is JobErrorKind.MISSING_MODEL_ARTIFACT
-    assert str(caught.value) == f"overlay font is missing: {font_relative}"
 
 
 def test_project_store_rejects_font_paths_outside_the_project_on_save_and_load(
