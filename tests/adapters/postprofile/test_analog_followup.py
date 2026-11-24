@@ -119,6 +119,44 @@ def test_pin_mismatch_names_the_build_script(tmp_path: Path) -> None:
 
 
 @analog_cases.needs_ffmpeg
+def test_slow_ntsc_transfer_below_thirty_fps_can_complete(
+    tmp_path: Path,
+) -> None:
+    lab = analog_cases._Lab(tmp_path / "project")
+    executable = Path(sys.executable).resolve()
+    settings = analog_cases._settings_with_pipe(lab.settings, executable)
+    request = lab.request(
+        analog_cases._settings_camera(),
+        run_id="slow-transfer",
+        pipe_pin=analog_cases._sha_pin(executable),
+    )
+    script = (
+        "import sys, time; data = sys.stdin.buffer.read(); time.sleep(1.25); "
+        "sys.stdout.buffer.write(data); sys.stdout.buffer.flush()"
+    )
+    children: list[subprocess.Popen[bytes]] = []
+
+    def popen(argv: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
+        if analog_cases._ntsc_command(argv):
+            child = subprocess.Popen([sys.executable, "-u", "-c", script], **kwargs)
+        else:
+            child = subprocess.Popen(argv, **kwargs)
+        children.append(child)
+        return child
+
+    adapter = PostProfileAdapter(lab.root, settings, popen=popen)
+    adapter.set_deadline(time.monotonic() + 15.0)
+    started_at = time.monotonic()
+    result = adapter.degrade(request)
+    elapsed = time.monotonic() - started_at
+
+    assert result.frame_count == 12
+    assert result.frame_count / elapsed < 30
+    assert lab.root.resolve(result.output_path).is_file()
+    assert all(child.poll() is not None for child in children)
+
+
+@analog_cases.needs_ffmpeg
 def test_exact_frame_transfer_leaves_finalization_to_deadline_and_retains_settings_provenance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -173,7 +211,7 @@ def test_exact_frame_transfer_leaves_finalization_to_deadline_and_retains_settin
         if finalization_checks == 3:
             return deadline + 1.0
         if finalization_checks:
-            # Jump past startup grace and the point where 12 frames would fall below 30 fps.
+            # Advance within the deadline so the still-running encoder reaches finalization.
             return max(time.monotonic(), deadline - 5.0)
         return time.monotonic()
 

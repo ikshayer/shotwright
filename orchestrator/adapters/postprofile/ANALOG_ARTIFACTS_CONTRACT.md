@@ -257,3 +257,42 @@ the selected PostProfile and uses the existing master. An authored PostProfile
 can still supply the pin in `pinned_binaries["ntsc-pipe"]`. If both supply a pin,
 the values must match. The effective PostProfile records the resolved pin. A pin
 alone leaves NTSC inactive.
+
+## Verification on a retained FFV1 master (2026-11-24)
+
+The creator approved using the 30 fps floor for a controlled 640×480 benchmark
+of the pinned single-threaded NTSC processor and x264 encoder. Use fixed RGB24
+frames, settings, and seed. Measure output frames per wall-clock second and
+compare the completed encodes by SHA-256 across two runs.
+
+The production pipeline uses its per-shot wall-clock deadline and cancellation
+to supervise all three children, including FFmpeg decoding the source and
+finalizing the output. A sustained frame-rate floor across source decoding and
+encoding has been removed. The retained FFV1 fixture supplied three output
+frames in 4.63 seconds, which tripped the previous 30 fps runtime guard.
+
+For real-media verification, run the existing 640×480 scratch camera through
+`degrade-media`. Confirm that the retained master and immutable PostProfile
+are preserved, that the completed receipt matches the measured output frame
+count and the pinned settings, and that the contact sheet is ready for creator review.
+Report the measured production wall time and frame rate independently of the
+controlled benchmark. Preserve the deadline, cancellation, and teardown
+regressions.
+
+The controlled benchmark used 300 `testsrc2` frames, the original spike's light VHS
+preset, and `libx264` Ultrafast at CRF 23 with one encoder thread. The pinned build
+processed 101.0 and 98.1 fps and produced the same MP4 SHA-256 in both runs. An
+exploratory run with a different RGB pattern, VHS settings, and Medium at CRF 18
+measured 13.68 fps. The 30 fps result applies to the specified benchmark setup.
+
+Production job `c62789ffefd74f8d97dc6fd6513ad41f` completed in 499.0 seconds.
+The three-process pipeline took 243.1 seconds, or 1.07 output frames per
+second. FFprobe counted 1,560 source frames at 60 fps over 26 seconds. The plan,
+receipt, and output probe agreed on 260 frames at 640×480, 10 fps, and 1:1 SAR.
+The retained master, its receipt, and the PostProfile passed byte and identity
+checks. The Shot remained at content version 1 and returned to `review`.
+The scratch run report and contact sheet are in `_work/cf_real_3c/`. The focused
+regression run passed all 88 tests.
+
+The creator watched the 26-second scratch output and confirmed that the NTSC
+look was right. This completes the visual check for step 3c.

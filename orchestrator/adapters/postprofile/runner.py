@@ -46,8 +46,6 @@ _NTSC_RS_COMMIT = "8cfc51014092a6dc1da5eb0217bb9ae6516b124e"
 _NTSC_RS_RELEASE_VERSION = "0.9.7"
 _NTSCRS_CRATE_VERSION = "0.1.2"
 _NTSC_PIPE_PROTOCOL_ERROR_EXIT_CODE = 2
-_NTSC_PIPE_MINIMUM_FPS = 30.0
-_NTSC_PIPE_STARTUP_GRACE_SECONDS = 5.0
 _ANALOG_X264_CODECS = frozenset({"libx264", "libx264rgb"})
 
 
@@ -534,8 +532,6 @@ class PostProfileAdapter:
                             "encoder": encoder_log_rel,
                         },
                         request=request, cancel=cancel, deadline=deadline,
-                        frame_bytes=width * height * 3,
-                        expected_frames=validated.predicted_frames,
                     ),
                 )
             except JobError as exc:
@@ -775,19 +771,14 @@ class PostProfileAdapter:
         request: DegradeRequest,
         cancel: Callable[[], bool] | None,
         deadline: float | None,
-        frame_bytes: int,
-        expected_frames: int,
     ) -> None:
         """Run the RGB pipe with owned children, drained stage logs, and bounded teardown."""
         processes: list[tuple[str, Any]] = []
         threads: list[threading.Thread] = []
         stream_errors: Queue[tuple[str, BaseException]] = Queue()
         stopping = threading.Event()
-        output_pump_done = threading.Event()
         log_streams: dict[str, Any] = {}
         handles: list[Any] = []
-        progress_lock = threading.Lock()
-        output_bytes = 0
         failure: BaseException | None = None
 
         try:
@@ -820,7 +811,6 @@ class PostProfileAdapter:
                 except OSError as exc:
                     raise _PipelineLaunchFailure(stage, command[0], exc) from exc
                 processes.append((stage, process))
-            pipeline_started_at = time.monotonic()
 
             by_stage = dict(processes)
 
@@ -833,17 +823,13 @@ class PostProfileAdapter:
                     if not stopping.is_set():
                         stream_errors.put((stage, exc))
 
-            def pump(source: Any, target: Any, stage: str, *, count_output_frames: bool = False) -> None:
-                nonlocal output_bytes
+            def pump(source: Any, target: Any, stage: str) -> None:
                 try:
                     while block := source.read(1024 * 1024):
                         try:
                             written = target.write(block)
                             if written != len(block):
                                 raise OSError(f"short raw-frame pipe write: {written} of {len(block)} bytes")
-                            if count_output_frames:
-                                with progress_lock:
-                                    output_bytes += written
                         except BrokenPipeError:
                             # The owning child failure is reported by its return code and stage log.
                             return
@@ -851,8 +837,6 @@ class PostProfileAdapter:
                     if not stopping.is_set():
                         stream_errors.put((stage, exc))
                 finally:
-                    if count_output_frames:
-                        output_pump_done.set()
                     for stream in (source, target):
                         try:
                             stream.close()
@@ -870,14 +854,13 @@ class PostProfileAdapter:
 
             pipe_pairs = (
                 (by_stage["producer"].stdout, by_stage["ntsc-pipe"].stdin,
-                 "producer-to-ntsc-pipe", False),
+                 "producer-to-ntsc-pipe"),
                 (by_stage["ntsc-pipe"].stdout, by_stage["encoder"].stdin,
-                 "ntsc-pipe-to-encoder", True),
+                 "ntsc-pipe-to-encoder"),
             )
-            for source, target, stage, count_output_frames in pipe_pairs:
+            for source, target, stage in pipe_pairs:
                 thread = threading.Thread(
                     target=pump, args=(source, target, stage),
-                    kwargs={"count_output_frames": count_output_frames},
                     name=f"postprofile-{stage}", daemon=True,
                 )
                 thread.start()
@@ -901,20 +884,6 @@ class PostProfileAdapter:
                     not thread.is_alive() for thread in threads
                 ):
                     break
-                elapsed_after_grace = (
-                    time.monotonic() - pipeline_started_at - _NTSC_PIPE_STARTUP_GRACE_SECONDS
-                )
-                # Once transfer finishes, let the child statuses and frame-count
-                # probe classify failures and the wall-clock deadline bound finalization.
-                if elapsed_after_grace > 0 and not output_pump_done.is_set():
-                    with progress_lock:
-                        completed_frames = output_bytes // frame_bytes
-                    if (completed_frames < expected_frames
-                            and completed_frames < elapsed_after_grace * _NTSC_PIPE_MINIMUM_FPS):
-                        raise _PipelineThroughputFailure(
-                            completed_frames, elapsed_after_grace,
-                            _NTSC_PIPE_MINIMUM_FPS,
-                        )
                 time.sleep(0.025)
         except BaseException as exc:
             failure = exc
@@ -995,15 +964,6 @@ class PostProfileAdapter:
                 kind,
                 f"PostProfile raw-frame pipe {failure.stage} failed: {failure.cause}",
                 shot_id=request.shot_id, run_id=request.run_id, cause=failure.cause,
-            ) from failure
-        if isinstance(failure, _PipelineThroughputFailure):
-            observed_fps = failure.frames / failure.elapsed_seconds
-            raise JobError(
-                JobErrorKind.BUDGET_EXCEEDED,
-                f"PostProfile analog pipeline throughput was {observed_fps:.2f} fps "
-                f"after startup grace, below the {failure.minimum_fps:.2f} fps floor "
-                f"({failure.frames} complete frames in {failure.elapsed_seconds:.2f}s)",
-                shot_id=request.shot_id, run_id=request.run_id, cause=failure,
             ) from failure
         if isinstance(failure, JobError):
             raise failure
@@ -1393,14 +1353,3 @@ class _PipelineIOFailure(Exception):
     def __init__(self, stage: str, cause: BaseException) -> None:
         self.stage, self.cause = stage, cause
         super().__init__(f"{stage}: {cause}")
-
-
-class _PipelineThroughputFailure(Exception):
-    def __init__(self, frames: int, elapsed_seconds: float, minimum_fps: float) -> None:
-        self.frames = frames
-        self.elapsed_seconds = elapsed_seconds
-        self.minimum_fps = minimum_fps
-        super().__init__(
-            f"{frames} complete frames in {elapsed_seconds:.2f}s; "
-            f"minimum is {minimum_fps:.2f} fps"
-        )

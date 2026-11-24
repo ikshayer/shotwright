@@ -1077,17 +1077,32 @@ def test_output_probe_diagnostic_write_failure_still_removes_partial_video(lab: 
 
 
 @needs_ffmpeg
-def test_throughput_floor_stops_a_stalled_processor_after_startup_grace(
-    lab: _Lab, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(postprofile_runner, "_NTSC_PIPE_STARTUP_GRACE_SECONDS", 0.1)
+def test_per_shot_deadline_stops_a_stalled_source_and_cleans_partial_output(lab: _Lab) -> None:
     executable = Path(sys.executable).resolve()
     pin = _sha_pin(executable)
-    popen, started, children = _child_mode_popen("hang")
-    request = lab.request(_settings_camera(), run_id="throughput-floor", pipe_pin=pin)
-    adapter = PostProfileAdapter(lab.root, _settings_with_pipe(lab.settings, executable), popen=popen)
-    cancel = threading.Event()
-    adapter.set_cancel_check(cancel.is_set)
+    started = threading.Event()
+    children: list[tuple[list[str], subprocess.Popen[bytes]]] = []
+    real_popen = subprocess.Popen
+    source_script = "import time\nwhile True: time.sleep(0.05)"
+
+    def popen(argv: Any, **kwargs: Any) -> Any:
+        args = [str(value) for value in argv]
+        is_source = "-i" in args and "pipe:0" not in args
+        if is_source or _ntsc_command(args):
+            child = real_popen([sys.executable, "-u", "-c", source_script], **kwargs)
+            if is_source:
+                started.set()
+        else:
+            child = real_popen(args, **kwargs)
+        if _ntsc_command(args) or "-i" in args:
+            children.append((args, child))
+        return child
+
+    request = lab.request(_settings_camera(), run_id="stalled-source", pipe_pin=pin)
+    adapter = PostProfileAdapter(
+        lab.root, _settings_with_pipe(lab.settings, executable), popen=popen,
+    )
+    adapter.set_deadline(time.monotonic() + 1.0)
     outcome: list[BaseException] = []
 
     def invoke() -> None:
@@ -1098,20 +1113,16 @@ def test_throughput_floor_stops_a_stalled_processor_after_startup_grace(
 
     worker = threading.Thread(target=invoke, daemon=True)
     worker.start()
-    assert started.wait(15), "the controllable ntsc-pipe child was never launched"
-    watchdog_started_at = time.monotonic()
-    worker.join(2)
-    if worker.is_alive():
-        cancel.set()
-        worker.join(15)
-
-    assert not worker.is_alive(), "throughput watchdog did not release the stalled pipeline"
+    assert started.wait(15), "the controllable source child was never launched"
+    worker.join(20)
+    assert not worker.is_alive(), "per-shot deadline did not release the stalled source"
     assert len(outcome) == 1 and isinstance(outcome[0], JobError)
     assert outcome[0].kind is JobErrorKind.BUDGET_EXCEEDED
-    assert "throughput" in outcome[0].message.lower()
-    assert time.monotonic() - watchdog_started_at < 2
+    assert "deadline" in outcome[0].message.lower()
     _assert_failed_run_has_no_video(lab, request.run_id)
-    assert children and all(process.poll() is not None for _argv, process in children)
+    _assert_failure_metadata_and_logs(lab, request.run_id)
+    assert len(children) == 3
+    assert all(process.poll() is not None for _argv, process in children)
 
 
 def test_ntsc_build_script_forces_the_ignored_local_cargo_target_directory() -> None:
