@@ -159,6 +159,10 @@ def validate_in_recording_overlays(
     if not path.is_file():
         raise _font_error(path, "font file is missing")
 
+    # camera_analog_artifacts is a dimension-preserving tape pass between the
+    # in-recording FFmpeg prefix and the consumer suffix. It changes pixels but
+    # not the storage/cut canvas, so overlay bounds remain measured at this
+    # placement's existing target resolution.
     width, height = _target_resolution or profile.storage_resolution
     overlays: list[_Overlay] = []
     for stage in profile.identity.stages:

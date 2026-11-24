@@ -30,11 +30,16 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     StrictBool,
+    StrictFloat,
     StrictInt,
+    TypeAdapter,
     ValidationError,
+    ValidationInfo,
     field_serializer,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -58,7 +63,8 @@ from .base import (
 # one is added, use a separate mount/motion attribute rather than redefining this mode.
 CameraMode = Literal["cctv", "non_cctv"]
 CAMERA_MOTION_MODEL_SEMVER = "0.1.0"
-CAMERA_PROFILE_SCHEMA_VERSION = 3
+CAMERA_PROFILE_LEGACY_ANALOG_SCHEMA_VERSION = 3
+CAMERA_PROFILE_SCHEMA_VERSION = 4
 
 
 def _safe_clock_format(value: str) -> str:
@@ -161,6 +167,148 @@ class CameraOverlayModel(BaseModel):
     @classmethod
     def _valid_clock_format(cls, value: str | None) -> str | None:
         return _safe_clock_format(value) if value is not None else None
+
+
+class _AnalogArtifactsModel(BaseModel):
+    """Shared strict settings for the pinned ntsc-rs v0.9.7 adapter surface."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
+
+
+class AnalogHeadSwitching(_AnalogArtifactsModel):
+    height: StrictInt = Field(8, ge=0, le=24)
+    offset: StrictInt = Field(3, ge=0, le=24)
+    horizontal_shift: StrictFloat = Field(72.0, ge=-100, le=100)
+    position: StrictFloat | None = Field(None, ge=0, le=100)
+    jitter: StrictFloat | None = Field(None, ge=0, le=100)
+
+
+class AnalogTrackingNoise(_AnalogArtifactsModel):
+    height: StrictInt = Field(12, ge=0, le=120)
+    wave_intensity: StrictFloat = Field(15.0, ge=-50, le=50)
+    snow_intensity: StrictFloat = Field(0.025, ge=0, le=1)
+    snow_anisotropy: StrictFloat = Field(25.0, ge=0, le=100)
+    noise_intensity: StrictFloat = Field(25.0, ge=0, le=100)
+
+
+class AnalogEdgeWave(_AnalogArtifactsModel):
+    intensity: StrictFloat = Field(0.5, ge=0, le=20)
+    speed: StrictFloat = Field(4.0, ge=0, le=10)
+    frequency: StrictFloat = Field(0.05, ge=0, le=0.5)
+    detail: StrictInt = Field(2, ge=1, le=5)
+
+
+class AnalogVhsSharpen(_AnalogArtifactsModel):
+    intensity: StrictFloat = Field(0.25, ge=0, le=5)
+    frequency: StrictFloat = Field(1.0, ge=0.5, le=4)
+
+
+class AnalogVhs(_AnalogArtifactsModel):
+    tape_speed: Literal["SP", "LP", "EP", "none"] = "LP"
+    # The UI expresses chroma loss as percent; ntsc-rs stores it as a 0-1 ratio.
+    chroma_loss: StrictFloat = Field(0.0025, ge=0, le=100)
+    edge_wave: AnalogEdgeWave = Field(default_factory=AnalogEdgeWave)
+    sharpen: AnalogVhsSharpen | None = None
+
+
+class AnalogSignal(_AnalogArtifactsModel):
+    composite_sharpening: StrictFloat = Field(1.0, ge=-1, le=2)
+    luma_smear: StrictFloat = Field(0.5, ge=0, le=1)
+    phase_error: StrictFloat = Field(0.0, ge=0, le=100)
+    phase_noise: StrictFloat = Field(0.1, ge=0, le=100)
+    horizontal_delay: StrictFloat = Field(0.0, ge=-40, le=40)
+    vertical_delay: StrictInt = Field(0, ge=-20, le=20)
+    chroma_lowpass_in: Literal["None", "Light", "Full"] = "Full"
+    chroma_lowpass_out: Literal["None", "Light", "Full"] = "Full"
+    chroma_demodulation: Literal[
+        "Box", "Notch", "OneLineComb", "TwoLineComb", "TwoD", "TwoDAdaptive"
+    ] = "Notch"
+    input_luma_filter: Literal["None", "Box", "Notch"] = "Notch"
+    field_mode: Literal[
+        "Alternating", "Upper", "Lower", "Both", "InterleavedUpper", "InterleavedLower"
+    ] = "InterleavedUpper"
+    filter_type: Literal["ConstantK", "Butterworth"] = "Butterworth"
+    vertical_chroma_blend: StrictBool = False
+
+
+class AnalogNoiseChannel(_AnalogArtifactsModel):
+    intensity: StrictFloat = Field(5.0, ge=0, le=100)
+    frequency: StrictFloat = Field(0.5, ge=0, le=1)
+    detail: StrictInt = Field(1, ge=1, le=5)
+
+
+class AnalogChromaNoiseChannel(_AnalogArtifactsModel):
+    intensity: StrictFloat = Field(10.0, ge=0, le=100)
+    frequency: StrictFloat = Field(0.05, ge=0, le=0.5)
+    detail: StrictInt = Field(2, ge=1, le=5)
+
+
+class AnalogLumaNoiseChannel(_AnalogArtifactsModel):
+    intensity: StrictFloat = Field(1.0, ge=0, le=100)
+    frequency: StrictFloat = Field(0.5, ge=0, le=1)
+    detail: StrictInt = Field(1, ge=1, le=5)
+
+
+class AnalogNoise(_AnalogArtifactsModel):
+    composite: AnalogNoiseChannel | None = None
+    luma: AnalogLumaNoiseChannel | None = None
+    chroma: AnalogChromaNoiseChannel | None = None
+    # This is the crate's 0-100 snow frequency control, not a percentage.
+    snow_intensity: StrictFloat = Field(0.00025, ge=0, le=100)
+    snow_anisotropy: StrictFloat = Field(50.0, ge=0, le=100)
+
+
+class AnalogRinging(_AnalogArtifactsModel):
+    frequency: StrictFloat = Field(45.0, ge=0, le=100)
+    power: StrictFloat = Field(4.0, ge=1, le=10)
+    intensity: StrictFloat = Field(4.0, ge=0, le=10)
+
+
+class AnalogArtifacts(_AnalogArtifactsModel):
+    """Typed, opt-in NTSC tape controls; an empty object stays fully inactive."""
+
+    head_switching: AnalogHeadSwitching | None = None
+    tracking_noise: AnalogTrackingNoise | None = None
+    vhs: AnalogVhs | None = None
+    signal: AnalogSignal | None = None
+    noise: AnalogNoise | None = None
+    ringing: AnalogRinging | None = None
+    ntsc_pipe_sha256: str | None = Field(
+        None, strict=True, pattern=r"^sha256:[0-9a-f]{64}$", max_length=71,
+        description="Optional verified ntsc-pipe executable digest for active tape effects.",
+    )
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_settings(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        return {name: value for name, value in data.items() if value is not None}
+
+    @property
+    def active(self) -> bool:
+        return any(getattr(self, name) is not None for name in (
+            "head_switching", "tracking_noise", "vhs", "signal", "noise", "ringing",
+        ))
+
+    @property
+    def legacy_flat_values(self) -> dict[str, float] | None:
+        """Return preserved schema-3 controls, if this is a historical payload."""
+        return None
+
+
+class _LegacyAnalogArtifacts(AnalogArtifacts):
+    """Schema-3 flat settings retained until a caller replaces them explicitly."""
+
+    _flat_values: dict[str, float] = PrivateAttr(default_factory=dict)
+
+    @classmethod
+    def from_flat_values(cls, values: dict[str, float]) -> _LegacyAnalogArtifacts:
+        result = cls()
+        result.__pydantic_private__["_flat_values"] = dict(values)
+        return result
+
+    @property
+    def legacy_flat_values(self) -> dict[str, float] | None:
+        return dict(self._flat_values)
 
 # --------------------------------------------------------------------------
 # narrative
@@ -660,9 +808,12 @@ class CameraProfile(VersionedEntity):
         default_factory=CameraOverlayModel,
         description="Opt-in clock overlay overrides; neutral {}.",
     )
-    analog_artifacts: dict[str, float] = post_only(
-        default_factory=dict,
-        description="Neutral {}; nonempty values are refused until the ntscrs stage exists.",
+    analog_artifacts: AnalogArtifacts = post_only(
+        default_factory=AnalogArtifacts,
+        description=(
+            "Opt-in typed NTSC tape controls for the pinned ntsc-rs v0.9.7 processor; "
+            "neutral {} keeps the stage inactive."
+        ),
     )
     frame_drop_schedule: list[ArtifactScheduleEntry] = post_only(default_factory=list)
 
@@ -672,7 +823,9 @@ class CameraProfile(VersionedEntity):
     @field_validator("schema_version", mode="before")
     @classmethod
     def _migrate_schema_version(cls, value: Any) -> int:
-        if type(value) is not int or value not in {1, 2, CAMERA_PROFILE_SCHEMA_VERSION}:
+        if type(value) is not int or value not in {
+            1, 2, CAMERA_PROFILE_LEGACY_ANALOG_SCHEMA_VERSION, CAMERA_PROFILE_SCHEMA_VERSION,
+        }:
             raise ValueError(f"CameraProfile schema_version {value!r} has no migration to {CAMERA_PROFILE_SCHEMA_VERSION}")
         return CAMERA_PROFILE_SCHEMA_VERSION
 
@@ -685,6 +838,51 @@ class CameraProfile(VersionedEntity):
         if not 1 <= len(terms) <= 16 or any(not term.isascii() or not term.isdigit() or int(term) <= 0 for term in terms):
             raise ValueError("decimation_pattern must contain 1-16 colon-separated positive integers")
         return value
+
+    @field_validator("analog_artifacts", mode="before")
+    @classmethod
+    def _parse_legacy_analog_artifacts(
+        cls, value: Any, info: ValidationInfo,
+    ) -> Any:
+        # Only persisted schema-3 records and their journals may use the former
+        # arbitrary flat dict. Current API payloads must use the typed groups.
+        legacy_schema = (
+            info.context.get("legacy_camera_profile_schema")
+            if isinstance(info.context, dict) else None
+        )
+        if isinstance(value, _LegacyAnalogArtifacts):
+            if legacy_schema != CAMERA_PROFILE_LEGACY_ANALOG_SCHEMA_VERSION:
+                raise ValueError("legacy analog_artifacts are valid only in schema-3 history")
+            return value
+        if isinstance(value, dict) and value:
+            if legacy_schema == CAMERA_PROFILE_LEGACY_ANALOG_SCHEMA_VERSION:
+                try:
+                    flat_values = TypeAdapter(dict[str, float]).validate_python(value)
+                except ValidationError as exc:
+                    raise ValueError(
+                        "schema-3 analog_artifacts must retain the historical flat numeric shape"
+                    ) from exc
+                return _LegacyAnalogArtifacts.from_flat_values(flat_values)
+            if any(
+                name != "ntsc_pipe_sha256" and item is not None and not isinstance(item, dict)
+                for name, item in value.items()
+            ):
+                raise ValueError(
+                    "non-empty legacy analog_artifacts dictionaries cannot be used in current payloads; "
+                    "replace them with typed head_switching, tracking_noise, vhs, signal, noise or ringing groups"
+                )
+        return value
+
+    @model_serializer(mode="wrap")
+    def _serialize_camera_schema(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        legacy_values = self.analog_artifacts.legacy_flat_values
+        if legacy_values is not None:
+            # Keep the old entity in the schema it was written in until its
+            # analog_artifacts field is explicitly replaced with typed settings.
+            data["schema_version"] = CAMERA_PROFILE_LEGACY_ANALOG_SCHEMA_VERSION
+            data["analog_artifacts"] = legacy_values
+        return data
 
 
 

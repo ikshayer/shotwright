@@ -92,6 +92,14 @@ class AdapterRequest:
     required_ram_gb: float = 0.0
     required_disk_gb: float = 0.0
 
+    @property
+    def is_analog_degrade(self) -> bool:
+        return (
+            self.kind is AdapterKind.DEGRADE
+            and isinstance(self.payload, DegradeRequest)
+            and self.payload.camera_profile.analog_artifacts.active
+        )
+
 
 @dataclass(frozen=True)
 class AdapterResult:
@@ -195,7 +203,11 @@ class _AdapterShim:
             degradation = DegradeRequest.model_validate(payload)
             mapped = postprofile_spec_from_camera(degradation.camera_profile, degradation.profile)
             degradation = degradation.model_copy(update={"profile": mapped})
-            result = self.adapter.degrade(degradation)
+            result = self.adapter.degrade(
+                degradation,
+                cancel=self.cancel_check or _cancel_callback(request.payload),
+                deadline=time.monotonic() + self.settings.budget.per_shot_wall_clock_seconds,
+            )
             artifact = result.output_path
         return AdapterResult(artifact_path=artifact, value=result)
 
@@ -221,9 +233,9 @@ class JobRunner:
         self._condition = threading.Condition()
         self._pending: deque[tuple[str, AdapterRequest, Job]] = deque()
         self._cancelled: set[tuple[str, str]] = set()
-        #: Take jobs (speech, audio post) whose result is being registered; a cancel no longer applies to them.
+        #: Jobs whose result is being registered; a cancel no longer applies to them.
         self._finalizing: set[tuple[str, str]] = set()
-        self._active: set[tuple[str, str]] = set()
+        self._active: dict[tuple[str, str], AdapterRequest] = {}
         self._project_locks: dict[str, threading.Lock] = {}
         self._closed = False
         self._gpu_lock = threading.Lock()
@@ -396,32 +408,35 @@ class JobRunner:
     def cancel(self, project_id: str, job_id: str) -> Job:
         store = self.store_for(project_id)
         root = store._root
-        wait_for_assembly_stop = False
-        # The record is read under the same lock a speech job holds while it decides between
-        # "completed with an Asset" and "cancelled", so a cancel either lands first (and the
-        # job is cancelled) or finds the job already completed (and changes nothing).
+        key = (project_id, job_id)
+        wait_for_adapter_stop = False
+        # Use the same lock the worker holds while it decides whether to publish
+        # a completed result or process a cancellation.
         with self._condition:
             record = read_job(root, job_id)
             if record is None:
                 raise RecordNotFound(f"job {job_id!r} does not exist")
             job = Job.model_validate(record)
-            if (project_id, job_id) in self._finalizing:
+            if key in self._finalizing:
                 # Its result is being registered; the cancel arrived too late to stop it.
                 return job
             if job.state not in {"completed", "failed", "cancelled"}:
-                self._cancelled.add((project_id, job_id))
-                if job.type == AdapterKind.ASSEMBLE.value and (project_id, job_id) in self._active:
-                    # This worker owns a supervised FFmpeg child. Leave the journal
-                    # nonterminal until the adapter's watcher has stopped and joined it.
-                    wait_for_assembly_stop = True
+                self._cancelled.add(key)
+                active_request = self._active.get(key)
+                if active_request is not None and (
+                    active_request.kind is AdapterKind.ASSEMBLE or active_request.is_analog_degrade
+                ):
+                    # These adapters stop and join their native processes before
+                    # returning. Leave the journal nonterminal until they finish.
+                    wait_for_adapter_stop = True
                 else:
                     job.state = "cancelled"
                     job.error_kind = JobErrorKind.CANCELLED.value
                     append_job(root, job)
                 self._condition.notify_all()
-        if wait_for_assembly_stop:
+        if wait_for_adapter_stop:
             with self._condition:
-                while (project_id, job_id) in self._active:
+                while key in self._active:
                     self._condition.wait()
             record = read_job(root, job_id)
             if record is None:
@@ -475,7 +490,7 @@ class JobRunner:
                         )
                     self._condition.notify_all()
                     continue
-                self._active.add(key)
+                self._active[key] = request
             threading.Thread(target=self._execute, args=(project_id, request, job, key),
                              name=f"adapter-{job.job_id}", daemon=True).start()
 
@@ -510,16 +525,18 @@ class JobRunner:
                         # concurrent job on the same adapter cannot replace or clear it.
                         set_cancel_check(lambda: self._is_cancelled(key))
                     value = adapter.invoke(request, active, queue=queue)
-                    if request.kind in _TAKE_KINDS:
+                    is_analog_degrade = request.is_analog_degrade
+                    if request.kind in _TAKE_KINDS or is_analog_degrade:
                         # Decided before the queue or the CPU path journals "completed": a
-                        # cancel already recorded wins (the take is then discarded); otherwise
+                        # cancel already recorded wins and skips registration; otherwise
                         # the job is finalizing and a later cancel leaves it to complete. Done
                         # any later, a cancel could land between the "completed" entry and
-                        # the decision, and the job would read completed with no take.
+                        # the decision, and the job would read completed with no receipt.
                         with self._condition:
                             if key in self._cancelled:
+                                target = "the degraded output" if is_analog_degrade else "its take"
                                 raise _job_error(JobErrorKind.CANCELLED,
-                                                 "job cancelled before its take was registered", active)
+                                                 f"job cancelled before {target} was registered", active)
                             # Only while the job is still the runner's: a watchdog may have
                             # retired it already, and its cleanup would never discard the key.
                             if key in self._active:
@@ -636,7 +653,7 @@ class JobRunner:
             _persist_job(root, job, error, self.settings)
         finally:
             with self._condition:
-                self._active.discard(key)
+                self._active.pop(key, None)
                 self._cancelled.discard(key)
                 self._finalizing.discard(key)
                 self._condition.notify_all()
@@ -1135,6 +1152,10 @@ def postprofile_spec_from_camera(camera: CameraProfile, spec: PostProfileSpec) -
     The domain field tags are the authority; this mapping does not maintain a second
     post-only field list.
     """
+    if camera.analog_artifacts.legacy_flat_values is not None:
+        raise ValueError(
+            "legacy schema-3 analog_artifacts cannot be processed; replace them with typed settings"
+        )
     values: dict[str, Any] = {}
     tagged = {
         name for name in CameraProfile.model_fields
@@ -1159,7 +1180,24 @@ def postprofile_spec_from_camera(camera: CameraProfile, spec: PostProfileSpec) -
     if "frame_drop_schedule" in tagged:
         values["artifact_schedule"] = tuple(camera.frame_drop_schedule)
 
-    stages = list(spec.identity.stages)
+    stage_params: dict[str, dict[str, int | str]] = {}
+    if values.get("storage_resolution", spec.storage_resolution) != spec.storage_resolution:
+        width, height = values["storage_resolution"]
+        stage_params["scale"] = {"w": width, "h": height}
+    if values.get("output_fps", spec.output_fps) != spec.output_fps:
+        stage_params["fps"] = {"fps": values["output_fps"]}
+    if values.get("sample_aspect_ratio", spec.sample_aspect_ratio) != spec.sample_aspect_ratio:
+        stage_params["setsar"] = {"sar": values["sample_aspect_ratio"]}
+
+    # The marker is derived from CameraProfile, never persisted in a PostProfile. Strip
+    # it first so deriving an already-derived spec is idempotent.
+    stages = [
+        stage.model_copy(update={"params": stage.params | stage_params[stage.filter]})
+        if stage.filter in stage_params else stage
+        for stage in spec.identity.stages
+        if stage.filter != "camera_analog_artifacts"
+    ]
+    pinned_binaries = spec.identity.pinned_binaries
     overrides: list[dict[str, str | None]] = []
 
     def rank(stage: PostStage) -> int:
@@ -1170,7 +1208,8 @@ def postprofile_spec_from_camera(camera: CameraProfile, spec: PostProfileSpec) -
         return {
             "scale": 0, "fps": 1, "select": 2, "loop": 3, "drawtext": 5,
             "colortemperature": 7, "colorchannelmixer": 8, "eq": 9,
-            "gblur": 10, "noise": 11, "unsharp": 12, "setsar": 13,
+            "gblur": 10, "noise": 11, "unsharp": 12,
+            "camera_analog_artifacts": 13, "setsar": 14,
         }[stage.filter]
 
     def install(
@@ -1288,6 +1327,34 @@ def postprofile_spec_from_camera(camera: CameraProfile, spec: PostProfileSpec) -
             lambda stage: stage.filter == "unsharp",
         )
 
+    camera_derived_stages: list[dict[str, str | None]] = []
+    if "analog_artifacts" in tagged:
+        analog = camera.analog_artifacts
+        # Identity carries the effective pin. The controls describe tape effects alone.
+        values["analog_artifacts"] = analog.model_copy(update={"ntsc_pipe_sha256": None})
+        if analog.active:
+            camera_pin = analog.ntsc_pipe_sha256
+            if camera_pin is not None:
+                profile_pin = pinned_binaries.get("ntsc-pipe")
+                if profile_pin is None:
+                    pinned_binaries = {**pinned_binaries, "ntsc-pipe": camera_pin}
+                elif profile_pin != camera_pin:
+                    raise ProfileValidationError(
+                        f"CameraProfile {camera.camera_id!r} analog_artifacts.ntsc_pipe_sha256 "
+                        f"{camera_pin!r} conflicts with PostProfile {spec.identity.name!r} "
+                        f"pinned_binaries['ntsc-pipe'] {profile_pin!r}"
+                    )
+            install(
+                "analog_artifacts",
+                [PostStage(name="camera_analog_artifacts",
+                           filter="camera_analog_artifacts")],
+                lambda stage: stage.filter == "camera_analog_artifacts",
+            )
+            camera_derived_stages.append({
+                "field": "analog_artifacts",
+                "stage": "camera_analog_artifacts",
+            })
+
     if "overlay_model" in tagged:
         overlay_model = camera.overlay_model
         if spec.overlay is None and any(
@@ -1348,9 +1415,14 @@ def postprofile_spec_from_camera(camera: CameraProfile, spec: PostProfileSpec) -
         encode_updates["block_artifacts"] = camera.block_artifacts
     encode = spec.encode.model_copy(update=encode_updates) if encode_updates else spec.encode
     values["encode"] = encode
-    if stages != list(spec.identity.stages):
-        values["identity"] = spec.identity.model_copy(update={"stages": stages})
-    values["provenance"] = {"camera_overrides": overrides}
+    if stages != list(spec.identity.stages) or pinned_binaries != spec.identity.pinned_binaries:
+        values["identity"] = spec.identity.model_copy(update={
+            "stages": stages, "pinned_binaries": pinned_binaries,
+        })
+    provenance: dict[str, list[dict[str, str | None]]] = {"camera_overrides": overrides}
+    if camera_derived_stages:
+        provenance["camera_derived_stages"] = camera_derived_stages
+    values["provenance"] = provenance
     return PostProfileSpec.model_validate(spec.model_dump(mode="python") | values)
 
 

@@ -52,3 +52,7 @@ CCTV_Analog_Horror_Production_Pipeline_PRD_v*.md
 *.egg-info/
 # The creator's own voice recordings (emotion references): personal biometric data, never published.
 /recordings/
+
+# ntsc-pipe build output (step 3c); the binary is built locally by tools/build_ntsc_pipe.ps1
+tools/ntsc-pipe/target/
+tools/bin/

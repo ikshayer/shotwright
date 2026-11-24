@@ -1,0 +1,16 @@
+[package]
+name = "ntsc-pipe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Raw-frame stdin/stdout wrapper around the ntsc-rs core crate for the PostProfile analog_artifacts stage"
+license = "MIT OR ISC OR Apache-2.0"
+
+[dependencies]
+# Pinned to ntsc-rs v0.9.7. Single-threaded on purpose (no "rayon" feature): output must be
+# byte-identical for a given seed (ANALOG_ARTIFACTS_CONTRACT.md, creator decision 5).
+ntsc-rs = { git = "https://github.com/valadaptive/ntsc-rs.git", rev = "8cfc51014092a6dc1da5eb0217bb9ae6516b124e", default-features = false, features = ["std"] }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"

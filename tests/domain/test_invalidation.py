@@ -27,7 +27,7 @@ POST_ONLY_CHANGES = {
     "sharpening": 0.2,
     "grade_white_balance": {"red_gain": 1.1},
     "overlay_model": {"camera_id_text": "mono"},
-    "analog_artifacts": {"tracking": 0.1},
+    "analog_artifacts": {"tracking_noise": {"snow_intensity": 0.1}},
     "frame_drop_schedule": [{"type": "drop", "start_frame": 3, "count": 2}],
 }
 REBUILD_CHANGES = {

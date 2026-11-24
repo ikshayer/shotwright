@@ -247,6 +247,13 @@ def build_assembly_command(
         "-fps_mode", "cfr", "-r", str(fps), "-c:v", profile.encode.codec,
         "-preset", profile.encode.preset, "-crf", str(profile.encode.crf),
         "-pix_fmt", profile.encode.pix_fmt, "-threads", str(profile.encode.threads),
+    ))
+    if profile.encode.codec in {"libx264", "libx264rgb"}:
+        # The default x264 macroblock-tree lookahead varied the first IDR packet
+        # across identical one-thread cut encodes on the measured host. Disabling
+        # it keeps the byte-level cut receipt deterministic.
+        arguments.extend(("-x264-params", "mbtree=0"))
+    arguments.extend((
         "-movflags", "+faststart", "-map_metadata", "-1", "-map_chapters", "-1",
         "-flags", "+bitexact", str(output),
     ))

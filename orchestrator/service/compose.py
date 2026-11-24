@@ -518,6 +518,15 @@ def _asset_bindings_for_scene(
     return bindings
 
 
+def validate_authored_postprofile(identity: PostProfile) -> None:
+    """Keep the internal NTSC stage marker out of project-authored profiles."""
+    if any(stage.filter == "camera_analog_artifacts" for stage in identity.stages):
+        raise ValueError(
+            f"PostProfile {identity.name!r} contains the internal camera_analog_artifacts "
+            "stage. Enable NTSC through CameraProfile.analog_artifacts."
+        )
+
+
 def compose_post_profile_spec(
     store: ProjectStore, *, shot: Shot | None = None,
 ) -> PostProfileSpec:
@@ -540,6 +549,7 @@ def compose_post_profile_spec(
             f"Project output_profile {project.output_profile!r} has no project-local PostProfile record"
         ) from exc
 
+    validate_authored_postprofile(identity)
     missing = [name for name in ("output_fps", "storage_resolution", "sample_aspect_ratio", "encode")
                if getattr(identity, name) is None]
     if missing:

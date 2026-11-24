@@ -65,7 +65,7 @@ def test_project_seeds_consumer_profile_as_unmeasured_sensor_noise_without_overl
     assert camera.storage_resolution == (640, 480)
     assert camera.display_aspect_ratio == "4:3"
     assert camera.fps == 30.0
-    assert camera.analog_artifacts == {}
+    assert camera.analog_artifacts.model_dump(exclude_none=True) == {}
     assert camera.block_artifacts == 0.0
     assert profile.storage_resolution == (640, 480)
     assert profile.sample_aspect_ratio == "1/1"

@@ -1,0 +1,7 @@
+ntsc-pipe wraps the public ntsc-rs API pinned at commit
+8cfc51014092a6dc1da5eb0217bb9ae6516b124e. Upstream license texts are included in
+LICENSE-APACHE-2.0, LICENSE-ISC, and LICENSE-MIT.
+
+Notices and license texts for the exact locked active Rust dependencies are included
+under THIRD_PARTY_NOTICES/. The dependency inventory is in
+THIRD_PARTY_NOTICES/README.md.

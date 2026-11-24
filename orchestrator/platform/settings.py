@@ -48,6 +48,13 @@ class BinariesSettings(_Section):
         ),
     )
     ffmpeg_exe: Path = Field(Path("ffmpeg"), description="FFmpeg executable; a bare name is looked up on PATH.")
+    ntsc_pipe_exe: Path = Field(
+        Path(__file__).resolve().parents[2] / "tools" / "bin" / "ntsc-pipe.exe",
+        description=(
+            "Pinned local ntsc-rs frame processor built by tools/build_ntsc_pipe.ps1; "
+            "required only when CameraProfile.analog_artifacts is active."
+        ),
+    )
     comfyui_root: Path = Field(
         Path(r"D:\ComfyUI_0.44.0\ComfyUI_windows_portable"), description="ComfyUI portable install directory."
     )

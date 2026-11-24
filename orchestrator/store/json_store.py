@@ -59,6 +59,7 @@ from orchestrator.domain.entities import (
     Asset,
     AudioPostProfile,
     CameraProfile,
+    CAMERA_PROFILE_LEGACY_ANALOG_SCHEMA_VERSION,
     CAMERA_PROFILE_SCHEMA_VERSION,
     Episode,
     EpisodeOutput,
@@ -731,7 +732,15 @@ class ProjectStore:
         """Revalidate a model instance and its declared paths without writing."""
         with self._lock:
             try:
-                validated = type(entity).model_validate(entity.model_dump(mode="python"))
+                context = None
+                if (isinstance(entity, CameraProfile)
+                        and entity.analog_artifacts.legacy_flat_values is not None):
+                    context = {
+                        "legacy_camera_profile_schema": CAMERA_PROFILE_LEGACY_ANALOG_SCHEMA_VERSION,
+                    }
+                validated = type(entity).model_validate(
+                    entity.model_dump(mode="python"), context=context,
+                )
             except (ValidationError, TypeError, ValueError) as exc:
                 raise _invalid(f"{type(entity).__name__} payload is invalid: {exc}", cause=exc) from exc
             self._check_path_fields(validated.model_dump(mode="json"), type(validated))
@@ -1352,7 +1361,7 @@ class ProjectStore:
         except json.JSONDecodeError as exc:
             raise _invalid(f"{relative} is not valid JSON: {exc}", cause=exc) from exc
         self._require_readable_schema(relative, data, entity_type=cls)
-        if cls is CameraProfile and data["schema_version"] < CAMERA_PROFILE_SCHEMA_VERSION:
+        if cls is CameraProfile and data["schema_version"] < CAMERA_PROFILE_LEGACY_ANALOG_SCHEMA_VERSION:
             # A pre-v3 record is first held to the types main read it with, so the
             # migration neither revives a record main refused nor refuses one it loaded.
             for field, adapter in _LEGACY_CAMERA_FIELD_TYPES.items():
@@ -1464,8 +1473,13 @@ class ProjectStore:
             raise _invalid(f"{relative} has malformed _predecessor_token")
         if versioned and not explicit_metadata and predecessor is not None:
             raise _invalid(f"{relative} has predecessor metadata without a mutation token")
+        context = None
+        if cls is CameraProfile and data["schema_version"] <= CAMERA_PROFILE_LEGACY_ANALOG_SCHEMA_VERSION:
+            context = {
+                "legacy_camera_profile_schema": CAMERA_PROFILE_LEGACY_ANALOG_SCHEMA_VERSION,
+            }
         try:
-            entity = cls.model_validate(data)
+            entity = cls.model_validate(data, context=context)
         except ValidationError as exc:
             raise _invalid(f"{relative} does not match {cls.__name__}: {exc}", cause=exc) from exc
         return entity, metadata
@@ -1480,7 +1494,12 @@ class ProjectStore:
         camera_profile = entity_type is CameraProfile
         current = CAMERA_PROFILE_SCHEMA_VERSION if camera_profile else SCHEMA_VERSION
         allowed = (
-            {LEGACY_SCHEMA_VERSION, SCHEMA_VERSION, CAMERA_PROFILE_SCHEMA_VERSION}
+            {
+                LEGACY_SCHEMA_VERSION,
+                SCHEMA_VERSION,
+                CAMERA_PROFILE_LEGACY_ANALOG_SCHEMA_VERSION,
+                CAMERA_PROFILE_SCHEMA_VERSION,
+            }
             if camera_profile else {LEGACY_SCHEMA_VERSION, SCHEMA_VERSION}
         )
         if stored > current:

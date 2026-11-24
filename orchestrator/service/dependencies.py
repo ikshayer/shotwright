@@ -13,6 +13,7 @@ from typing import Any
 from orchestrator.domain.base import LEGACY_SCHEMA_VERSION, ShotStatus, VersionedEntity
 from orchestrator.domain.entities import (
     ArtifactScheduleEntry,
+    CAMERA_PROFILE_LEGACY_ANALOG_SCHEMA_VERSION,
     CameraProfile,
     Episode,
     Location,
@@ -44,6 +45,17 @@ DEFAULT_OVERLAY_FONT_RELATIVE = "assets/fonts/overlay.ttf"
 DEFAULT_OVERLAY_FONT_PROJECT_LICENSE = "assets/fonts/LICENSE-DejaVu.txt"
 
 _ENTITY_TYPES = {"Script": Script, "Location": Location, "CameraProfile": CameraProfile, "Shot": Shot}
+_LEGACY_CAMERA_CASCADE_SCHEMAS = (LEGACY_SCHEMA_VERSION, CAMERA_PROFILE_LEGACY_ANALOG_SCHEMA_VERSION)
+
+
+def _cascade_entity_payload(cls: type[VersionedEntity], payload: dict[str, Any]) -> VersionedEntity:
+    """Validate a journal entity using its written schema."""
+    context = None
+    if cls is CameraProfile and payload.get("schema_version") in _LEGACY_CAMERA_CASCADE_SCHEMAS:
+        context = {
+            "legacy_camera_profile_schema": CAMERA_PROFILE_LEGACY_ANALOG_SCHEMA_VERSION,
+        }
+    return cls.model_validate(payload, context=context)
 
 
 class ShotProposalWriteFailure(RuntimeError):
@@ -90,8 +102,8 @@ def validated_cascades(store: ProjectStore) -> tuple[dict[str, Any], ...]:
                 f"cascade {plan['cascade_id']} has unknown entity type {entity_type!r}",
             )
         try:
-            before = store.validate_entity_payload(cls.model_validate(plan["before"]))
-            after = store.validate_entity_payload(cls.model_validate(plan["after"]))
+            before = store.validate_entity_payload(_cascade_entity_payload(cls, plan["before"]))
+            after = store.validate_entity_payload(_cascade_entity_payload(cls, plan["after"]))
             check_revision(before, after)
             record_id = _record_id(before)
             episode_id = getattr(before, "episode_id", None)
@@ -447,8 +459,14 @@ def _derived_postprofile_sha256(
 
 def _same(entity: VersionedEntity, payload: dict[str, Any]) -> bool:
     # Compare the full stored value in the journal's schema without changing its bytes.
-    stored = (entity.schema_v1_payload() if payload.get("schema_version") == LEGACY_SCHEMA_VERSION
+    schema_version = payload.get("schema_version")
+    stored = (entity.schema_v1_payload() if schema_version == LEGACY_SCHEMA_VERSION
               else entity.model_dump(mode="json"))
+    if isinstance(entity, CameraProfile) and schema_version in _LEGACY_CAMERA_CASCADE_SCHEMAS:
+        if entity.analog_artifacts.active:
+            return False  # Active typed settings first appeared in schema 4.
+        # The serializer preserves flat values, and neutral settings serialize as {}.
+        stored["schema_version"] = schema_version
     return stored == payload
 
 
@@ -469,8 +487,8 @@ def _revoke_gates(store: ProjectStore, plan: dict[str, Any], revoked: list[str])
 
 def _commit_upstream(store: ProjectStore, plan: dict[str, Any]) -> bool:
     cls = _ENTITY_TYPES[plan["entity_type"]]
-    after = cls.model_validate(plan["after"])
-    before = cls.model_validate(plan["before"])
+    after = _cascade_entity_payload(cls, plan["after"])
+    before = _cascade_entity_payload(cls, plan["before"])
     record_id = _record_id(after)
     episode_id = getattr(after, "episode_id", None)
     current, token = store.load_with_version(cls, record_id, episode_id=episode_id)
@@ -992,8 +1010,11 @@ def create_location(store: ProjectStore, location: Location) -> Location:
 
 def create_post_profile(store: ProjectStore, profile: PostProfile) -> PostProfile:
     """Persist a new agent-authored PostProfile without overwriting an existing one."""
+    from orchestrator.service.compose import validate_authored_postprofile
+
     with store.command():
         profile = store.validate_entity_payload(profile)
+        validate_authored_postprofile(profile)
         store.load(Project)
         store.save(profile, expected_version=0)
         return profile

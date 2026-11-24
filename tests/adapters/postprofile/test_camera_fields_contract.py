@@ -198,7 +198,7 @@ def test_the_nine_fields_stay_post_only_and_never_trigger_a_rerender(field):
         "chroma_smearing": 2.0, "block_artifacts": 0.5, "sharpening": 1.0,
         "grade_white_balance": {"temperature_k": 4000}, "overlay_model": {"fontsize": 20},
     }.get(field)
-    if value is None:  # analog_artifacts is refused until step 3c; nothing to revise
+    if value is None:  # analog_artifacts uses nested groups; its step 3c invalidation is checked separately.
         return
     after = before.model_copy(update={field: value, "version": before.version + 1})
     shot = Shot(shot_id="S003", episode_id="E01", camera_id="CAM03", duration_sec=5)
@@ -300,21 +300,15 @@ def test_clock_format_refuses_drawtext_escaping_attempts_and_unlisted_conversion
         _camera(overlay_model={"clock_format": clock_format})
 
 
-def test_non_empty_analog_artifacts_is_refused_naming_ntscrs_never_dropped():
-    camera_holder: list[CameraProfile] = []
+def test_typed_non_empty_analog_artifacts_derives_the_ntsc_stage():
+    camera = _camera(analog_artifacts={"head_switching": {"height": 8}})
+    derived = _derive(camera)
+    checked = _checked(derived, camera, rate=60)
+    filters = [stage.filter for stage in derived.identity.stages]
 
-    def construct():
-        camera_holder.append(_camera(analog_artifacts={"vhs_tracking": 0.4}))
-
-    def derive():
-        _derive(camera_holder[0])
-
-    def validate():
-        derived = _derive(camera_holder[0])
-        _checked(derived, camera_holder[0], rate=60)
-
-    message = _refused_message(construct, derive, validate)
-    assert "ntscrs" in message
+    assert camera.analog_artifacts.active
+    assert filters.index("camera_analog_artifacts") == len(filters) - 1
+    assert "camera_analog_artifacts" in [stage.filter for stage in checked.profile.identity.stages]
 
 
 def test_decimation_pattern_whose_mean_disagrees_with_source_over_fps_is_refused_naming_rates():

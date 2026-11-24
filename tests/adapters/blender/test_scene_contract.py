@@ -80,7 +80,7 @@ def test_every_post_only_field_is_excluded_from_plan() -> None:
         display_aspect_ratio="16:9", fps=25, decimation_pattern="2:3",
         noise_model={"luma": 90}, chroma_smearing=0.3, block_artifacts=0.4,
         sharpening=0.2, grade_white_balance={"red_gain": 1.2},
-        overlay_model={"camera_id_text": "CAM 1"}, analog_artifacts={"roll": 0.1},
+        overlay_model={"camera_id_text": "CAM 1"}, analog_artifacts={"noise": {"luma": {"intensity": 90.0}}},
         frame_drop_schedule=[{"type": "drop", "start_frame": 1, "count": 2}])))
     assert base == post_changed
 

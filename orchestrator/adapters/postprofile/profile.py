@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+import struct
 import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -19,10 +20,13 @@ from pydantic import (
     StrictStr,
     ValidationError,
     field_validator,
+    model_serializer,
 )
 
 from orchestrator.domain.entities import (
+    AnalogArtifacts,
     ArtifactScheduleEntry,
+    CAMERA_PROFILE_LEGACY_ANALOG_SCHEMA_VERSION,
     CameraProfile,
     PostProfile,
     PostStage,
@@ -139,6 +143,7 @@ class PostProfileSpec(BaseModel):
     artifact_schedule: tuple[ArtifactScheduleEntry, ...] = ()
     overlay: OverlaySpec | None = None
     encode: EncodeSpec
+    analog_artifacts: AnalogArtifacts = Field(default_factory=AnalogArtifacts)
     supersedes: str | None = None
     provenance: dict[str, list[dict[str, str | None]]] = Field(
         default_factory=lambda: {"camera_overrides": []}
@@ -150,6 +155,14 @@ class PostProfileSpec(BaseModel):
         if not isinstance(value, (tuple, list)) or len(value) != 2 or any(type(item) is not int or item < 1 for item in value):
             raise ValueError("storage_resolution dimensions must be positive integers")
         return tuple(value)
+
+    @model_serializer(mode="wrap")
+    def _omit_neutral_analog_artifacts(self, handler: Any) -> dict[str, Any]:
+        """Keep legacy neutral spec JSON (and its receipt hash) byte-for-byte stable."""
+        data = handler(self)
+        if not self.analog_artifacts.active:
+            data.pop("analog_artifacts", None)
+        return data
 
 
 @dataclass(frozen=True)
@@ -180,10 +193,224 @@ _FILTER_PARAMS: dict[str, frozenset[str]] = {
         "alls", "allf", "all_seed_max", "c0s", "c1s", "c2s", "c0f", "c1f", "c2f",
     }),
     "unsharp": frozenset({"luma_msize_x", "luma_msize_y", "luma_amount"}),
+    # A closed, typed external stage marker. It is never emitted as an FFmpeg filter.
+    "camera_analog_artifacts": frozenset(),
     "setsar": frozenset({"sar"}),
 }
 _EXPECTED_FILTERS = frozenset(_FILTER_PARAMS)
 _SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+
+
+# ntsc-rs v0.9.7 `SettingsList::from_json` initializes from `legacy_value()`, not
+# `NtscEffect::default()`. Pin every non-seed setting from the latter here so omitted
+# creator groups cannot inherit version-compatibility values. Enum integers and ratio
+# values follow the pinned crate's public SettingDescriptor JSON format.
+_NTSC_RS_097_DEFAULT_SETTINGS: dict[str, object] = {
+    "version": 1,
+    "use_field": 4,  # InterleavedUpper
+    "filter_type": 1,  # Butterworth
+    "input_luma_filter": 2,  # Notch
+    "chroma_lowpass_in": 2,  # Full
+    "chroma_demodulation": 1,  # Notch
+    "chroma_lowpass_out": 2,  # Full
+    "luma_smear": 0.5,
+    "composite_preemphasis": 1.0,
+    "head_switching": True,
+    "head_switching_height": 8,
+    "head_switching_offset": 3,
+    "head_switching_horizontal_shift": 72.0,
+    "head_switching_start_mid_line": True,
+    "head_switching_mid_line_position": 0.95,
+    "head_switching_mid_line_jitter": 0.03,
+    "tracking_noise": True,
+    "tracking_noise_height": 12,
+    "tracking_noise_wave_intensity": 15.0,
+    "tracking_noise_snow_intensity": 0.025,
+    "tracking_noise_snow_anisotropy": 0.25,
+    "tracking_noise_noise_intensity": 0.25,
+    "composite_noise": True,
+    "composite_noise_intensity": 0.05,
+    "composite_noise_frequency": 0.5,
+    "composite_noise_detail": 1,
+    "luma_noise": True,
+    "luma_noise_intensity": 0.01,
+    "luma_noise_frequency": 0.5,
+    "luma_noise_detail": 1,
+    "chroma_noise": True,
+    "chroma_noise_intensity": 0.1,
+    "chroma_noise_frequency": 0.05,
+    "chroma_noise_detail": 2,
+    "snow_intensity": 0.00025,
+    "snow_anisotropy": 0.5,
+    "chroma_phase_noise_intensity": 0.001,
+    "chroma_phase_error": 0.0,
+    "chroma_delay_horizontal": 0.0,
+    "chroma_delay_vertical": 0,
+    "ringing": True,
+    "ringing_frequency": 0.45,
+    "ringing_power": 4.0,
+    "ringing_scale": 4.0,
+    "vhs_settings": True,
+    "vhs_tape_speed": 2,  # LP
+    "vhs_chroma_loss": 0.000025,
+    "vhs_sharpen_enabled": True,
+    "vhs_sharpen": 0.25,
+    "vhs_sharpen_frequency": 1.0,
+    "vhs_edge_wave_enabled": True,
+    "vhs_edge_wave": 0.5,
+    "vhs_edge_wave_speed": 4.0,
+    "vhs_edge_wave_frequency": 0.05,
+    "vhs_edge_wave_detail": 2,
+    "vhs_chroma_vert_blend": False,
+    "scale_settings": True,
+    "bandwidth_scale": 1.0,
+    "vertical_scale": 1.0,
+    "scale_with_video_size": False,
+}
+
+
+def ntsc_settings_from_analog_artifacts(artifacts: AnalogArtifacts) -> dict[str, object]:
+    """Translate validated creator controls to the pinned ntsc-rs v0.9.7 JSON keys.
+
+    The crate parser starts from ``NtscEffect::legacy_value()``. Start with the complete
+    source-pinned ``NtscEffect::default()`` value, then override supplied creator groups.
+    Percentage controls are normalized to the crate's 0-1 JSON units.
+    """
+    if not isinstance(artifacts, AnalogArtifacts):
+        raise ProfileValidationError("analog_artifacts settings must be an AnalogArtifacts model")
+    result: dict[str, object] = dict(_NTSC_RS_097_DEFAULT_SETTINGS)
+
+    head = artifacts.head_switching
+    if head is not None:
+        result.update({
+            "head_switching": True,
+            "head_switching_height": head.height,
+            "head_switching_offset": head.offset,
+            "head_switching_horizontal_shift": head.horizontal_shift,
+        })
+        if head.position is not None or head.jitter is not None:
+            result["head_switching_start_mid_line"] = True
+            if head.position is not None:
+                result["head_switching_mid_line_position"] = head.position / 100
+            if head.jitter is not None:
+                result["head_switching_mid_line_jitter"] = head.jitter / 100
+
+    tracking = artifacts.tracking_noise
+    if tracking is not None:
+        result.update({
+            "tracking_noise": True,
+            "tracking_noise_height": tracking.height,
+            "tracking_noise_wave_intensity": tracking.wave_intensity,
+            "tracking_noise_snow_intensity": tracking.snow_intensity,
+            "tracking_noise_snow_anisotropy": tracking.snow_anisotropy / 100,
+            "tracking_noise_noise_intensity": tracking.noise_intensity / 100,
+        })
+
+    vhs = artifacts.vhs
+    if vhs is not None:
+        tape_speed = {"none": 0, "SP": 1, "LP": 2, "EP": 3}[vhs.tape_speed]
+        result.update({
+            "vhs_settings": True,
+            "vhs_tape_speed": tape_speed,
+            "vhs_chroma_loss": vhs.chroma_loss / 100,
+            "vhs_edge_wave_enabled": vhs.edge_wave.intensity > 0,
+            "vhs_edge_wave": vhs.edge_wave.intensity,
+            "vhs_edge_wave_speed": vhs.edge_wave.speed,
+            "vhs_edge_wave_frequency": vhs.edge_wave.frequency,
+            "vhs_edge_wave_detail": vhs.edge_wave.detail,
+        })
+        if vhs.sharpen is not None:
+            result.update({
+                "vhs_sharpen_enabled": True,
+                "vhs_sharpen": vhs.sharpen.intensity,
+                "vhs_sharpen_frequency": vhs.sharpen.frequency,
+            })
+
+    signal = artifacts.signal
+    if signal is not None:
+        result.update({
+            "composite_preemphasis": signal.composite_sharpening,
+            "luma_smear": signal.luma_smear,
+            "chroma_phase_error": signal.phase_error / 100,
+            "chroma_phase_noise_intensity": signal.phase_noise / 100,
+            "chroma_delay_horizontal": signal.horizontal_delay,
+            "chroma_delay_vertical": signal.vertical_delay,
+            "chroma_lowpass_in": {"None": 0, "Light": 1, "Full": 2}[signal.chroma_lowpass_in],
+            "chroma_lowpass_out": {"None": 0, "Light": 1, "Full": 2}[signal.chroma_lowpass_out],
+            "chroma_demodulation": {
+                "Box": 0, "Notch": 1, "OneLineComb": 2, "TwoLineComb": 3,
+                "TwoD": 4, "TwoDAdaptive": 5,
+            }[signal.chroma_demodulation],
+            "input_luma_filter": {"None": 0, "Box": 1, "Notch": 2}[signal.input_luma_filter],
+            "use_field": {
+                "Alternating": 0, "Upper": 1, "Lower": 2, "Both": 3,
+                "InterleavedUpper": 4, "InterleavedLower": 5,
+            }[signal.field_mode],
+            "filter_type": {"ConstantK": 0, "Butterworth": 1}[signal.filter_type],
+            "vhs_chroma_vert_blend": signal.vertical_chroma_blend,
+        })
+
+    noise = artifacts.noise
+    if noise is not None:
+        result["snow_intensity"] = noise.snow_intensity
+        result["snow_anisotropy"] = noise.snow_anisotropy / 100
+        for key, block in (("composite", noise.composite), ("luma", noise.luma),
+                           ("chroma", noise.chroma)):
+            toggle = f"{key}_noise"
+            result[toggle] = block is not None
+            if block is not None:
+                result[f"{key}_noise_intensity"] = block.intensity / 100
+                result[f"{key}_noise_frequency"] = block.frequency
+                result[f"{key}_noise_detail"] = block.detail
+
+    ringing = artifacts.ringing
+    if ringing is not None:
+        result.update({
+            "ringing": True,
+            "ringing_frequency": ringing.frequency / 100,
+            "ringing_power": ringing.power,
+            "ringing_scale": ringing.intensity,
+        })
+    return result
+
+
+def validate_ntsc_geometry(width: int, height: int, artifacts: AnalogArtifacts) -> None:
+    """Reject dimensions that cannot satisfy the pinned processor's filter neighborhoods."""
+    if width < 4:
+        raise ProfileValidationError(
+            "camera_analog_artifacts requires a frame width of at least 4 pixels"
+        )
+    field_mode = artifacts.signal.field_mode if artifacts.signal is not None else "InterleavedUpper"
+    if field_mode == "Both":
+        field_rows = height
+    elif field_mode == "Upper":
+        field_rows = (height + 1) // 2
+    else:
+        # Lower, Alternating, and both interleaved modes must be safe for the smaller
+        # of the two alternating/parity fields.
+        field_rows = height // 2
+    if field_rows < 2:
+        raise ProfileValidationError(
+            "camera_analog_artifacts requires at least 2 rows in each processed field; "
+            f"{width}x{height} is too small for field_mode={field_mode}"
+        )
+
+
+def validate_ntsc_frame_indices(
+    start_index: int, frame_count: int, artifacts: AnalogArtifacts,
+) -> None:
+    """Keep every stage frame index representable by the pinned Rust field processor."""
+    if (not isinstance(start_index, int) or isinstance(start_index, bool) or start_index < 0
+            or not isinstance(frame_count, int) or isinstance(frame_count, bool) or frame_count < 1):
+        raise ProfileValidationError("ntsc-pipe frame range must use a nonnegative start and positive count")
+    rust_usize_max = (1 << (struct.calcsize("P") * 8)) - 1
+    last_index = start_index + frame_count - 1
+    if last_index > rust_usize_max:
+        raise ProfileValidationError("ntsc-pipe frame index overflows usize")
+    signal = artifacts.signal
+    field_mode = signal.field_mode if signal is not None else "InterleavedUpper"
+    if field_mode in {"InterleavedUpper", "InterleavedLower"} and last_index > (rust_usize_max - 1) // 2:
+        raise ProfileValidationError("interleaved field frame index overflows usize")
 
 
 def _finite(value: object, name: str) -> float:
@@ -214,6 +441,13 @@ def _validate_stages(stages: tuple[PostStage, ...]) -> None:
         names.add(stage.name)
         if stage.filter not in _FILTER_PARAMS:
             raise ProfileValidationError(f"unsupported FFmpeg filter {stage.filter!r}")
+        if stage.filter == "camera_analog_artifacts" and (
+            stage.name != "camera_analog_artifacts" or stage.params
+            or stage.seed_source is not None or stage.composite_stage is not None
+        ):
+            raise ProfileValidationError(
+                "camera_analog_artifacts must be the parameter-free external stage marker"
+            )
         by_filter.setdefault(stage.filter, []).append(stage)
         unknown = set(stage.params) - _FILTER_PARAMS[stage.filter]
         if unknown:
@@ -376,16 +610,52 @@ def validate_profile(
     """Validate profile fields against a probed 60 fps master and its schedule."""
     try:
         profile = PostProfileSpec.model_validate(profile.model_dump(mode="python"))
-        camera = CameraProfile.model_validate(camera.model_dump(mode="python"))
+        camera_context = None
+        if camera.analog_artifacts.legacy_flat_values is not None:
+            camera_context = {
+                "legacy_camera_profile_schema": CAMERA_PROFILE_LEGACY_ANALOG_SCHEMA_VERSION,
+            }
+        camera = CameraProfile.model_validate(
+            camera.model_dump(mode="python"), context=camera_context,
+        )
     except (ValidationError, AttributeError, TypeError) as exc:
         raise ProfileValidationError(f"invalid profile or camera profile: {exc}") from exc
     if not _SEMVER.fullmatch(profile.identity.semver):
         raise ProfileValidationError("profile semver must be MAJOR.MINOR.PATCH")
     if not isinstance(master_frames, int) or isinstance(master_frames, bool) or master_frames < 1:
         raise ProfileValidationError("master_frames must be a positive integer")
-    if camera.analog_artifacts:
-        raise ProfileValidationError("analog_artifacts requires the ntscrs stage and is not available yet")
+    if camera.analog_artifacts.legacy_flat_values is not None:
+        raise ProfileValidationError(
+            "legacy schema-3 analog_artifacts cannot be processed; replace them with typed settings"
+        )
+    camera_analog = camera.analog_artifacts
+    camera_effects = camera_analog.model_copy(update={"ntsc_pipe_sha256": None})
+    if profile.analog_artifacts != camera_effects:
+        raise ProfileValidationError(
+            "derived PostProfileSpec.analog_artifacts must match CameraProfile.analog_artifacts effect controls"
+        )
     _validate_stages(tuple(profile.identity.stages))
+    analog_stages = [
+        stage for stage in profile.identity.stages
+        if stage.filter == "camera_analog_artifacts"
+    ]
+    if profile.analog_artifacts.active:
+        camera_pin = camera_analog.ntsc_pipe_sha256
+        if camera_pin is not None and profile.identity.pinned_binaries.get("ntsc-pipe") != camera_pin:
+            raise ProfileValidationError(
+                "derived PostProfile pinned_binaries['ntsc-pipe'] must match "
+                "CameraProfile.analog_artifacts.ntsc_pipe_sha256"
+            )
+        if len(analog_stages) != 1 or analog_stages[0].name != "camera_analog_artifacts":
+            raise ProfileValidationError(
+                "active CameraProfile.analog_artifacts requires exactly one camera_analog_artifacts stage marker"
+            )
+        if sum(stage.filter == "setsar" for stage in profile.identity.stages) > 1:
+            raise ProfileValidationError("the analog consumer supports at most one explicit setsar stage")
+    elif analog_stages:
+        raise ProfileValidationError(
+            "camera_analog_artifacts stage marker requires active CameraProfile.analog_artifacts settings"
+        )
 
     def require_camera_stage_in_recording(stage: PostStage, field_name: str) -> None:
         if stage.composite_stage not in (None, "in_recording"):
@@ -676,7 +946,8 @@ def validate_profile(
     order = {
         "scale": 0, "fps": 1, "select": 2, "loop": 3, "drawtext": 5,
         "colortemperature": 7, "colorchannelmixer": 8, "eq": 9,
-        "gblur": 10, "noise": 11, "unsharp": 12, "setsar": 13,
+        "gblur": 10, "noise": 11, "unsharp": 12,
+        "camera_analog_artifacts": 13, "setsar": 14,
     }
     ranks = [
         4 if stage.filter == "setpts" and stage.params.get("from_schedule") == "clock"
@@ -950,14 +1221,17 @@ def _ffmpeg_number(value: int | float) -> str:
     return format(value, ".12g")
 
 
-def build_filter_graph(
+def _build_filter_graph_slice(
     profile: ValidatedPostProfile,
     *,
     shot_id: str,
     degrade_seed: int,
     font_path: str | None = None,
+    stage_start: int,
+    stage_stop: int,
+    final_fps: bool,
+    final_sar: bool,
 ) -> str:
-    """Build the deterministic filter graph, preserving spike 01 stage semantics."""
     if degrade_seed < 0:
         raise ProfileValidationError("degrade_seed must be nonnegative")
     if font_path is not None and (
@@ -979,11 +1253,25 @@ def build_filter_graph(
         index for index, stage in enumerate(stages)
         if index > last_rgb_stage and stage.filter in {"eq", "gblur", "noise", "unsharp"}
     ]
-    format_index = yuv_stage_indexes[0] if rgb_stage_indexes and yuv_stage_indexes else None
+    pixel_format = profile.profile.encode.pix_fmt
+    # The RGB24 tape input can pull upstream filters into planar RGB. Component
+    # noise and chroma blur need the same YUV planes they use in the camera chain.
+    force_yuv_before_tape = profile.profile.analog_artifacts.active and pixel_format.startswith("yuv")
+    format_index = (
+        yuv_stage_indexes[0]
+        if yuv_stage_indexes and (rgb_stage_indexes or force_yuv_before_tape)
+        else None
+    )
     for index, stage in enumerate(stages):
+        if index < stage_start or index >= stage_stop:
+            continue
         if format_index is not None and index == format_index:
-            parts.append(f"format=pix_fmts={profile.profile.encode.pix_fmt}")
+            parts.append(f"format=pix_fmts={pixel_format}")
         name, f, p = stage.name, stage.filter, stage.params
+        if f == "camera_analog_artifacts":
+            raise ProfileValidationError(
+                "camera_analog_artifacts is an external stage marker and cannot be emitted as an FFmpeg filter"
+            )
         # FR-21 declares which side of degradation an overlay sits on. A stage marked
         # `on_playback` is composited by the delivery render (adapters/export/CONTRACT.md)
         # and must not be burned into the recording, because anything burned in before
@@ -1103,14 +1391,86 @@ def build_filter_graph(
             parts.append(f"setsar={str(p.get('sar', profile.profile.sample_aspect_ratio)).replace(':', '/')}")
         else:  # validated against the closed map above
             raise ProfileValidationError(f"unsupported FFmpeg filter {f!r}")
-    if any(stage.filter == "select" and "pattern" in stage.params for stage in stages):
+    selected_stages = stages[stage_start:stage_stop]
+    if final_fps and any(stage.filter == "select" and "pattern" in stage.params for stage in selected_stages):
         # select preserves source-frame durations. The final selected frame can
         # remain 1/source_fps long even after setpts gives it the correct output
         # PTS; a final fps pass restores the uniform duration without changing count.
         parts.append(f"fps={profile.profile.output_fps}")
-    if not any(stage.filter == "setsar" for stage in stages) and profile.profile.sample_aspect_ratio not in ("1/1", "1:1"):
+    if (final_sar and not any(stage.filter == "setsar" for stage in stages)
+            and profile.profile.sample_aspect_ratio not in ("1/1", "1:1")):
         parts.append(f"setsar={profile.profile.sample_aspect_ratio.replace(':', '/')}")
     return ",".join(parts)
+
+
+def build_filter_graph(
+    profile: ValidatedPostProfile,
+    *,
+    shot_id: str,
+    degrade_seed: int,
+    font_path: str | None = None,
+) -> str:
+    """Build the deterministic single-process graph for profiles without NTSC tape."""
+    stages = profile.profile.identity.stages
+    if profile.profile.analog_artifacts.active:
+        raise ProfileValidationError(
+            "active analog_artifacts requires build_filter_graph_parts and the ntsc-pipe process"
+        )
+    return _build_filter_graph_slice(
+        profile,
+        shot_id=shot_id,
+        degrade_seed=degrade_seed,
+        font_path=font_path,
+        stage_start=0,
+        stage_stop=len(stages),
+        final_fps=True,
+        final_sar=True,
+    )
+
+
+def build_filter_graph_parts(
+    profile: ValidatedPostProfile,
+    *,
+    shot_id: str,
+    degrade_seed: int,
+    font_path: str | None = None,
+) -> tuple[str, str]:
+    """Split FFmpeg work around the typed, dimension-preserving external NTSC stage."""
+    stages = profile.profile.identity.stages
+    marker_indexes = [
+        index for index, stage in enumerate(stages)
+        if stage.filter == "camera_analog_artifacts"
+    ]
+    if not profile.profile.analog_artifacts.active or len(marker_indexes) != 1:
+        raise ProfileValidationError(
+            "build_filter_graph_parts requires one active camera_analog_artifacts stage marker"
+        )
+    marker_index = marker_indexes[0]
+    prefix = _build_filter_graph_slice(
+        profile,
+        shot_id=shot_id,
+        degrade_seed=degrade_seed,
+        font_path=font_path,
+        stage_start=0,
+        stage_stop=marker_index,
+        final_fps=True,
+        final_sar=False,
+    )
+    suffix = _build_filter_graph_slice(
+        profile,
+        shot_id=shot_id,
+        degrade_seed=degrade_seed,
+        font_path=font_path,
+        stage_start=marker_index + 1,
+        stage_stop=len(stages),
+        final_fps=False,
+        final_sar=False,
+    )
+    if not any(stage.filter == "setsar" for stage in stages):
+        sample_aspect_ratio = profile.profile.sample_aspect_ratio.replace(":", "/")
+        suffix = f"{suffix}," if suffix else ""
+        suffix += f"setsar={sample_aspect_ratio}"
+    return prefix, suffix
 
 
 def camera_profile_impact(before: CameraProfile, after: CameraProfile,

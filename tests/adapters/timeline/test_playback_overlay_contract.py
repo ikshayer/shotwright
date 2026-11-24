@@ -418,7 +418,12 @@ def test_r1_the_clock_is_in_the_cut_at_cut_resolution_and_not_in_the_degraded_ou
                      overlay=_overlay("on_playback", text="CAM 7", fontsize=16, x=8, y=8))
     studio = _build_studio(tmp_path / "p", cut_resolution=cut_size, font=MONO.read_bytes(),
                            shots=[_ShotSpec("s1", camera)])
-    receipt = _assemble(studio)
+    spy = _SpyPopen()
+    receipt = _assemble(studio, popen=spy)
+
+    [encode_argv] = [argv for argv in spy.argvs if "-filter_complex" in argv]
+    x264_params_index = encode_argv.index("-x264-params")
+    assert encode_argv[x264_params_index + 1] == "mbtree=0"
 
     assert tuple(receipt.storage_resolution) == cut_size
     degraded = _degraded_frames(studio, "s1", degrade_size)

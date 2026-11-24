@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
+from uuid import uuid4
 
 from orchestrator.domain.base import FramingStatus, ShotStatus
 from orchestrator.domain.entities import (
@@ -18,6 +20,7 @@ from orchestrator.service.dependencies import (
     revise_location,
     revise_script,
     revise_shot,
+    validated_cascades,
 )
 from orchestrator.store.json_store import ProjectStore
 
@@ -59,6 +62,58 @@ def test_post_only_profile_change_invalidates_nothing(tmp_path):
 
     assert changed == ()
     assert store.load(Shot, "s1", episode_id="ep1").status is ShotStatus.APPROVED
+
+
+def test_schema3_camera_cascade_payloads_validate_and_allow_another_revision(tmp_path):
+    """Schema-3 empty and flat analog payloads retain their historical comparison form."""
+    for legacy_analog in ({}, {"roll": 0.1}):
+        project_root = tmp_path / ("empty" if not legacy_analog else "flat")
+        project_root.mkdir()
+        store = ProjectStore(ProjectRoot(project_root))
+        add_episode(store)
+        initial = CameraProfile(camera_id="cam1", profile_name="CCTV")
+        store.create(initial)
+        first_successor = initial.model_copy(
+            update={**initial.next_version(), "fps": 15.0},
+        )
+        store.revise(first_successor, expected_version=1)
+
+        def schema3_payload(profile: CameraProfile, mutation: int, predecessor: int) -> dict:
+            payload = profile.model_dump(mode="json")
+            payload["schema_version"] = 3
+            payload["analog_artifacts"] = dict(legacy_analog)
+            payload["_mutation_token"] = mutation
+            payload["_predecessor_token"] = predecessor
+            path = f"camera_profiles/cam1/v{profile.version:04d}.json"
+            store._root.write_text(path, json.dumps(payload, sort_keys=True))
+            payload.pop("_mutation_token")
+            payload.pop("_predecessor_token")
+            return payload
+
+        before_payload = schema3_payload(initial, 1, 0)
+        after_payload = schema3_payload(first_successor, 2, 1)
+        cascade_id = uuid4().hex
+        store.record_cascade({
+            "cascade_id": cascade_id,
+            "entity_type": "CameraProfile",
+            "before": before_payload,
+            "after": after_payload,
+            "expected_version": 1,
+            "episode_ids": [],
+            "affected": [],
+        })
+        store.complete_cascade(cascade_id)
+
+        assert len(validated_cascades(store)) == 1
+        current = store.load(CameraProfile, "cam1")
+        assert current.analog_artifacts.legacy_flat_values == (legacy_analog or None)
+        second_successor = current.model_copy(
+            update={**current.next_version(), "fps": 20.0},
+        )
+
+        assert revise_camera_profile(store, second_successor, expected_version=2) == ()
+        assert store.load(CameraProfile, "cam1").version == 3
+        assert len(validated_cascades(store)) == 2
 
 
 def test_rebuild_profile_stales_only_approved_shots_on_that_camera(tmp_path):
